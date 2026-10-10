@@ -49,11 +49,11 @@ invent a test command.
   (the app rewrites it atomically); **PostgreSQL** (`ALERTFLOW_DATABASE_URL`) holds users, sessions, checks history,
   TLS snapshots, incidents + comments, and integrations + notification log. YAML stays in the config dir
   (`/config` in Docker; `ALERTFLOW_CONFIG_DIR` / `--config-dir`, default `./config`). Hand-editable
-  config → YAML; history, high-volume and **secrets** → PostgreSQL. Switching config dir does not switch databases.
+  config → YAML; history, high-volume and **secrets** → PostgreSQL. A finished check and its `outbox_events` row commit in one transaction; incident updates still run after that commit, in process. Switching config dir does not switch databases. Nothing publishes the outbox yet.
 - **Backend packages** (`backend/internal/`): `state` (tiny `state.json` outside the config dir, recording
   which config dir is active — lets a custom config-dir setting survive restarts), `config` (yaml load/save/validate), `db` (pgx `database/sql`
   — keep `CGO_ENABLED=0`; schema via **goose** PostgreSQL migrations in `db/migrations/*.sql`, embedded and
-  run on `Open`), `auth` (bcrypt + session tokens; cookies are set by the api layer), `monitor` (HTTP
+  run on `Open`), `event` (`monitor.check.completed` payload), `auth` (bcrypt + session tokens; cookies are set by the api layer), `monitor` (HTTP
   checker + goroutine-per-service ticker scheduler; `Sync` reconciles on config change; also reads the
   TLS cert off HTTPS responses and feeds status transitions to `incident`), `incident` (opens/resolves
   outage incidents from online↔offline transitions; imports `db`+`notify`, never `monitor`, to avoid a

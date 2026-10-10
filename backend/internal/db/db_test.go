@@ -15,7 +15,7 @@ func TestMigrationsCreateTables(t *testing.T) {
 	want := []string{
 		"users", "sessions", "checks",
 		"service_tls", "incidents", "incident_comments",
-		"integrations", "notification_log",
+		"integrations", "notification_log", "outbox_events",
 	}
 	for _, table := range want {
 		var name string

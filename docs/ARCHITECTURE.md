@@ -18,7 +18,7 @@ common design mistake here.
 | Store | Path | Holds | Written by |
 | --- | --- | --- | --- |
 | `config.yaml` | `<config-dir>/config.yaml` | services, app settings, **widget mode + grid layout** | `config.Save` (atomic temp-file + rename) |
-| PostgreSQL | `ALERTFLOW_DATABASE_URL` | users, sessions, checks history, `service_tls`, **incidents + comments**, **integrations + notification log** | `internal/db/*.go` |
+| PostgreSQL | `ALERTFLOW_DATABASE_URL` | users, sessions, checks history, `outbox_events`, `service_tls`, **incidents + comments**, **integrations + notification log** | `internal/db/*.go` |
 | images | `<config-dir>/images/<id>.webp` | service icons | `internal/image` |
 | `state.json` | outside the config dir | which config dir is active | `internal/state` |
 
@@ -77,10 +77,12 @@ One `check()` does, in order:
 3. `runCycle(...)` — the retry ladder (below). One cycle, one row.
 4. **Bail if the worker was cancelled mid-flight** (`parent.Err() != nil`) —
    otherwise a config edit or shutdown would record a bogus `offline`.
-5. `InsertCheck(...)` — append to history, stamped with the cycle's **start**.
+5. `RecordCheckAndOutbox(...)` — in one transaction, append the check (stamped with the cycle's **start**) and an unpublished `monitor.check.completed` outbox row whose payload carries that check id. If this fails, stop: do not write TLS, do not move `lastStatus`, and do not open or resolve an incident.
 6. `storeTLS(...)` — upsert the cert snapshot (HTTPS only, offline cycles only).
 7. Update `w.lastStatus`.
 8. `incident.OnTransition(prev, Outcome{...}, ...)`.
+
+The check row and the outbox row commit together. Incident changes and notification sends stay outside that transaction: `OnTransition` runs only after the commit, then starts a goroutine to deliver. A crash after commit and before that send can drop the notification; the outbox row remains, but nothing in this process publishes it. `published_at` stays NULL. Claiming an outbox row uses `FOR UPDATE SKIP LOCKED` on `outbox_events` only. That is not a lock on a service, and `runMu` is not a lock across processes.
 
 ### The retry ladder
 
@@ -117,10 +119,13 @@ when the first attempt failed, and it keeps rows interval-aligned, which is what
 
 Concurrency: `worker.svc` and `worker.lastStatus` are guarded by `worker.mu`,
 because the ticker goroutine, `Sync` and a manual `CheckNow` can all touch them.
-`worker.runMu` serialises whole cycles — a ladder widens the ticker/`CheckNow`
-overlap enough that the slower one could otherwise act on a stale `prev` and open
-an incident for a service the other just found healthy. The workers *map* is
-guarded by `Scheduler.mu`.
+`worker.runMu` serialises whole cycles on that worker — a ladder widens the
+ticker/`CheckNow` overlap enough that the slower one could otherwise act on a
+stale `prev`. `CheckNow` uses this lock when the service already has a worker.
+If it does not, `CheckNow` builds a temporary worker; there is no ticker to
+overlap. The workers map is guarded by `Scheduler.mu`. One ongoing incident per
+service is still the partial unique index, not `runMu`. `lastStatus` moves only
+after the check transaction commits.
 
 ## 4. Incident lifecycle
 

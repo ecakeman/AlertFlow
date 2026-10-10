@@ -12,6 +12,7 @@ import (
 
 	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/db"
+	"github.com/ecakeman/alertflow/internal/event"
 	"github.com/ecakeman/alertflow/internal/incident"
 	"github.com/ecakeman/alertflow/internal/notify"
 )
@@ -153,9 +154,23 @@ func (s *Scheduler) check(parent context.Context, w *worker) {
 	if parent.Err() != nil {
 		return
 	}
-	now := start.Unix()
-	if err := s.db.InsertCheck(svc.ID, now, cyc.Status, cyc.LatencyMs, cyc.StatusCode, cyc.Error, cyc.Attempts); err != nil {
+	s.finishCycle(parent, w, svc, prev, cyc, start.Unix())
+}
+
+// finishCycle persists the cycle and, only after that transaction commits,
+// advances in-memory status and runs incident detection. A database error is
+// not a monitoring result: lastStatus stays where it was, and no notification
+// is sent for a check that was not stored. HTTP failures are already classified
+// inside cyc (online, warning, or offline) before this runs.
+func (s *Scheduler) finishCycle(parent context.Context, w *worker, svc config.Service, prev string, cyc cycleResult, now int64) {
+	ev, err := event.NewCheckCompleted(svc.ID, svc.Name, svc.URL, now, cyc.Status, cyc.LatencyMs, cyc.StatusCode, cyc.Error, cyc.Attempts)
+	if err != nil {
+		slog.Error("monitor: build check event failed", "service", svc.ID, "error", err)
+		return
+	}
+	if _, err := s.db.RecordCheckAndOutbox(ev); err != nil {
 		slog.Error("monitor: store check failed", "service", svc.ID, "error", err)
+		return
 	}
 	s.storeTLS(svc, cyc.Result, now)
 
