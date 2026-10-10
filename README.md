@@ -11,9 +11,10 @@ file up before upgrading. Service definitions still live in `config.yaml`.
 
 A modern, minimal dashboard for keeping an eye on your web services. Add a URL,
 watch its status, response time and uptime in real time, and rearrange
-everything with drag‑and‑drop. One tiny container, one config file, zero fuss.
+everything with drag‑and‑drop. The app is one Go binary; a full deployment also
+runs PostgreSQL 16.
 
-[![Docker image](https://img.shields.io/badge/ghcr.io-antlko%2Fupmonitor-2496ED?logo=docker&logoColor=white)](https://github.com/antlko/upmonitor/pkgs/container/upmonitor)
+[![Repository](https://img.shields.io/badge/github-ecakeman%2FAlertFlow-181717?logo=github)](https://github.com/ecakeman/AlertFlow)
 [![Made with Go + Vue](https://img.shields.io/badge/stack-Go%20%2B%20Vue%203-00ADD8?logo=go&logoColor=white)](#how-it-works)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -28,11 +29,12 @@ everything with drag‑and‑drop. One tiny container, one config file, zero fus
 
 ---
 
-## Why upmonitor?
+## Why AlertFlow?
 
-Most self‑hosted monitors are powerful but look like enterprise control panels.
-upmonitor is deliberately small and good‑looking — think Linear/Vercel, not a
-grafana clone — while still doing the real work:
+AlertFlow is the upmonitor dashboard with a PostgreSQL runtime. The MIT license
+and Anatol Kozhukhar's copyright stay in [`LICENSE`](LICENSE). It is small and
+good‑looking — think Linear/Vercel, not a grafana clone — while still doing the
+real work:
 
 - 🟢 **Live status** — HTTP health checks with online / offline / warning /
   unknown states, colored borders and a pulsing indicator.
@@ -73,51 +75,28 @@ grafana clone — while still doing the real work:
 
 ## Quick start
 
-upmonitor ships as a **single container**. Pick whichever route you like — each
-block is copy‑paste ready.
-
-### Option A — `docker run` (one line)
+Use Docker Compose. It starts two services: PostgreSQL 16 stores users,
+sessions, checks, incidents and integrations; the AlertFlow container serves
+the API and the embedded UI. The app connects with `ALERTFLOW_DATABASE_URL`
+from `.env`. No published image is required — Compose builds `alertflow:local`
+from this repository.
 
 ```bash
-docker run -d \
-  --name upmonitor \
-  -p 8080:8080 \
-  -v upmonitor-config:/config \
-  --restart unless-stopped \
-  ghcr.io/antlko/upmonitor:latest
+cp .env.example .env
+docker compose up -d --build
 ```
 
 Open **http://localhost:8080** and create your admin account.
 
-### Option B — Docker Compose
+The upstream `ghcr.io/antlko/upmonitor` image is a SQLite app. It is not a
+deployment of this repository.
 
-```bash
-cp .env.example .env
-docker compose up -d --build
-```
+### Portainer
 
-This starts PostgreSQL 16 and the AlertFlow server. The app reads
-`ALERTFLOW_DATABASE_URL`. Open **http://localhost:8080**.
-
-### Option C — Portainer (stack)
-
-1. **Stacks → Add stack**, give it a name (e.g. `upmonitor`).
-2. Paste the Compose file from Option B into the **Web editor**.
-3. Click **Deploy the stack**.
+1. **Stacks → Add stack**, and give it a name (for example `alertflow`).
+2. Paste the contents of this repository's [`docker-compose.yml`](docker-compose.yml) into the **Web editor**, and set `POSTGRES_PASSWORD` the same way `.env.example` does.
+3. Click **Deploy the stack**. Portainer builds the app image; it does not pull a published AlertFlow image.
 4. Browse to `http://<your-server>:8080` and finish setup.
-
-That's it — nothing to build.
-
-### Option D — Build from source
-
-No published image needed; build it yourself:
-
-```bash
-git clone git@github.com:ecakeman/AlertFlow.git
-cd AlertFlow
-cp .env.example .env
-docker compose up -d --build
-```
 
 ---
 
@@ -154,7 +133,7 @@ imported.
 
 | What      | Value                     | Notes                                  |
 | --------- | ------------------------- | -------------------------------------- |
-| HTTP port | `8080`                    | change the left side of `-p 8080:8080` |
+| HTTP port | `8080`                    | host side of `8080:8080` in `docker-compose.yml` |
 | Config    | volume mounted at `/config` | holds YAML, images and backups |
 | Database  | PostgreSQL service          | users, history, incidents, integrations |
 
@@ -166,6 +145,10 @@ imported.
 | `ALERTFLOW_ADDR`         | `:8080`   | Listen address (`host:port`).                |
 | `ALERTFLOW_LOG_LEVEL`    | `info`    | Log verbosity: `debug`, `info`, `warn`, `error`. |
 | `ALERTFLOW_DATABASE_URL` | —         | PostgreSQL DSN. Required.                    |
+| `ALERTFLOW_DB_MAX_OPEN`  | `10`      | Maximum open database connections.           |
+| `ALERTFLOW_DB_MAX_IDLE`  | `5`       | Maximum idle database connections.           |
+| `ALERTFLOW_DB_CONN_MAX_LIFETIME` | `30m` | Maximum lifetime of a connection.       |
+| `ALERTFLOW_DB_CONN_MAX_IDLE_TIME` | `5m` | Maximum time a connection may stay idle. |
 
 Command‑line flags mirror these: `--config-dir` and `--addr`.
 
@@ -200,8 +183,10 @@ One static Go binary embeds the built Vue app and serves both the API and the UI
 - **Config** — `config.yaml` is the source of truth for services and settings;
   users, sessions and metrics live in PostgreSQL.
 
-The result is tiny, fast and easy to run on anything from a NAS to a Raspberry Pi
-(images are built for both `amd64` and `arm64`).
+The application itself is one static binary. A running stack also needs
+PostgreSQL. The image-publish workflow is set up to build `linux/amd64` and
+`linux/arm64`, but this repository has not published an image, and the local
+`docker build` in phase 1 did not finish.
 
 ## Local development
 

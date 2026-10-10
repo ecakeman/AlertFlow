@@ -1,9 +1,9 @@
 # Architecture & behaviour
 
-How upmonitor actually behaves at runtime: what owns which data, how a check
-becomes an incident, how the dashboard grid is stored, how navigation and roles
-work, and which forms exist. Written for someone (or some agent) about to change
-this code.
+How AlertFlow behaves at runtime. It is based on upmonitor. This page covers
+what owns which data, how a check becomes an incident, how the dashboard grid
+is stored, how navigation and roles work, and which forms exist. Written for
+someone (or some agent) about to change this code.
 
 Companion docs: [CONFIGURATION.md](CONFIGURATION.md) (every `config.yaml` field),
 [API.md](API.md) (every endpoint), [DEVELOPMENT.md](DEVELOPMENT.md) (how to run it).
@@ -165,7 +165,9 @@ warning notification. The UI is unaffected (status comes from the latest row).
 
 ### The invariant: one open incident per service
 
-Enforced in the schema, not in Go — `migrations/00003_incidents.sql`:
+Enforced in the schema, not in Go. Upstream SQLite defined this in
+`00003_incidents.sql`. The current PostgreSQL database is created by one
+migration, `migrations/00001_init.sql`:
 
 ```sql
 CREATE UNIQUE INDEX idx_incidents_one_ongoing ON incidents (service_id) WHERE status = 'ongoing';
@@ -244,8 +246,10 @@ per integration → calls its `Sender` → writes a `notification_log` row for
 
 Warnings are opt-in per channel and off by default: they are frequent by design,
 and a channel that pages a human wants outages only. A warning has no incident,
-so its log row carries `incident_id = NULL` — which is why migration 00005 had to
-rebuild `notification_log` (SQLite can alter neither a `CHECK` nor a `NOT NULL`).
+so its log row carries `incident_id = NULL`. Upstream SQLite migration `00005`
+rebuilt `notification_log` because SQLite could not alter that `CHECK` or
+`NOT NULL`. The current PostgreSQL schema declares the nullable column and the
+`warning` event in `migrations/00001_init.sql`; it does not replay that rebuild.
 
 Senders live one-per-file (`telegram.go`, `slack.go`, `email.go`, `webhook.go`)
 and self-register via `init()` into the `senders` map. **To add a channel type:**

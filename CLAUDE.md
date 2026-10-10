@@ -4,11 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-**upmonitor** — "Simple self-hosted service monitoring." A full-stack app: a **Go backend**
-(`backend/`) serves a **Vue 3 SPA** (`web-ui/`) plus a JSON API and runs the monitoring worker. In
-production the built SPA is embedded into a single static Go binary (one Docker container). Users add
-web services, watch live status/response/uptime on a drag-and-drop dashboard, get incidents opened
-automatically on outages with notifications, and manage everything via `config.yaml`.
+**AlertFlow**, based on upmonitor. A **Go backend** (`backend/`) serves a **Vue 3 SPA**
+(`web-ui/`) plus a JSON API and runs the monitoring worker. The production binary embeds the built
+SPA. Compose runs that binary together with PostgreSQL 16: `config.yaml` is the source of service
+definitions and settings, and PostgreSQL (`ALERTFLOW_DATABASE_URL`) holds users, sessions, check
+history, TLS snapshots, incidents, comments, and integration data. Users add web services, watch live
+status/response/uptime on a drag-and-drop dashboard, and get incidents opened automatically on outages.
 
 ## Read this first
 

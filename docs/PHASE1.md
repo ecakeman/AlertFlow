@@ -53,6 +53,8 @@ cd web-ui && npm run build
 
 退出码 0。`vue-tsc --build` 与 `vite build` 完成，约 2.11s。
 
+提交 `aad4bae` 的 GitHub Actions [`Test` 工作流](https://github.com/ecakeman/AlertFlow/actions/runs/38060186392) 已完成。其中 `backend` 和 `web` 两个任务的结论都是 success。`backend` 是在 PostgreSQL 服务上跑 `go test ./...`，`web` 是 `npm ci && npm run build`。这次通过不等于镜像构建通过：该工作流不执行 `docker build`。
+
 本地 `docker compose up -d postgres` 使用已有的 `postgres:16-alpine`。空库 Goose 版本 1 已应用。浏览器走通：创建管理员、添加服务、写入一条 online 检查、创建并恢复 Incident、发表评论、打开集成配置页。
 
 ```text
@@ -72,4 +74,6 @@ docker build -t alertflow:phase1 .
 - Docker 镜像本阶段没有构建通过。
 - 通知仍然是检查线程里的 goroutine，没有投递队列。
 
-阶段 2 可以依赖：同一条 PostgreSQL 连接上的事务、`INSERT ... RETURNING`、部分唯一索引，以及按 `service_id` 锁定行。这些已经可用。本阶段没有加 Outbox、Kafka 或 Agent。
+阶段 2 现在可以依赖这些已经实现的能力：PostgreSQL 事务、`INSERT ... RETURNING`、Incident 进行中状态的部分唯一索引、唯一约束错误码 `23505` 的识别，以及归档导入事务里对 Identity 序列的重置。
+
+当前代码没有 `SELECT ... FOR UPDATE` 或 `SELECT ... FOR SHARE`。服务定义仍在 `config.yaml`，不能当成数据库里已经可以按 `service_id` 锁定的服务行。阶段 2 如果需要并发协调，要按当时的数据模型和事务边界决定锁什么，不能假定现在已经有按服务锁行的实现。本阶段没有加 Outbox、Kafka 或 Agent。
