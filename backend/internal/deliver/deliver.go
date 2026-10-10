@@ -6,11 +6,14 @@ package deliver
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
+	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,8 +24,9 @@ import (
 const (
 	// MaxAttempts is how many sends a task gets before it becomes dead.
 	MaxAttempts = 5
-	// LeaseSeconds matches notify.SendTimeout. There is no lease renewal.
-	LeaseSeconds = 15
+	// LeaseSeconds is longer than one send so the worker can still record the
+	// outcome after SendTimeout. There is no lease renewal.
+	LeaseSeconds = 45
 )
 
 // Worker claims due delivery tasks and sends each one outside a database transaction.
@@ -33,12 +37,21 @@ type Worker struct {
 	Now func() int64
 }
 
-// New builds a worker. An empty owner is unique to this process.
+// New builds a worker. An empty owner is generated once and kept for the
+// process lifetime. Callers can pass an owner to make tests deterministic.
 func New(database *db.DB, owner string) *Worker {
 	if owner == "" {
-		owner = fmt.Sprintf("delivery-%d", os.Getpid())
+		owner = newOwner()
 	}
 	return &Worker{DB: database, Owner: owner}
+}
+
+func newOwner() string {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		panic(err)
+	}
+	return "delivery-" + hex.EncodeToString(buf[:])
 }
 
 func (w *Worker) now() int64 {
@@ -80,7 +93,7 @@ func (w *Worker) ProcessDue(ctx context.Context) (int, error) {
 			return n, err
 		}
 		now := w.now()
-		rows, err := w.DB.ClaimDeliveries(w.Owner, now, now+LeaseSeconds, 1)
+		rows, err := w.DB.ClaimDeliveries(w.Owner, now, now+LeaseSeconds, 1, MaxAttempts)
 		if err != nil {
 			return n, err
 		}
@@ -124,10 +137,11 @@ func (w *Worker) fail(row db.ClaimedDelivery, cause error, perm bool) error {
 		status = "dead"
 		next = now
 	}
-	if err := w.DB.FailDelivery(row.ID, w.Owner, now, status, cause.Error(), next); err != nil {
+	safe := redactError(cause, row.Config)
+	if err := w.DB.FailDelivery(row.ID, w.Owner, now, status, safe, next); err != nil {
 		return err
 	}
-	return cause
+	return errors.New(safe)
 }
 
 func messageFrom(raw json.RawMessage) (notify.Message, error) {
@@ -169,6 +183,77 @@ func permanent(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "is required") || strings.Contains(msg, "unsupported delivery event")
+}
+
+func redactError(cause error, config json.RawMessage) string {
+	text := cause.Error()
+	secrets := secretValues(config)
+	sort.Slice(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
+	for _, secret := range secrets {
+		if len(secret) < 4 {
+			continue
+		}
+		text = strings.ReplaceAll(text, secret, "[redacted]")
+	}
+	return text
+}
+
+func secretValues(config json.RawMessage) []string {
+	var root any
+	if err := json.Unmarshal(config, &root); err != nil {
+		return nil
+	}
+	var out []string
+	collectSecrets(root, "", false, &out)
+	return out
+}
+
+func collectSecrets(value any, key string, inHeaders bool, out *[]string) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for childKey, child := range typed {
+			collectSecrets(child, childKey, inHeaders || strings.EqualFold(childKey, "headers"), out)
+		}
+	case []any:
+		for _, child := range typed {
+			collectSecrets(child, key, inHeaders, out)
+		}
+	case string:
+		if inHeaders || secretKey(key) {
+			*out = append(*out, typed)
+			*out = append(*out, urlSecretParts(typed)...)
+		}
+	}
+}
+
+func secretKey(key string) bool {
+	switch strings.ToLower(key) {
+	case "url", "webhookurl", "bottoken", "password", "token", "secret", "authorization", "apikey":
+		return true
+	default:
+		return false
+	}
+}
+
+func urlSecretParts(raw string) []string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil
+	}
+	parts := strings.Split(parsed.EscapedPath(), "/")
+	if parsed.User != nil {
+		if name := parsed.User.Username(); name != "" {
+			parts = append(parts, name)
+		}
+		if password, ok := parsed.User.Password(); ok {
+			parts = append(parts, password)
+		}
+	}
+	for key, values := range parsed.Query() {
+		parts = append(parts, key)
+		parts = append(parts, values...)
+	}
+	return parts
 }
 
 func backoff(attempt int) int64 {

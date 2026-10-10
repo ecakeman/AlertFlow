@@ -42,10 +42,14 @@ type DeliveryView struct {
 	SentAt          *int64
 }
 
+const exhaustedReason = "attempt limit reached before the delivery finished"
+
 // ClaimDeliveries leases up to limit due tasks. Disabled integrations are left
 // alone so they can be sent after the channel is enabled again. Expired running
-// leases are claimable.
-func (db *DB) ClaimDeliveries(owner string, now, leaseUntil int64, limit int) ([]ClaimedDelivery, error) {
+// leases are claimable until maxAttempts. A task already at that limit is marked
+// dead in this transaction and is not claimed again. That transition writes no
+// notification_log row.
+func (db *DB) ClaimDeliveries(owner string, now, leaseUntil int64, limit, maxAttempts int) ([]ClaimedDelivery, error) {
 	if limit < 1 {
 		limit = 1
 	}
@@ -54,12 +58,34 @@ func (db *DB) ClaimDeliveries(owner string, now, leaseUntil int64, limit int) ([
 		return nil, err
 	}
 	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`UPDATE notification_deliveries AS d
+		 SET status = 'dead',
+		     lease_owner = NULL,
+		     lease_until = NULL,
+		     last_error = $1,
+		     updated_at = $2
+		 FROM (
+		   SELECT id
+		   FROM notification_deliveries
+		   WHERE (
+		       (status = 'running' AND lease_until <= $2 AND attempt_count >= $3)
+		       OR (status IN ('pending', 'retry_wait') AND next_attempt_at <= $2 AND attempt_count >= $3)
+		     )
+		   FOR UPDATE SKIP LOCKED
+		 ) AS picked
+		 WHERE d.id = picked.id`,
+		exhaustedReason, now, maxAttempts,
+	); err != nil {
+		return nil, err
+	}
 	rows, err := tx.Query(
 		`WITH picked AS (
 			SELECT d.id
 			FROM notification_deliveries d
 			JOIN integrations i ON i.id = d.integration_id
 			WHERE i.enabled
+			  AND d.attempt_count < $5
 			  AND (
 			    (d.status IN ('pending', 'retry_wait') AND d.next_attempt_at <= $3)
 			    OR (d.status = 'running' AND d.lease_until <= $3)
@@ -77,7 +103,7 @@ func (db *DB) ClaimDeliveries(owner string, now, leaseUntil int64, limit int) ([
 		FROM picked
 		WHERE d.id = picked.id
 		RETURNING d.id, d.event_id, d.incident_id, d.integration_id, d.event_type, d.payload, d.attempt_count`,
-		owner, leaseUntil, now, limit,
+		owner, leaseUntil, now, limit, maxAttempts,
 	)
 	if err != nil {
 		return nil, err
@@ -169,7 +195,7 @@ func (db *DB) finishDelivery(id int64, owner string, now int64, status, errMsg s
 		return err
 	}
 	var incidentID any
-	if incident.Valid {
+	if incident.Valid && eventType != "warning" {
 		incidentID = incident.Int64
 	}
 	if _, err := tx.Exec(

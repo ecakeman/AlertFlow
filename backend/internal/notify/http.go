@@ -25,10 +25,15 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("unexpected status %d: %s", e.Code, e.Body)
 }
 
-// Permanent reports a client error. The channel configuration will not succeed
-// by retrying the same request.
+// Permanent reports a client error that will not succeed by retrying the same
+// request. Timeouts and rate limits stay retryable.
 func (e *StatusError) Permanent() bool {
-	return e.Code >= 400 && e.Code < 500
+	switch e.Code {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+		return false
+	default:
+		return e.Code >= 400 && e.Code < 500
+	}
 }
 
 // postJSON POSTs a JSON body and treats any non-2xx response as an error.

@@ -2,9 +2,11 @@ package notify
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/smtp"
 	"strings"
 )
@@ -23,9 +25,9 @@ type emailSender struct{}
 func init() { register("email", emailSender{}) }
 
 // Send delivers via SMTP with STARTTLS/plain auth (v1 targets the common port
-// 587 pattern; implicit-TLS on port 465 is not supported). net/smtp has no
-// context support, so ctx is currently only honoured up to the dial.
-func (emailSender) Send(_ context.Context, raw json.RawMessage, msg Message) error {
+// 587 pattern; implicit-TLS on port 465 is not supported). The dial, greeting,
+// and later protocol steps all stop when ctx is cancelled or its deadline passes.
+func (emailSender) Send(ctx context.Context, raw json.RawMessage, msg Message) error {
 	var cfg emailConfig
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return err
@@ -41,8 +43,63 @@ func (emailSender) Send(_ context.Context, raw json.RawMessage, msg Message) err
 	if cfg.Username != "" {
 		auth = smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	addr := fmt.Sprintf("%s:%d", cfg.Host, port)
-	return smtp.SendMail(addr, auth, cfg.From, splitRecipients(cfg.To), buildMessage(cfg, msg))
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := conn.SetDeadline(deadline); err != nil {
+			return err
+		}
+	}
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
+
+	client, err := smtp.NewClient(conn, cfg.Host)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	if err := client.Hello("localhost"); err != nil {
+		return err
+	}
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		if err := client.StartTLS(&tls.Config{ServerName: cfg.Host}); err != nil {
+			return err
+		}
+	}
+	if auth != nil {
+		if ok, _ := client.Extension("AUTH"); !ok {
+			return errors.New("smtp: server doesn't support AUTH")
+		}
+		if err := client.Auth(auth); err != nil {
+			return err
+		}
+	}
+	if err := client.Mail(cfg.From); err != nil {
+		return err
+	}
+	for _, rcpt := range splitRecipients(cfg.To) {
+		if err := client.Rcpt(rcpt); err != nil {
+			return err
+		}
+	}
+	w, err := client.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(buildMessage(cfg, msg)); err != nil {
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	return client.Quit()
 }
 
 // buildMessage renders a minimal RFC 822 text/plain email (pure; unit-tested).

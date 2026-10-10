@@ -66,7 +66,7 @@ Notification channels. Fire on incident start and resolve only.
 | `PUT /api/integrations/{id}`         | admin | Update; blank/omitted secrets keep their stored value. `notifyWarnings` is a plain overwrite — always send it. |
 | `DELETE /api/integrations/{id}`      | admin | Delete. Its notification log and pending delivery tasks are removed. Removing a task is not a successful send. |
 | `POST /api/integrations/{id}/test`   | admin | Send one real test message. Always `200`; see below. It does not enqueue a delivery task. |
-| `GET /api/incidents/{id}/deliveries` | auth  | Delivery tasks for that incident: status, attempts, last error, next retry. No secrets. |
+| `GET /api/incidents/{id}/deliveries` | auth  | Delivery tasks for that incident: status, attempts, last error, next retry. The error text has channel secrets removed. |
 | `POST /api/deliveries/{id}/retry`    | admin | Queue a `dead` task again and reset its attempt count.   |
 
 `type` is `telegram` | `slack` | `email` | `webhook`. The `config` shape depends
