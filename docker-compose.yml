@@ -1,17 +1,38 @@
-# upmonitor — copy this file and run `docker compose up -d`,
-# or paste it into Portainer → Stacks → Add stack.
+# AlertFlow local stack. Copy .env.example to .env before starting.
+# PostgreSQL holds runtime data. Service definitions stay in the config volume.
 services:
-  upmonitor:
-    image: ghcr.io/antlko/upmonitor:latest
-    # To build from source instead of pulling the image, comment out `image:`
-    # above and uncomment the next line:
-    # build: .
-    container_name: upmonitor
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: alertflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-alertflow}
+      POSTGRES_DB: alertflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - alertflow-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alertflow -d alertflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  alertflow:
+    build: .
+    image: alertflow:local
     ports:
       - "8080:8080"
+    environment:
+      ALERTFLOW_DATABASE_URL: postgres://alertflow:${POSTGRES_PASSWORD:-alertflow}@postgres:5432/alertflow?sslmode=disable
+      ALERTFLOW_CONFIG_DIR: /config
+      ALERTFLOW_ADDR: :8080
     volumes:
-      - upmonitor-config:/config
+      - alertflow-config:/config
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
-  upmonitor-config:
+  alertflow-pg:
+  alertflow-config:

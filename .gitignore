@@ -8,7 +8,12 @@
 
 # --- Compiled binaries ---
 /upmonitor
+/alertflow
 backend/upmonitor
+backend/alertflow
+
+# Local env (see .env.example)
+.env
 
 # --- Embedded web build (generated; keep only the placeholder) ---
 backend/internal/web/dist/*

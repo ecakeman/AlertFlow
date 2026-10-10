@@ -65,7 +65,7 @@ func (db *DB) InsertCheck(serviceID string, ts int64, status string, latency, co
 		attempts = 1
 	}
 	_, err := db.Exec(
-		`INSERT INTO checks (service_id, ts, status, latency_ms, status_code, error, attempts) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO checks (service_id, ts, status, latency_ms, status_code, error, attempts) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		serviceID, ts, status, latency, code, errVal, attempts,
 	)
 	return err
@@ -80,8 +80,8 @@ func (db *DB) ListChecks(serviceID string, beforeID int64, limit int) ([]Check, 
 	rows, err := db.Query(`
 		SELECT id, ts, status, latency_ms, status_code, COALESCE(error, ''), attempts
 		FROM checks
-		WHERE service_id = ? AND (? = 0 OR id < ?)
-		ORDER BY id DESC LIMIT ?`, serviceID, beforeID, beforeID, limit)
+		WHERE service_id = $1 AND ($2 = 0 OR id < $3)
+		ORDER BY id DESC LIMIT $4`, serviceID, beforeID, beforeID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +136,7 @@ func (db *DB) MetricsForAll(since int64, histLimit int) (map[string]*ServiceMetr
 		       SUM(CASE WHEN status = 'offline' THEN 1 ELSE 0 END) AS errs,
 		       SUM(CASE WHEN status = 'warning' THEN 1 ELSE 0 END) AS warns,
 		       MAX(CASE WHEN status IN `+upStatuses+` THEN ts END) AS last_success
-		FROM checks WHERE ts >= ? GROUP BY service_id`, since)
+		FROM checks WHERE ts >= $1 GROUP BY service_id`, since)
 	if err != nil {
 		return nil, err
 	}
@@ -176,8 +176,8 @@ func (db *DB) MetricsForAll(since int64, histLimit int) (map[string]*ServiceMetr
 			SELECT service_id, status, latency_ms, ts,
 			       ROW_NUMBER() OVER (PARTITION BY service_id ORDER BY ts DESC) AS rn
 			FROM checks
-			WHERE ts >= ?
-		) WHERE rn <= ? ORDER BY service_id, ts ASC`, since, histLimit)
+			WHERE ts >= $1
+		) recent WHERE rn <= $2 ORDER BY service_id, ts ASC`, since, histLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -215,11 +215,11 @@ func (db *DB) SeriesFor(serviceID string, since, now, bucketSeconds int64) ([]Se
 		bucketSeconds = 1
 	}
 	rows, err := db.Query(`
-		SELECT (ts / ?) * ? AS b,
-		       AVG(CASE WHEN status IN `+upStatuses+` THEN latency_ms END) AS avg_lat,
+		SELECT (ts / $1) * $2 AS b,
+		       AVG(CASE WHEN status IN `+upStatuses+` THEN latency_ms END)::float8 AS avg_lat,
 		       SUM(CASE WHEN status = 'offline' THEN 1 ELSE 0 END) AS errs,
 		       SUM(CASE WHEN status = 'warning' THEN 1 ELSE 0 END) AS warns
-		FROM checks WHERE service_id = ? AND ts >= ? AND ts <= ?
+		FROM checks WHERE service_id = $3 AND ts >= $4 AND ts <= $5
 		GROUP BY b ORDER BY b ASC`, bucketSeconds, bucketSeconds, serviceID, since, now)
 	if err != nil {
 		return nil, err
@@ -243,7 +243,7 @@ func (db *DB) UptimeSince(serviceID string, since int64) (pct float64, sampleCou
 	var total, up int
 	err = db.QueryRow(`
 		SELECT COUNT(*), COALESCE(SUM(CASE WHEN status IN `+upStatuses+` THEN 1 ELSE 0 END), 0)
-		FROM checks WHERE service_id = ? AND ts >= ?`, serviceID, since).Scan(&total, &up)
+		FROM checks WHERE service_id = $1 AND ts >= $2`, serviceID, since).Scan(&total, &up)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -260,14 +260,14 @@ func (db *DB) UptimeSince(serviceID string, since int64) (pct float64, sampleCou
 func (db *DB) WarningServiceCountSince(since int64) (int, error) {
 	var count int
 	err := db.QueryRow(
-		`SELECT COUNT(DISTINCT service_id) FROM checks WHERE ts >= ? AND status = ?`,
+		`SELECT COUNT(DISTINCT service_id) FROM checks WHERE ts >= $1 AND status = $2`,
 		since, StatusWarning).Scan(&count)
 	return count, err
 }
 
 // DeleteOlderThan removes checks older than cutoff and returns the row count.
 func (db *DB) DeleteOlderThan(cutoff int64) (int64, error) {
-	res, err := db.Exec(`DELETE FROM checks WHERE ts < ?`, cutoff)
+	res, err := db.Exec(`DELETE FROM checks WHERE ts < $1`, cutoff)
 	if err != nil {
 		return 0, err
 	}
@@ -276,6 +276,6 @@ func (db *DB) DeleteOlderThan(cutoff int64) (int64, error) {
 
 // DeleteServiceHistory removes all checks for a service (used when it's deleted).
 func (db *DB) DeleteServiceHistory(serviceID string) error {
-	_, err := db.Exec(`DELETE FROM checks WHERE service_id = ?`, serviceID)
+	_, err := db.Exec(`DELETE FROM checks WHERE service_id = $1`, serviceID)
 	return err
 }

@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"upmonitor/internal/config"
-	"upmonitor/internal/db"
+	"github.com/ecakeman/alertflow/internal/config"
+	"github.com/ecakeman/alertflow/internal/db"
 )
 
 func TestCheckExtractsTLS(t *testing.T) {

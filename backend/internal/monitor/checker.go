@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"time"
 
-	"upmonitor/internal/config"
-	"upmonitor/internal/db"
+	"github.com/ecakeman/alertflow/internal/config"
+	"github.com/ecakeman/alertflow/internal/db"
 )
 
 // Result is the outcome of a single health check.
@@ -40,7 +40,7 @@ func Check(ctx context.Context, client *http.Client, svc config.Service) Result 
 	if err != nil {
 		return Result{Status: db.StatusOffline, Error: err.Error()}
 	}
-	req.Header.Set("User-Agent", "upmonitor/1.0 (+health-check)")
+	req.Header.Set("User-Agent", "AlertFlow/1.0 (+health-check)")
 
 	start := time.Now()
 	resp, err := client.Do(req)

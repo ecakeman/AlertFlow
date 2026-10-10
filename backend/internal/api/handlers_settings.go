@@ -6,8 +6,8 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
-	"upmonitor/internal/auth"
-	"upmonitor/internal/config"
+	"github.com/ecakeman/alertflow/internal/auth"
+	"github.com/ecakeman/alertflow/internal/config"
 )
 
 // GET /api/settings → current settings + active config directory.

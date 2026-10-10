@@ -28,14 +28,14 @@ func (db *DB) CountUsers() (int, error) {
 // CreateUser inserts a new account and returns it.
 func (db *DB) CreateUser(username, passwordHash, role string) (*User, error) {
 	now := time.Now().Unix()
-	res, err := db.Exec(
-		`INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)`,
+	var id int64
+	err := db.QueryRow(
+		`INSERT INTO users (username, password_hash, role, created_at) VALUES ($1, $2, $3, $4) RETURNING id`,
 		username, passwordHash, role, now,
-	)
+	).Scan(&id)
 	if err != nil {
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
 	return &User{ID: id, Username: username, Role: role, PasswordHash: passwordHash, CreatedAt: now}, nil
 }
 
@@ -54,13 +54,13 @@ func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 // GetUserByUsername looks up an account by username.
 func (db *DB) GetUserByUsername(username string) (*User, error) {
 	return scanUser(db.QueryRow(
-		`SELECT id, username, password_hash, role, created_at FROM users WHERE username = ?`, username))
+		`SELECT id, username, password_hash, role, created_at FROM users WHERE username = $1`, username))
 }
 
 // GetUserByID looks up an account by id.
 func (db *DB) GetUserByID(id int64) (*User, error) {
 	return scanUser(db.QueryRow(
-		`SELECT id, username, password_hash, role, created_at FROM users WHERE id = ?`, id))
+		`SELECT id, username, password_hash, role, created_at FROM users WHERE id = $1`, id))
 }
 
 // ListUsers returns all accounts, oldest first.
@@ -84,15 +84,15 @@ func (db *DB) ListUsers() ([]User, error) {
 // UpdateUser sets the role and (if non-empty) the password hash of an account.
 func (db *DB) UpdateUser(id int64, role, passwordHash string) error {
 	if passwordHash != "" {
-		_, err := db.Exec(`UPDATE users SET role = ?, password_hash = ? WHERE id = ?`, role, passwordHash, id)
+		_, err := db.Exec(`UPDATE users SET role = $1, password_hash = $2 WHERE id = $3`, role, passwordHash, id)
 		return err
 	}
-	_, err := db.Exec(`UPDATE users SET role = ? WHERE id = ?`, role, id)
+	_, err := db.Exec(`UPDATE users SET role = $1 WHERE id = $2`, role, id)
 	return err
 }
 
 // DeleteUser removes an account (cascading its sessions).
 func (db *DB) DeleteUser(id int64) error {
-	_, err := db.Exec(`DELETE FROM users WHERE id = ?`, id)
+	_, err := db.Exec(`DELETE FROM users WHERE id = $1`, id)
 	return err
 }

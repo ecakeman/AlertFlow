@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"upmonitor/internal/config"
-	"upmonitor/internal/db"
-	"upmonitor/internal/image"
+	"github.com/ecakeman/alertflow/internal/config"
+	"github.com/ecakeman/alertflow/internal/db"
+	"github.com/ecakeman/alertflow/internal/image"
 )
 
 // Zip entry names for the DB-backed data included in a bundle.

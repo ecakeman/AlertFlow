@@ -12,8 +12,8 @@ COPY web-ui/ ./
 RUN npm run build
 
 # --- Stage 2: build the static Go binary (embeds the SPA) ---
-# Runs natively on the build platform and cross-compiles to the target arch,
-# which is fast and safe because the SQLite driver is pure Go (CGO disabled).
+# Runs natively on the build platform and cross-compiles to the target arch.
+# The PostgreSQL driver is pure Go, so CGO stays disabled.
 FROM --platform=$BUILDPLATFORM golang:1.25 AS build
 # TARGETOS/TARGETARCH are injected by BuildKit from the target platform
 # (the host's arch for a plain `docker build`, or each --platform under buildx).
@@ -26,16 +26,16 @@ COPY backend/ ./
 # Embed the freshly built SPA into the binary.
 COPY --from=web /web/dist ./internal/web/dist
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w" -o /upmonitor ./cmd/upmonitor
+    go build -trimpath -ldflags="-s -w" -o /alertflow ./cmd/alertflow
 
 # --- Stage 3: minimal runtime image ---
 FROM gcr.io/distroless/static:latest
-LABEL org.opencontainers.image.title="upmonitor" \
-      org.opencontainers.image.description="Simple self-hosted service monitoring" \
-      org.opencontainers.image.source="https://github.com/antlko/upmonitor"
-COPY --from=build /upmonitor /upmonitor
-ENV UPMONITOR_CONFIG_DIR=/config \
-    UPMONITOR_ADDR=:8080
+LABEL org.opencontainers.image.title="AlertFlow" \
+      org.opencontainers.image.description="Event-driven service alerts, based on upmonitor" \
+      org.opencontainers.image.source="https://github.com/ecakeman/AlertFlow"
+COPY --from=build /alertflow /alertflow
+ENV ALERTFLOW_CONFIG_DIR=/config \
+    ALERTFLOW_ADDR=:8080
 EXPOSE 8080
 VOLUME ["/config"]
-ENTRYPOINT ["/upmonitor"]
+ENTRYPOINT ["/alertflow"]

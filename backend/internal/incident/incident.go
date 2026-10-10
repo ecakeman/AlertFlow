@@ -8,9 +8,9 @@ import (
 	"log/slog"
 	"time"
 
-	"upmonitor/internal/config"
-	"upmonitor/internal/db"
-	"upmonitor/internal/notify"
+	"github.com/ecakeman/alertflow/internal/config"
+	"github.com/ecakeman/alertflow/internal/db"
+	"github.com/ecakeman/alertflow/internal/notify"
 )
 
 // InitialStatus seeds a worker's "previous status" when it starts. If the

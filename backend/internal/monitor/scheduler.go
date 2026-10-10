@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"upmonitor/internal/config"
-	"upmonitor/internal/db"
-	"upmonitor/internal/incident"
-	"upmonitor/internal/notify"
+	"github.com/ecakeman/alertflow/internal/config"
+	"github.com/ecakeman/alertflow/internal/db"
+	"github.com/ecakeman/alertflow/internal/incident"
+	"github.com/ecakeman/alertflow/internal/notify"
 )
 
 // Scheduler runs one goroutine per service, each checking on its own interval.

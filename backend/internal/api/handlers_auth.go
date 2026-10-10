@@ -6,7 +6,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
-	"upmonitor/internal/auth"
+	"github.com/ecakeman/alertflow/internal/auth"
 )
 
 // GET /api/setup/status → whether the first-run admin still needs creating.

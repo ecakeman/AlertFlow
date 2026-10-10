@@ -15,14 +15,14 @@ type State struct {
 }
 
 // Path returns the location of state.json (OS config dir, e.g.
-// ~/.config/upmonitor/state.json), falling back to ./.upmonitor.
+// ~/.config/alertflow/state.json), falling back to ./.alertflow.
 func Path() string {
 	base, err := os.UserConfigDir()
 	if err != nil || base == "" {
-		base = ".upmonitor"
+		base = ".alertflow"
 		return filepath.Join(base, "state.json")
 	}
-	return filepath.Join(base, "upmonitor", "state.json")
+	return filepath.Join(base, "alertflow", "state.json")
 }
 
 // Load reads the bootstrap state; a missing file yields a zero State.

@@ -18,16 +18,18 @@ common design mistake here.
 | Store | Path | Holds | Written by |
 | --- | --- | --- | --- |
 | `config.yaml` | `<config-dir>/config.yaml` | services, app settings, **widget mode + grid layout** | `config.Save` (atomic temp-file + rename) |
-| SQLite | `<config-dir>/upmonitor.db` | users, sessions, checks history, `service_tls`, **incidents + comments**, **integrations + notification log** | `internal/db/*.go` |
+| PostgreSQL | `ALERTFLOW_DATABASE_URL` | users, sessions, checks history, `service_tls`, **incidents + comments**, **integrations + notification log** | `internal/db/*.go` |
 | images | `<config-dir>/images/<id>.webp` | service icons | `internal/image` |
 | `state.json` | outside the config dir | which config dir is active | `internal/state` |
 
 **Rule of thumb:** user-authored configuration a human might hand-edit → YAML.
-Machine-generated history, anything high-volume, and anything secret → SQLite.
+Machine-generated history, anything high-volume, and anything secret → PostgreSQL.
+One server process owns the YAML snapshot, so the first version still runs a
+single API replica even though the database can accept more connections.
 
 Why the split matters:
 
-- A service is deleted from `config.yaml`, but its incidents stay in SQLite.
+- A service is deleted from `config.yaml`, but its incidents stay in PostgreSQL.
   DTO conversion therefore resolves names defensively (`toIncidentDTO` falls back
   to `"(deleted service)"`). Deleting a service explicitly cascades:
   `handleDeleteService` calls `DeleteServiceHistory`, `DeleteServiceTLS` and
@@ -476,7 +478,7 @@ Two behaviours worth knowing:
 ## 13. Testing
 
 Backend uses stdlib `testing`, table-driven, with `httptest` for HTTP senders and
-a temp-file SQLite DB per test (`db.openTestDB` / `db.Open(t.TempDir()+…)`).
+a throwaway PostgreSQL database per test (`db.OpenTest`, from `ALERTFLOW_TEST_DATABASE_URL`).
 Tests live beside the package. There is **no frontend test framework** — verify
 UI changes by running the dev servers (see [DEVELOPMENT.md](DEVELOPMENT.md)).
 

@@ -5,7 +5,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
-	"upmonitor/internal/archive"
+	"github.com/ecakeman/alertflow/internal/archive"
 )
 
 // maxImportSize caps an uploaded backup archive.

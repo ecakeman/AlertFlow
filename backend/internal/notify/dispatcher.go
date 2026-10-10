@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"upmonitor/internal/db"
+	"github.com/ecakeman/alertflow/internal/db"
 )
 
 // Dispatcher fans incident notifications out to the enabled integrations.

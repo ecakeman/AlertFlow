@@ -9,8 +9,8 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
-	"upmonitor/internal/db"
-	"upmonitor/internal/notify"
+	"github.com/ecakeman/alertflow/internal/db"
+	"github.com/ecakeman/alertflow/internal/notify"
 )
 
 // secretFields lists the sensitive keys per integration type. These are never

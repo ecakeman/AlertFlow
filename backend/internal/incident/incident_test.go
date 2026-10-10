@@ -2,21 +2,15 @@ package incident
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 
-	"upmonitor/internal/config"
-	"upmonitor/internal/db"
+	"github.com/ecakeman/alertflow/internal/config"
+	"github.com/ecakeman/alertflow/internal/db"
 )
 
 func openDB(t *testing.T) *db.DB {
 	t.Helper()
-	database, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { database.Close() })
-	return database
+	return db.OpenTest(t)
 }
 
 func TestInitialStatus(t *testing.T) {

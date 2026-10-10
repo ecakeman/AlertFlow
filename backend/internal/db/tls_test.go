@@ -25,7 +25,7 @@ func TestUpsertServiceTLSOverwrites(t *testing.T) {
 
 	// Exactly one row must exist for the service (upsert, not insert).
 	var count int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM service_tls WHERE service_id = ?`, "svc").Scan(&count); err != nil {
+	if err := database.QueryRow(`SELECT COUNT(*) FROM service_tls WHERE service_id = $1`, "svc").Scan(&count); err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if count != 1 {

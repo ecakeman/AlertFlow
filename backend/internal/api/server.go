@@ -6,6 +6,7 @@ package api
 import (
 	"io/fs"
 	"log/slog"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -15,12 +16,12 @@ import (
 	"github.com/gofiber/fiber/v3"
 	recovermw "github.com/gofiber/fiber/v3/middleware/recover"
 
-	"upmonitor/internal/config"
-	"upmonitor/internal/db"
-	"upmonitor/internal/monitor"
-	"upmonitor/internal/notify"
-	"upmonitor/internal/state"
-	"upmonitor/internal/web"
+	"github.com/ecakeman/alertflow/internal/config"
+	"github.com/ecakeman/alertflow/internal/db"
+	"github.com/ecakeman/alertflow/internal/monitor"
+	"github.com/ecakeman/alertflow/internal/notify"
+	"github.com/ecakeman/alertflow/internal/state"
+	"github.com/ecakeman/alertflow/internal/web"
 )
 
 // maxBodyBytes bounds request bodies (config imports can be up to ~20 MiB).
@@ -48,7 +49,7 @@ func New(configDir string) (*Server, error) {
 	if err := config.EnsureDir(configDir); err != nil {
 		return nil, err
 	}
-	database, err := db.Open(config.DBPath(configDir))
+	database, err := db.Open(os.Getenv("ALERTFLOW_DATABASE_URL"))
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +71,7 @@ func New(configDir string) (*Server, error) {
 		stop:       make(chan struct{}),
 	}
 	s.app = fiber.New(fiber.Config{
-		AppName:      "upmonitor",
+		AppName:      "AlertFlow",
 		BodyLimit:    maxBodyBytes,
 		ErrorHandler: errorHandler,
 	})
@@ -235,37 +236,26 @@ func (s *Server) updateConfig(fn func(*config.Config) error) error {
 	return nil
 }
 
-// switchConfigDir points the server at a new config directory (reopening the
-// database and reloading config).
+// switchConfigDir points the server at a new config directory and reloads YAML.
+// Runtime rows stay in the process PostgreSQL database from ALERTFLOW_DATABASE_URL;
+// switching directories does not open another database.
 func (s *Server) switchConfigDir(dir string) error {
 	dir = filepath.Clean(dir)
 	if err := config.EnsureDir(dir); err != nil {
 		return err
 	}
-	newDB, err := db.Open(config.DBPath(dir))
-	if err != nil {
-		return err
-	}
 	cfg, err := config.Load(dir)
 	if err != nil {
-		newDB.Close()
 		return err
 	}
 
-	s.scheduler().Stop()
 	s.mu.Lock()
-	oldDB := s.database
-	dispatcher := notify.NewDispatcher(newDB)
 	s.configDir = dir
-	s.database = newDB
 	s.cfg = cfg
-	s.sched = monitor.New(newDB, dispatcher)
-	s.dispatcher = dispatcher
 	sched := s.sched
 	s.mu.Unlock()
 
 	sched.Sync(cfg.Services)
-	oldDB.Close()
 	_ = state.Save(state.State{ConfigDir: dir})
 	return nil
 }

@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"time"
 
-	"upmonitor/internal/config"
-	"upmonitor/internal/db"
+	"github.com/ecakeman/alertflow/internal/config"
+	"github.com/ecakeman/alertflow/internal/db"
 )
 
 // Wire formats (camelCase) mirroring the frontend's TypeScript types.

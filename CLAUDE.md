@@ -35,23 +35,23 @@ Two toolchains: run `npm` from `web-ui/`, run `go` from `backend/`. In dev they 
 
 **Frontend** (from `web-ui/`): `npm run dev` · `npm run type-check` · `npm run lint` (oxlint→eslint,
 both `--fix`) · `npm run build` (type-check + build). **Backend** (from `backend/`): `go run
-./cmd/upmonitor --config-dir ../config` · `go build ./...` · `go vet ./...`. **Single binary**: build
-SPA → `cp -r web-ui/dist backend/internal/web/dist` → `CGO_ENABLED=0 go build ./cmd/upmonitor`
+./cmd/alertflow --config-dir ../config` with `ALERTFLOW_DATABASE_URL` set · `go build ./...` · `go vet ./...`. **Single binary**: build
+SPA → `cp -r web-ui/dist backend/internal/web/dist` → `CGO_ENABLED=0 go build ./cmd/alertflow`
 (the `Dockerfile` automates this). **Tests**: backend uses stdlib `testing` (`go test ./...`) —
-table-driven, `httptest` for HTTP senders, temp-file SQLite per test; add new ones beside the package.
+table-driven, `httptest` for HTTP senders; each test creates a PostgreSQL database from `ALERTFLOW_TEST_DATABASE_URL`. Add new ones beside the package.
 **No test framework is wired on the frontend** — verify UI changes by running the dev servers, don't
 invent a test command.
 
 ## Architecture
 
 - **Source of truth split:** `config.yaml` holds services + settings incl. widget mode and grid layout
-  (the app rewrites it atomically); **SQLite** (`upmonitor.db`) holds users, sessions, checks history,
-  TLS snapshots, incidents + comments, and integrations + notification log. Both live in the config dir
-  (`/config` in Docker; `UPMONITOR_CONFIG_DIR` / `--config-dir`, default `./config`). Hand-editable
-  config → YAML; history, high-volume and **secrets** → SQLite.
+  (the app rewrites it atomically); **PostgreSQL** (`ALERTFLOW_DATABASE_URL`) holds users, sessions, checks history,
+  TLS snapshots, incidents + comments, and integrations + notification log. YAML stays in the config dir
+  (`/config` in Docker; `ALERTFLOW_CONFIG_DIR` / `--config-dir`, default `./config`). Hand-editable
+  config → YAML; history, high-volume and **secrets** → PostgreSQL. Switching config dir does not switch databases.
 - **Backend packages** (`backend/internal/`): `state` (tiny `state.json` outside the config dir, recording
-  which config dir is active — lets a custom config-dir setting survive restarts), `config` (yaml load/save/validate), `db` (modernc pure-Go
-  SQLite — keep `CGO_ENABLED=0`; schema via **goose** migrations in `db/migrations/*.sql`, embedded and
+  which config dir is active — lets a custom config-dir setting survive restarts), `config` (yaml load/save/validate), `db` (pgx `database/sql`
+  — keep `CGO_ENABLED=0`; schema via **goose** PostgreSQL migrations in `db/migrations/*.sql`, embedded and
   run on `Open`), `auth` (bcrypt + session tokens; cookies are set by the api layer), `monitor` (HTTP
   checker + goroutine-per-service ticker scheduler; `Sync` reconciles on config change; also reads the
   TLS cert off HTTPS responses and feeds status transitions to `incident`), `incident` (opens/resolves
@@ -62,7 +62,7 @@ invent a test command.
   config+db+scheduler and applies edits copy-on-write under a lock; **Fiber v3** app with per-route
   auth/admin middleware, a central `ErrorHandler` rendering `{ "error": ... }`, and a native SPA
   catch-all serving the embedded FS), `web` (`//go:embed dist`, exposes `web.FS()`). Entry:
-  `cmd/upmonitor/main.go` (inits slog, `app.Listen`, graceful `app.ShutdownWithContext`).
+  `cmd/alertflow/main.go` (inits slog, `app.Listen`, graceful `app.ShutdownWithContext`).
 - **Frontend:** Vue 3 `<script setup>`, Pinia stores (`auth`, `services`, `incidents`, `integrations`,
   `settings`, `ui`), typed API client in `src/api/`, `useServicesPolling` (~10s) drives live updates.
   Router guards gate setup/login/role. `/incidents` is open to any signed-in user (anyone may comment);
@@ -115,7 +115,7 @@ invent a test command.
   them as `{ "error": msg }` — the shape the frontend expects); success via `c.JSON`/`c.Status().JSON`.
   Read the authed user with `userLocal(c)`, params with `c.Params`, body with `decode(c, &dst)`.
 - **Migrations**: add a new `backend/internal/db/migrations/NNNNN_name.sql` with `-- +goose Up`/`Down`;
-  never edit an already-applied migration. Dialect is `sqlite3`. They are **embedded and run
+  never edit an already-applied migration. Dialect is `postgres`. They are **embedded and run
   automatically inside `db.Open`** on every start (goose skips applied ones) — there is no separate
   migrate command, and the distroless image has no shell to run one. Never add a manual migration step.
 - **Defaults live in one place.** e.g. `config.DefaultRetentionDays` is exported precisely so the api
@@ -123,4 +123,4 @@ invent a test command.
 - **Existing configs keep their stored values.** Changing a default only affects new installs and
   unset fields (`normalize()` fills zeros only); never silently rewrite a user's `config.yaml`.
 - **Logging** is slog JSON to stdout; prefer `slog.InfoContext(c.Context(), …)` with key/value attrs.
-  Level via `UPMONITOR_LOG_LEVEL` (debug|info|warn|error).
+  Level via `ALERTFLOW_LOG_LEVEL` (debug|info|warn|error).

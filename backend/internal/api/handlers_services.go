@@ -8,9 +8,9 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
-	"upmonitor/internal/config"
-	"upmonitor/internal/db"
-	"upmonitor/internal/image"
+	"github.com/ecakeman/alertflow/internal/config"
+	"github.com/ecakeman/alertflow/internal/db"
+	"github.com/ecakeman/alertflow/internal/image"
 )
 
 var errServiceNotFound = errors.New("service not found")

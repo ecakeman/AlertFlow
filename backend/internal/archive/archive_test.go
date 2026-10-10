@@ -3,13 +3,26 @@ package archive
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"testing"
 
-	"upmonitor/internal/config"
-	"upmonitor/internal/db"
+	"github.com/ecakeman/alertflow/internal/config"
+	"github.com/ecakeman/alertflow/internal/db"
 )
+
+// jsonEqual compares JSON values. PostgreSQL jsonb does not preserve key
+// order or insignificant whitespace, but the secret fields must survive.
+func jsonEqual(a, b []byte) bool {
+	var x, y any
+	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
+		return false
+	}
+	ab, errA := json.Marshal(x)
+	bb, errB := json.Marshal(y)
+	return errA == nil && errB == nil && string(ab) == string(bb)
+}
 
 // seed builds a config dir + database with one incident (and comment) and one
 // integration, returning the dir and open db.
@@ -22,12 +35,7 @@ func seed(t *testing.T) (string, *db.DB) {
 	if err := config.Save(dir, config.Default()); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
-	database, err := db.Open(config.DBPath(dir))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { database.Close() })
-	return dir, database
+	return dir, db.OpenTest(t)
 }
 
 // writeLegacyBundle builds a minimal archive with a hand-written
@@ -89,7 +97,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 		t.Fatalf("imported comments = %+v", comments)
 	}
 	integrations, _ := dstDB.ListIntegrations()
-	if len(integrations) != 1 || string(integrations[0].Config) != string(cfgJSON) {
+	if len(integrations) != 1 || !jsonEqual(integrations[0].Config, cfgJSON) {
 		t.Fatalf("imported integrations = %+v (secret should round-trip)", integrations)
 	}
 }

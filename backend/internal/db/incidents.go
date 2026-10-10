@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -70,13 +71,13 @@ func scanIncident(row interface{ Scan(...any) error }) (*Incident, error) {
 
 // GetIncident returns an incident by id (ErrNotFound if absent).
 func (db *DB) GetIncident(id int64) (*Incident, error) {
-	return scanIncident(db.QueryRow(`SELECT `+incidentCols+` FROM incidents WHERE id = ?`, id))
+	return scanIncident(db.QueryRow(`SELECT `+incidentCols+` FROM incidents WHERE id = $1`, id))
 }
 
 // GetOngoingIncident returns the ongoing incident for a service, or (nil, nil).
 func (db *DB) GetOngoingIncident(serviceID string) (*Incident, error) {
 	inc, err := scanIncident(db.QueryRow(
-		`SELECT `+incidentCols+` FROM incidents WHERE service_id = ? AND status = 'ongoing'`, serviceID))
+		`SELECT `+incidentCols+` FROM incidents WHERE service_id = $1 AND status = 'ongoing'`, serviceID))
 	if errors.Is(err, ErrNotFound) {
 		return nil, nil
 	}
@@ -87,17 +88,17 @@ func (db *DB) GetOngoingIncident(serviceID string) (*Incident, error) {
 // ongoing for the service.
 func (db *DB) CreateIncident(serviceID, source string, startedAt int64, title *string, createdBy *int64) (*Incident, error) {
 	now := time.Now().Unix()
-	res, err := db.Exec(
+	var id int64
+	err := db.QueryRow(
 		`INSERT INTO incidents (service_id, status, source, title, started_at, resolved_at, created_by, created_at, updated_at)
-		 VALUES (?, 'ongoing', ?, ?, ?, NULL, ?, ?, ?)`,
-		serviceID, source, title, startedAt, createdBy, now, now)
+		 VALUES ($1, 'ongoing', $2, $3, $4, NULL, $5, $6, $7) RETURNING id`,
+		serviceID, source, title, startedAt, createdBy, now, now).Scan(&id)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return nil, ErrOngoingExists
 		}
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
 	return db.GetIncident(id)
 }
 
@@ -108,21 +109,21 @@ func (db *DB) CreateIncident(serviceID, source string, startedAt int64, title *s
 // from the start.
 func (db *DB) CreateWarningEvent(serviceID string, ts int64) (*Incident, error) {
 	now := time.Now().Unix()
-	res, err := db.Exec(
+	var id int64
+	err := db.QueryRow(
 		`INSERT INTO incidents (service_id, status, source, severity, title, started_at, resolved_at, created_by, created_at, updated_at)
-		 VALUES (?, 'resolved', 'auto', 'warning', NULL, ?, ?, NULL, ?, ?)`,
-		serviceID, ts, ts, now, now)
+		 VALUES ($1, 'resolved', 'auto', 'warning', NULL, $2, $3, NULL, $4, $5) RETURNING id`,
+		serviceID, ts, ts, now, now).Scan(&id)
 	if err != nil {
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
 	return db.GetIncident(id)
 }
 
 // ResolveIncident marks an incident resolved at the given time.
 func (db *DB) ResolveIncident(id, resolvedAt int64) (*Incident, error) {
 	if _, err := db.Exec(
-		`UPDATE incidents SET status = 'resolved', resolved_at = ?, updated_at = ? WHERE id = ?`,
+		`UPDATE incidents SET status = 'resolved', resolved_at = $1, updated_at = $2 WHERE id = $3`,
 		resolvedAt, time.Now().Unix(), id); err != nil {
 		return nil, err
 	}
@@ -148,7 +149,7 @@ func (db *DB) UpdateIncident(id int64, title string, startedAt int64, resolvedAt
 		status = "resolved"
 	}
 	_, err := db.Exec(
-		`UPDATE incidents SET title = ?, started_at = ?, resolved_at = ?, status = ?, updated_at = ? WHERE id = ?`,
+		`UPDATE incidents SET title = $1, started_at = $2, resolved_at = $3, status = $4, updated_at = $5 WHERE id = $6`,
 		nullStr(title), startedAt, resolvedAt, status, time.Now().Unix(), id)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -161,13 +162,13 @@ func (db *DB) UpdateIncident(id int64, title string, startedAt int64, resolvedAt
 
 // DeleteIncident removes an incident (its comments cascade).
 func (db *DB) DeleteIncident(id int64) error {
-	_, err := db.Exec(`DELETE FROM incidents WHERE id = ?`, id)
+	_, err := db.Exec(`DELETE FROM incidents WHERE id = $1`, id)
 	return err
 }
 
 // DeleteServiceIncidents removes all incidents for a service (comments cascade).
 func (db *DB) DeleteServiceIncidents(serviceID string) error {
-	_, err := db.Exec(`DELETE FROM incidents WHERE service_id = ?`, serviceID)
+	_, err := db.Exec(`DELETE FROM incidents WHERE service_id = $1`, serviceID)
 	return err
 }
 
@@ -176,17 +177,18 @@ func (db *DB) DeleteServiceIncidents(serviceID string) error {
 func incidentFilter(serviceID, status, severity string) (string, []any) {
 	var where []string
 	var args []any
+	add := func(column string, value any) {
+		args = append(args, value)
+		where = append(where, fmt.Sprintf("%s = $%d", column, len(args)))
+	}
 	if serviceID != "" {
-		where = append(where, "service_id = ?")
-		args = append(args, serviceID)
+		add("service_id", serviceID)
 	}
 	if status != "" {
-		where = append(where, "status = ?")
-		args = append(args, status)
+		add("status", status)
 	}
 	if severity != "" {
-		where = append(where, "severity = ?")
-		args = append(args, severity)
+		add("severity", severity)
 	}
 	if len(where) == 0 {
 		return "", args
@@ -209,8 +211,8 @@ func (db *DB) ListIncidents(serviceID, status, severity string, limit, offset in
 	where, args := incidentFilter(serviceID, status, severity)
 	q := `SELECT ` + incidentCols + ` FROM incidents` + where + ` ORDER BY started_at DESC, id DESC`
 	if limit > 0 {
-		q += " LIMIT ? OFFSET ?"
 		args = append(args, limit, offset)
+		q += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)-1, len(args))
 	}
 	rows, err := db.Query(q, args...)
 	if err != nil {
@@ -230,20 +232,20 @@ func (db *DB) ListIncidents(serviceID, status, severity string, limit, offset in
 
 // AddIncidentComment appends a comment and returns it (with username resolved).
 func (db *DB) AddIncidentComment(incidentID int64, userID *int64, body string, ts int64) (*IncidentComment, error) {
-	res, err := db.Exec(
-		`INSERT INTO incident_comments (incident_id, user_id, body, created_at) VALUES (?, ?, ?, ?)`,
-		incidentID, userID, body, ts)
+	var id int64
+	err := db.QueryRow(
+		`INSERT INTO incident_comments (incident_id, user_id, body, created_at) VALUES ($1, $2, $3, $4) RETURNING id`,
+		incidentID, userID, body, ts).Scan(&id)
 	if err != nil {
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
 	return db.getComment(id)
 }
 
 func (db *DB) getComment(id int64) (*IncidentComment, error) {
 	return scanComment(db.QueryRow(
 		`SELECT c.id, c.incident_id, c.user_id, COALESCE(u.username, ''), c.body, c.created_at
-		 FROM incident_comments c LEFT JOIN users u ON u.id = c.user_id WHERE c.id = ?`, id))
+		 FROM incident_comments c LEFT JOIN users u ON u.id = c.user_id WHERE c.id = $1`, id))
 }
 
 func scanComment(row interface{ Scan(...any) error }) (*IncidentComment, error) {
@@ -266,7 +268,7 @@ func (db *DB) ListIncidentComments(incidentID int64) ([]IncidentComment, error) 
 	rows, err := db.Query(
 		`SELECT c.id, c.incident_id, c.user_id, COALESCE(u.username, ''), c.body, c.created_at
 		 FROM incident_comments c LEFT JOIN users u ON u.id = c.user_id
-		 WHERE c.incident_id = ? ORDER BY c.created_at ASC, c.id ASC`, incidentID)
+		 WHERE c.incident_id = $1 ORDER BY c.created_at ASC, c.id ASC`, incidentID)
 	if err != nil {
 		return nil, err
 	}
@@ -335,7 +337,7 @@ func (db *DB) ReplaceIncidents(incidents []Incident, comments []IncidentComment)
 		}
 		if _, err := tx.Exec(
 			`INSERT INTO incidents (id, service_id, status, source, severity, title, started_at, resolved_at, created_by, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
 			inc.ID, inc.ServiceID, inc.Status, inc.Source, severity, nullStr(inc.Title),
 			inc.StartedAt, inc.ResolvedAt, createdBy, inc.CreatedAt, inc.UpdatedAt); err != nil {
 			return err
@@ -347,10 +349,16 @@ func (db *DB) ReplaceIncidents(incidents []Incident, comments []IncidentComment)
 			userID = nil
 		}
 		if _, err := tx.Exec(
-			`INSERT INTO incident_comments (id, incident_id, user_id, body, created_at) VALUES (?, ?, ?, ?, ?)`,
+			`INSERT INTO incident_comments (id, incident_id, user_id, body, created_at) VALUES ($1, $2, $3, $4, $5)`,
 			cm.ID, cm.IncidentID, userID, cm.Body, cm.CreatedAt); err != nil {
 			return err
 		}
+	}
+	if err := resetIdentity(tx, "incidents"); err != nil {
+		return err
+	}
+	if err := resetIdentity(tx, "incident_comments"); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -378,9 +386,4 @@ func nullStr(s string) any {
 		return nil
 	}
 	return s
-}
-
-// isUniqueViolation reports whether err is a SQLite UNIQUE-constraint failure.
-func isUniqueViolation(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
 }

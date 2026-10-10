@@ -1,21 +1,27 @@
 # Development
 
-upmonitor is a Go backend (`backend/`) that serves a Vue 3 SPA (`web-ui/`). In
-production the built SPA is embedded into the Go binary; in development you run
-the two side by side and let Vite proxy API calls to the backend.
+AlertFlow is a Go backend (`backend/`) that serves a Vue 3 SPA (`web-ui/`). It
+is based on upmonitor. In production the built SPA is embedded into the Go
+binary; in development you run the two side by side and let Vite proxy API
+calls to the backend. Runtime data is PostgreSQL, not a file in the config
+directory.
 
 ## Prerequisites
 
 - **Go** 1.25+
 - **Node** 22+ (or the version in `web-ui/package.json` `engines`)
+- **PostgreSQL 16** (`docker compose up -d postgres` from the repo root)
 
 ## Run both dev servers
 
-**Terminal 1 — backend** (serves the API on `:8080`, writes to `./config`):
+Copy `.env.example` and export `ALERTFLOW_DATABASE_URL` before starting the API.
+
+**Terminal 1 — backend** (serves the API on `:8080`, YAML in `./config`):
 
 ```bash
 cd backend
-go run ./cmd/upmonitor --config-dir ../config --addr :8080
+export ALERTFLOW_DATABASE_URL='postgres://alertflow:alertflow@127.0.0.1:5432/alertflow?sslmode=disable'
+go run ./cmd/alertflow --config-dir ../config --addr :8080
 ```
 
 **Terminal 2 — frontend** (Vite dev server on `:5173`):
@@ -45,10 +51,10 @@ cp -r web-ui/dist backend/internal/web/dist
 
 # 3. Build the static binary (pure Go, no CGO)
 cd backend
-CGO_ENABLED=0 go build -o ../upmonitor ./cmd/upmonitor
+CGO_ENABLED=0 go build -o ../alertflow ./cmd/alertflow
 
 # 4. Run it — serves UI + API on :8080
-cd .. && ./upmonitor --config-dir ./config
+cd .. && ALERTFLOW_DATABASE_URL='postgres://alertflow:alertflow@127.0.0.1:5432/alertflow?sslmode=disable' ./alertflow --config-dir ./config
 ```
 
 The `Dockerfile` automates exactly these steps across build stages.
@@ -75,11 +81,11 @@ go test ./...        # add tests under internal/*
 
 ```
 backend/
-  cmd/upmonitor/         # main: flags, wiring, graceful shutdown
+  cmd/alertflow/         # main: flags, wiring, graceful shutdown
   internal/
     config/              # config.yaml types, load/save/validate (atomic)
     state/               # bootstrap state.json (active config dir)
-    db/                  # SQLite: users, sessions, checks, tls, incidents, integrations
+    db/                  # PostgreSQL: users, sessions, checks, tls, incidents, integrations
       migrations/        #   goose *.sql migrations (embedded, run on Open)
     auth/                # bcrypt + session tokens
     monitor/             # HTTP checker (+TLS cert) + per-service ticker scheduler
@@ -108,16 +114,16 @@ Import direction worth remembering: `monitor → incident → {db, notify}`.
 
 ## Notes
 
-- **SQLite** uses the pure-Go `modernc.org/sqlite` driver so the binary is fully
-  static (`CGO_ENABLED=0`) and cross-compiles to `arm64` with no C toolchain.
+- **PostgreSQL** uses pgx through `database/sql`. The binary stays static
+  (`CGO_ENABLED=0`). Tests need `ALERTFLOW_TEST_DATABASE_URL`.
 - **Image optimization** happens client-side (Canvas → WebP) so the backend has
   no image dependencies; it only validates and stores the WebP bytes.
 - **Config vs DB**: `config.yaml` is the source of truth for services/settings;
-  `upmonitor.db` holds users, sessions and metrics history.
+  PostgreSQL holds users, sessions and metrics history. Old SQLite files are not imported.
 - **HTTP** uses [Fiber v3](https://gofiber.io); handlers return `fiber.NewError` for
   errors (rendered centrally as `{ "error": ... }`) and `c.JSON` for success.
 - **Migrations** are goose `*.sql` files in `internal/db/migrations`, embedded and
-  applied on startup (`sqlite3` dialect). Add a new numbered file for schema
+  applied on startup (postgres dialect). Add a new numbered file for schema
   changes; never edit an applied one.
-- **Logs** are structured `slog` JSON on stdout; set `UPMONITOR_LOG_LEVEL`
+- **Logs** are structured `slog` JSON on stdout; set `ALERTFLOW_LOG_LEVEL`
   (`debug|info|warn|error`) to change verbosity.

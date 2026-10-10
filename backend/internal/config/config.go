@@ -1,6 +1,6 @@
 // Package config defines the on-disk configuration (config.yaml) and its
 // load/save/validation logic. config.yaml is the source of truth for services
-// and app settings; users, sessions and metrics live in SQLite instead.
+// and app settings; users, sessions and metrics live in PostgreSQL instead.
 package config
 
 import (

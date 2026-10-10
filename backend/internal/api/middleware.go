@@ -8,8 +8,8 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
-	"upmonitor/internal/auth"
-	"upmonitor/internal/db"
+	"github.com/ecakeman/alertflow/internal/auth"
+	"github.com/ecakeman/alertflow/internal/db"
 )
 
 const userLocalKey = "user"

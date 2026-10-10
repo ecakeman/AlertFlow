@@ -13,7 +13,6 @@ const (
 	FileName   = "config.yaml"
 	ImagesDir  = "images"
 	BackupsDir = "backups"
-	DBFileName = "upmonitor.db"
 )
 
 // YAMLPath returns the path to config.yaml inside dir.
@@ -24,9 +23,6 @@ func ImagesPath(dir string) string { return filepath.Join(dir, ImagesDir) }
 
 // BackupsPath returns the backups directory inside dir.
 func BackupsPath(dir string) string { return filepath.Join(dir, BackupsDir) }
-
-// DBPath returns the SQLite database path inside dir.
-func DBPath(dir string) string { return filepath.Join(dir, DBFileName) }
 
 // EnsureDir creates the config directory and its images/ subdirectory.
 func EnsureDir(dir string) error {

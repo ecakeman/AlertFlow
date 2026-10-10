@@ -1,4 +1,4 @@
-// Command upmonitor is the single-binary server: it serves the embedded web UI
+// Command alertflow is the single-binary server: it serves the embedded web UI
 // and the JSON API (Fiber), and runs the monitoring scheduler.
 package main
 
@@ -13,9 +13,9 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
-	"upmonitor/internal/api"
-	"upmonitor/internal/logger"
-	"upmonitor/internal/state"
+	"github.com/ecakeman/alertflow/internal/api"
+	"github.com/ecakeman/alertflow/internal/logger"
+	"github.com/ecakeman/alertflow/internal/state"
 )
 
 func main() {
@@ -25,12 +25,12 @@ func main() {
 		addr      string
 		configDir string
 	)
-	flag.StringVar(&addr, "addr", envOr("UPMONITOR_ADDR", ":8080"), "HTTP listen address")
-	flag.StringVar(&configDir, "config-dir", "", "config directory (default: $UPMONITOR_CONFIG_DIR or ./config)")
+	flag.StringVar(&addr, "addr", envOr("ALERTFLOW_ADDR", ":8080"), "HTTP listen address")
+	flag.StringVar(&configDir, "config-dir", "", "config directory (default: $ALERTFLOW_CONFIG_DIR or ./config)")
 	flag.Parse()
 
 	dir := resolveConfigDir(configDir)
-	slog.Info("starting upmonitor", "config_dir", dir, "addr", addr)
+	slog.Info("starting alertflow", "config_dir", dir, "addr", addr)
 
 	srv, err := api.New(dir)
 	if err != nil {
@@ -67,7 +67,7 @@ func resolveConfigDir(flagDir string) string {
 		_ = state.Save(state.State{ConfigDir: flagDir})
 		return flagDir
 	}
-	if env := os.Getenv("UPMONITOR_CONFIG_DIR"); env != "" {
+	if env := os.Getenv("ALERTFLOW_CONFIG_DIR"); env != "" {
 		_ = state.Save(state.State{ConfigDir: env})
 		return env
 	}

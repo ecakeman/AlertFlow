@@ -22,7 +22,7 @@ type ServiceTLS struct {
 func (db *DB) UpsertServiceTLS(serviceID string, checkedAt, validFrom, validUntil int64, issuer, subject, errMsg string) error {
 	_, err := db.Exec(`
 		INSERT INTO service_tls (service_id, checked_at, valid_from, valid_until, issuer, subject, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (service_id) DO UPDATE SET
 			checked_at  = excluded.checked_at,
 			valid_from  = excluded.valid_from,
@@ -40,7 +40,7 @@ func (db *DB) GetServiceTLS(serviceID string) (*ServiceTLS, error) {
 	row := db.QueryRow(`
 		SELECT service_id, checked_at, valid_from, valid_until,
 		       COALESCE(issuer, ''), COALESCE(subject, ''), COALESCE(error, '')
-		FROM service_tls WHERE service_id = ?`, serviceID)
+		FROM service_tls WHERE service_id = $1`, serviceID)
 	var t ServiceTLS
 	if err := row.Scan(&t.ServiceID, &t.CheckedAt, &t.ValidFrom, &t.ValidUntil, &t.Issuer, &t.Subject, &t.Error); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -53,6 +53,6 @@ func (db *DB) GetServiceTLS(serviceID string) (*ServiceTLS, error) {
 
 // DeleteServiceTLS removes the cert snapshot for a service.
 func (db *DB) DeleteServiceTLS(serviceID string) error {
-	_, err := db.Exec(`DELETE FROM service_tls WHERE service_id = ?`, serviceID)
+	_, err := db.Exec(`DELETE FROM service_tls WHERE service_id = $1`, serviceID)
 	return err
 }

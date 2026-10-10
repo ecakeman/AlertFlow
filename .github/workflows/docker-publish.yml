@@ -34,8 +34,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          # Change this if your GHCR namespace differs from `antlko`.
-          images: ghcr.io/antlko/upmonitor
+          images: ghcr.io/ecakeman/alertflow
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag

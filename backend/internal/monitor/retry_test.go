@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"upmonitor/internal/config"
-	"upmonitor/internal/db"
+	"github.com/ecakeman/alertflow/internal/config"
+	"github.com/ecakeman/alertflow/internal/db"
 )
 
 // codeServer replies with the given status codes in order, repeating the last

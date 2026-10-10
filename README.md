@@ -1,8 +1,13 @@
 <div align="center">
 
-# upmonitor
+# AlertFlow
 
-### Simple, self‑hosted service monitoring — beautiful by default.
+### Service monitoring and alerts, based on [upmonitor](https://github.com/antlko/upmonitor).
+
+AlertFlow keeps the upmonitor dashboard and adds a PostgreSQL runtime. The MIT
+license and copyright of Anatol Kozhukhar stay in [`LICENSE`](LICENSE). This
+version does **not** import an existing `upmonitor.db` on startup; back that
+file up before upgrading. Service definitions still live in `config.yaml`.
 
 A modern, minimal dashboard for keeping an eye on your web services. Add a URL,
 watch its status, response time and uptime in real time, and rearrange
@@ -55,7 +60,7 @@ grafana clone — while still doing the real work:
   spelled out with the attempt and the reason), and **SSL certificate issuer
   and expiry** with a warning as the date approaches.
 - 📈 **Metrics that matter** — uptime %, response time, error count and last
-  success, kept for 30 days (configurable) in SQLite and trimmed automatically.
+  success, kept for 30 days (configurable) in PostgreSQL and trimmed automatically.
 - 🎨 **Instant icons** — generate a crisp, unique icon for any service on‑device
   (no external AI), or upload your own — auto‑optimized to WebP in your browser.
 - 👥 **Share it** — invite friends as **admin** or **read‑only**.
@@ -86,22 +91,13 @@ Open **http://localhost:8080** and create your admin account.
 
 ### Option B — Docker Compose
 
-Save this as `docker-compose.yml` and run `docker compose up -d`:
-
-```yaml
-services:
-  upmonitor:
-    image: ghcr.io/antlko/upmonitor:latest
-    container_name: upmonitor
-    ports:
-      - "8080:8080"
-    volumes:
-      - upmonitor-config:/config
-    restart: unless-stopped
-
-volumes:
-  upmonitor-config:
+```bash
+cp .env.example .env
+docker compose up -d --build
 ```
+
+This starts PostgreSQL 16 and the AlertFlow server. The app reads
+`ALERTFLOW_DATABASE_URL`. Open **http://localhost:8080**.
 
 ### Option C — Portainer (stack)
 
@@ -117,12 +113,10 @@ That's it — nothing to build.
 No published image needed; build it yourself:
 
 ```bash
-git clone https://github.com/antlko/upmonitor.git
-cd upmonitor
-docker compose up -d --build   # uncomment `build: .` in docker-compose.yml first
-# ...or build the image directly:
-docker build -t upmonitor .
-docker run -d -p 8080:8080 -v upmonitor-config:/config upmonitor
+git clone git@github.com:ecakeman/AlertFlow.git
+cd AlertFlow
+cp .env.example .env
+docker compose up -d --build
 ```
 
 ---
@@ -130,7 +124,7 @@ docker run -d -p 8080:8080 -v upmonitor-config:/config upmonitor
 ## First run
 
 On first launch you'll be asked to **create an administrator password** — it's
-hashed with bcrypt and stored locally in SQLite; it never leaves your server.
+hashed with bcrypt and stored in PostgreSQL; it never leaves your server.
 After that:
 
 1. **Add a service** — name + URL (e.g. `https://grafana.home.lab`).
@@ -148,27 +142,30 @@ Everything lives in one **config directory** (mounted at `/config` in Docker):
 /config
 ├── config.yaml       # services + settings (managed by the UI, editable by hand)
 ├── images/           # service icons (<id>.webp)
-├── backups/          # automatic snapshots created before an import
-└── upmonitor.db      # users, history, incidents, integrations (SQLite)
+└── backups/          # automatic snapshots created before an import
 ```
 
-The database schema is created and upgraded **automatically on start** — there is
-no migration step to run when you update the image.
+Users, sessions, check history, incidents and notification settings are in
+PostgreSQL (`ALERTFLOW_DATABASE_URL`), not in this directory. Goose applies the
+schema on startup. An old SQLite `upmonitor.db` is left untouched and is not
+imported.
 
 ### Ports & volumes
 
 | What      | Value                     | Notes                                  |
 | --------- | ------------------------- | -------------------------------------- |
 | HTTP port | `8080`                    | change the left side of `-p 8080:8080` |
-| Config    | volume mounted at `/config` | holds config, images, database, backups |
+| Config    | volume mounted at `/config` | holds YAML, images and backups |
+| Database  | PostgreSQL service          | users, history, incidents, integrations |
 
 ### Environment variables
 
 | Variable                | Default   | Description                                  |
 | ----------------------- | --------- | -------------------------------------------- |
-| `UPMONITOR_CONFIG_DIR`  | `/config` | Where config, images and the database live.  |
-| `UPMONITOR_ADDR`        | `:8080`   | Listen address (`host:port`).                |
-| `UPMONITOR_LOG_LEVEL`   | `info`    | Log verbosity: `debug`, `info`, `warn`, `error`. |
+| `ALERTFLOW_CONFIG_DIR`   | `/config` | YAML, images and backups.                    |
+| `ALERTFLOW_ADDR`         | `:8080`   | Listen address (`host:port`).                |
+| `ALERTFLOW_LOG_LEVEL`    | `info`    | Log verbosity: `debug`, `info`, `warn`, `error`. |
+| `ALERTFLOW_DATABASE_URL` | —         | PostgreSQL DSN. Required.                    |
 
 Command‑line flags mirror these: `--config-dir` and `--addr`.
 
@@ -194,14 +191,14 @@ always safe.
 
 One static Go binary embeds the built Vue app and serves both the API and the UI.
 
-- **Backend** — Go with [Fiber](https://gofiber.io), pure‑Go SQLite
-  ([modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite), no CGO) with
+- **Backend** — Go with [Fiber](https://gofiber.io) and PostgreSQL
+  ([pgx](https://github.com/jackc/pgx), no CGO) with
   [goose](https://github.com/pressly/goose) migrations, a goroutine‑per‑service
   scheduler for checks, bcrypt + cookie sessions, and structured `slog` logging.
 - **Frontend** — Vue 3 + TypeScript, Pinia, Tailwind CSS v4 and shadcn‑vue
   components, `grid-layout-plus` for the draggable grid.
 - **Config** — `config.yaml` is the source of truth for services and settings;
-  users, sessions and metrics live in SQLite.
+  users, sessions and metrics live in PostgreSQL.
 
 The result is tiny, fast and easy to run on anything from a NAS to a Raspberry Pi
 (images are built for both `amd64` and `arm64`).

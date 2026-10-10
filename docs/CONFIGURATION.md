@@ -5,10 +5,11 @@ upmonitor is configured by a single `config.yaml` in your config directory
 plain YAML you can edit by hand — it is validated and re-loaded whenever the app
 saves it.
 
-**Not in this file** (they live in `upmonitor.db`, SQLite, alongside it): users,
+**Not in this file** (they live in PostgreSQL, via `ALERTFLOW_DATABASE_URL`): users,
 sessions, metrics history, TLS snapshots, **incidents + comments**, and
 **notification integrations** — integration secrets are kept out of the YAML on
-purpose, since this file is served verbatim by the raw-config editor.
+purpose, since this file is served verbatim by the raw-config editor. Switching
+the config directory reloads YAML and images only; it does not switch databases.
 
 A ready-to-copy template is in [`config/config.example.yaml`](../config/config.example.yaml).
 

@@ -8,11 +8,11 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
-	"upmonitor/internal/db"
+	"github.com/ecakeman/alertflow/internal/db"
 )
 
 // serviceName resolves a service id to its display name, tolerating services
-// that were deleted from config.yaml while their incidents remain in SQLite.
+// that were deleted from config.yaml while their incidents remain in PostgreSQL.
 func (s *Server) serviceName(id string) string {
 	if svc := s.config().Find(id); svc != nil {
 		return svc.Name

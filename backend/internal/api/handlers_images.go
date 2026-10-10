@@ -5,8 +5,8 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
-	"upmonitor/internal/config"
-	"upmonitor/internal/image"
+	"github.com/ecakeman/alertflow/internal/config"
+	"github.com/ecakeman/alertflow/internal/image"
 )
 
 // POST /api/services/:id/image → store a WebP icon (raw body, already optimized

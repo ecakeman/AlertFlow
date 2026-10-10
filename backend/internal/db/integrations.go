@@ -40,21 +40,21 @@ func scanIntegration(row interface{ Scan(...any) error }) (*Integration, error) 
 // CreateIntegration inserts a new notification channel and returns it.
 func (db *DB) CreateIntegration(kind, name string, enabled, notifyWarnings bool, config json.RawMessage) (*Integration, error) {
 	now := time.Now().Unix()
-	res, err := db.Exec(
-		`INSERT INTO integrations (type, name, enabled, notify_warnings, config, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		kind, name, enabled, notifyWarnings, []byte(config), now, now)
+	var id int64
+	err := db.QueryRow(
+		`INSERT INTO integrations (type, name, enabled, notify_warnings, config, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+		kind, name, enabled, notifyWarnings, jsonText(config), now, now).Scan(&id)
 	if err != nil {
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
 	return db.GetIntegration(id)
 }
 
 // UpdateIntegration replaces a channel's name, flags and config.
 func (db *DB) UpdateIntegration(id int64, name string, enabled, notifyWarnings bool, config json.RawMessage) (*Integration, error) {
 	if _, err := db.Exec(
-		`UPDATE integrations SET name = ?, enabled = ?, notify_warnings = ?, config = ?, updated_at = ? WHERE id = ?`,
-		name, enabled, notifyWarnings, []byte(config), time.Now().Unix(), id); err != nil {
+		`UPDATE integrations SET name = $1, enabled = $2, notify_warnings = $3, config = $4, updated_at = $5 WHERE id = $6`,
+		name, enabled, notifyWarnings, jsonText(config), time.Now().Unix(), id); err != nil {
 		return nil, err
 	}
 	return db.GetIntegration(id)
@@ -62,13 +62,13 @@ func (db *DB) UpdateIntegration(id int64, name string, enabled, notifyWarnings b
 
 // DeleteIntegration removes a channel (its notification log cascades).
 func (db *DB) DeleteIntegration(id int64) error {
-	_, err := db.Exec(`DELETE FROM integrations WHERE id = ?`, id)
+	_, err := db.Exec(`DELETE FROM integrations WHERE id = $1`, id)
 	return err
 }
 
 // GetIntegration returns a channel by id (ErrNotFound if absent).
 func (db *DB) GetIntegration(id int64) (*Integration, error) {
-	return scanIntegration(db.QueryRow(`SELECT `+integrationCols+` FROM integrations WHERE id = ?`, id))
+	return scanIntegration(db.QueryRow(`SELECT `+integrationCols+` FROM integrations WHERE id = $1`, id))
 }
 
 // ListIntegrations returns all channels, oldest first.
@@ -78,7 +78,7 @@ func (db *DB) ListIntegrations() ([]Integration, error) {
 
 // ListEnabledIntegrations returns only enabled channels.
 func (db *DB) ListEnabledIntegrations() ([]Integration, error) {
-	return db.queryIntegrations(`SELECT ` + integrationCols + ` FROM integrations WHERE enabled = 1 ORDER BY id ASC`)
+	return db.queryIntegrations(`SELECT ` + integrationCols + ` FROM integrations WHERE enabled ORDER BY id ASC`)
 }
 
 func (db *DB) queryIntegrations(q string, args ...any) ([]Integration, error) {
@@ -103,7 +103,7 @@ func (db *DB) queryIntegrations(q string, args ...any) ([]Integration, error) {
 func (db *DB) LogNotification(integrationID int64, incidentID *int64, event, status, errMsg string, ts int64) error {
 	_, err := db.Exec(
 		`INSERT INTO notification_log (integration_id, incident_id, event, status, error, sent_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
 		integrationID, incidentID, event, status, nullStr(errMsg), ts)
 	return err
 }
@@ -127,10 +127,22 @@ func (db *DB) ReplaceIntegrations(integrations []Integration) error {
 		}
 		if _, err := tx.Exec(
 			`INSERT INTO integrations (id, type, name, enabled, notify_warnings, config, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			in.ID, in.Type, in.Name, in.Enabled, in.NotifyWarnings, []byte(cfg), in.CreatedAt, in.UpdatedAt); err != nil {
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			in.ID, in.Type, in.Name, in.Enabled, in.NotifyWarnings, jsonText(cfg), in.CreatedAt, in.UpdatedAt); err != nil {
 			return err
 		}
 	}
+	if err := resetIdentity(tx, "integrations"); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+// jsonText sends JSON as text so PostgreSQL stores it as jsonb. A []byte
+// argument would be bound as bytea.
+func jsonText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return "{}"
+	}
+	return string(raw)
 }

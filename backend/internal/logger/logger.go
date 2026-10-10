@@ -8,7 +8,7 @@ import (
 )
 
 // Init installs a JSON slog handler on stdout as the default logger, tagged with
-// the application name and hostname. The level is read from UPMONITOR_LOG_LEVEL
+// the application name and hostname. The level is read from ALERTFLOW_LOG_LEVEL
 // (debug | info | warn | error), defaulting to info.
 func Init() {
 	host, _ := os.Hostname()
@@ -17,14 +17,14 @@ func Init() {
 		Level:     levelFromEnv(),
 	}
 	handler := slog.NewJSONHandler(os.Stdout, opts).WithAttrs([]slog.Attr{
-		slog.String("application", "upmonitor"),
+		slog.String("application", "alertflow"),
 		slog.String("hostname", host),
 	})
 	slog.SetDefault(slog.New(handler))
 }
 
 func levelFromEnv() slog.Level {
-	switch strings.ToLower(os.Getenv("UPMONITOR_LOG_LEVEL")) {
+	switch strings.ToLower(os.Getenv("ALERTFLOW_LOG_LEVEL")) {
 	case "debug":
 		return slog.LevelDebug
 	case "warn":

@@ -5,11 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 
-	"upmonitor/internal/db"
+	"github.com/ecakeman/alertflow/internal/db"
 )
 
 func TestDispatcherFansOutToEnabledOnly(t *testing.T) {
@@ -19,11 +18,7 @@ func TestDispatcherFansOutToEnabledOnly(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	database, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	defer database.Close()
+	database := db.OpenTest(t)
 
 	enabledCfg, _ := json.Marshal(webhookConfig{URL: srv.URL})
 	if _, err := database.CreateIntegration("webhook", "on", true, false, enabledCfg); err != nil {
@@ -60,11 +55,7 @@ func TestDispatcherLogsFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	database, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	defer database.Close()
+	database := db.OpenTest(t)
 
 	cfg, _ := json.Marshal(webhookConfig{URL: srv.URL})
 	if _, err := database.CreateIntegration("webhook", "bad", true, false, cfg); err != nil {
@@ -91,11 +82,7 @@ func TestDispatcherSkipsWarningsUnlessOptedIn(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	database, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	defer database.Close()
+	database := db.OpenTest(t)
 
 	cfg, _ := json.Marshal(webhookConfig{URL: srv.URL})
 	if _, err := database.CreateIntegration("webhook", "opted in", true, true, cfg); err != nil {
@@ -113,7 +100,7 @@ func TestDispatcherSkipsWarningsUnlessOptedIn(t *testing.T) {
 	}
 
 	var n int
-	err = database.QueryRow(
+	err := database.QueryRow(
 		`SELECT COUNT(*) FROM notification_log WHERE event = 'warning' AND incident_id IS NULL`).Scan(&n)
 	if err != nil {
 		t.Fatalf("count log: %v", err)
