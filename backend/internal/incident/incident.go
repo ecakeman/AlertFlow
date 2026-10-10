@@ -1,6 +1,5 @@
 // Package incident derives outage incidents from service status transitions.
-// It is deliberately independent of internal/monitor (which imports it) to
-// avoid an import cycle: the scheduler calls OnTransition after each check.
+// The check scheduler does not call it. A later consumer of check events will.
 package incident
 
 import (

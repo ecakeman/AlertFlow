@@ -77,12 +77,13 @@ One `check()` does, in order:
 3. `runCycle(...)` — the retry ladder (below). One cycle, one row.
 4. **Bail if the worker was cancelled mid-flight** (`parent.Err() != nil`) —
    otherwise a config edit or shutdown would record a bogus `offline`.
-5. `RecordCheckAndOutbox(...)` — in one transaction, append the check (stamped with the cycle's **start**) and an unpublished `monitor.check.completed` outbox row whose payload carries that check id. If this fails, stop: do not write TLS, do not move `lastStatus`, and do not open or resolve an incident.
+5. `RecordCheckAndOutbox(...)` — in one transaction, append the check (stamped with the cycle's **start**) and an unpublished `monitor.check.completed` outbox row whose payload carries that check id. If this fails, stop: do not write TLS and do not move `lastStatus`.
 6. `storeTLS(...)` — upsert the cert snapshot (HTTPS only, offline cycles only).
-7. Update `w.lastStatus`.
-8. `incident.OnTransition(prev, Outcome{...}, ...)`.
+7. Update `w.lastStatus`, which the next cycle uses only to decide whether to retry.
 
-The check row and the outbox row commit together. Incident changes and notification sends stay outside that transaction: `OnTransition` runs only after the commit, then starts a goroutine to deliver. A crash after commit and before that send can drop the notification; the outbox row remains, but nothing in this process publishes it. `published_at` stays NULL. Claiming an outbox row uses `FOR UPDATE SKIP LOCKED` on `outbox_events` only. That is not a lock on a service, and `runMu` is not a lock across processes.
+The scheduler stops there. It does not call `OnTransition` and it does not send notifications. `published_at` stays NULL; nothing in this process publishes the row. Claiming an outbox row uses `FOR UPDATE SKIP LOCKED` on `outbox_events` only. That is not a lock on a service, and `runMu` is not a lock across processes.
+
+Phase 3 consumes those events, records consumption progress, and applies incident transitions. Notification delivery, retries, and duplicate-event handling belong on that consumer, not on this check path.
 
 ### The retry ladder
 
@@ -130,11 +131,10 @@ after the check transaction commits.
 ## 4. Incident lifecycle
 
 **The principle: an incident is derived from a status _transition_, never from
-the status itself.** Nothing scans the DB looking for down services. The only
-trigger is `prev != current` inside a worker, at the moment a check is recorded.
-
-`internal/incident/incident.go` — `OnTransition` encodes one rule: **an incident
-is open exactly while the service is `offline`; `warning` counts as up.**
+the status itself.** The check scheduler does not apply that transition. It only
+stores the check and an outbox event. `OnTransition` still encodes the rule for
+the phase 3 consumer: **an incident is open exactly while the service is
+`offline`; `warning` counts as up.**
 
 | prev ↓ / current → | `online` | `warning` | `offline` |
 | --- | --- | --- | --- |
@@ -178,24 +178,18 @@ migration, `migrations/00001_init.sql`:
 CREATE UNIQUE INDEX idx_incidents_one_ongoing ON incidents (service_id) WHERE status = 'ongoing';
 ```
 
-Any number of `resolved` rows, at most one `ongoing` per service. This is what
-makes the race safe: a ticker check and a manual `CheckNow` can run at once, both
-read the same `prev`, and both try to open an incident. The second `INSERT` hits
-the index, `CreateIncident` returns `db.ErrOngoingExists`, and `OnTransition`
-treats it as "someone already opened it" (Debug log, no error). Manual creation
-hits the same wall and surfaces as a `400`.
+Any number of `resolved` rows, at most one `ongoing` per service. The check
+scheduler does not insert incidents. `CreateIncident` still returns
+`db.ErrOngoingExists` when a second ongoing row hits the index, and manual
+creation surfaces that as a `400`. The phase 3 consumer will use the same
+constraint.
 
 ### Surviving a restart
 
-`lastStatus` lives in memory, and memory is empty after a restart. `InitialStatus`
-seeds it from the DB when a worker starts:
-
-- an open incident exists → start `offline` (we were mid-outage) → the next
-  successful check closes it correctly;
-- none → start `online` → a first failing check opens one, a first successful
-  check doesn't "resolve" anything spurious.
-
-Without this, a restart during an outage would strand the incident open forever.
+`lastStatus` lives in memory. A new worker seeds it from the newest `checks` row
+(`LatestCheckStatus`), or `online` when that service has no row yet. The value
+only tells `runCycle` whether to skip retries. It is not an incident decision,
+and a restart does not resolve or open an incident.
 
 ### Manual incidents
 
@@ -227,8 +221,8 @@ deliberately stateless.
 
 ### Why `incident` is its own package
 
-`monitor` imports `incident`, so `incident` must never import `monitor` (import
-cycle). Hence everything arrives as arguments:
+The check scheduler does not import `incident`. `incident` still must not import
+`monitor`. Hence everything arrives as arguments:
 `OnTransition(ctx, db, dispatcher, svc, prev, Outcome{...}, ts)` — `Outcome`
 carries the attempt count and first-failure reason so a warning notification can
 explain itself without importing `monitor`. It depends only on

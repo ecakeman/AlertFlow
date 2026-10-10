@@ -108,7 +108,7 @@ web-ui/
     lib/                 # icon-generator, image (canvas→WebP), prng, format
 ```
 
-Import direction worth remembering: `monitor → incident → {db, notify}`.
+Import direction worth remembering: `incident → {db, notify}`. The check scheduler does not import `incident`.
 `incident` must never import `monitor` (cycle) — see
 [ARCHITECTURE.md §4](ARCHITECTURE.md#4-incident-lifecycle).
 

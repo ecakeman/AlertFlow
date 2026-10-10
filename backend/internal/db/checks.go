@@ -1,5 +1,10 @@
 package db
 
+import (
+	"database/sql"
+	"errors"
+)
+
 // Check status values.
 const (
 	StatusOnline  = "online"
@@ -69,6 +74,21 @@ func (db *DB) InsertCheck(serviceID string, ts int64, status string, latency, co
 		serviceID, ts, status, latency, code, errVal, attempts,
 	)
 	return err
+}
+
+// LatestCheckStatus returns the newest stored cycle for serviceID, ordered by
+// id. An empty status means there is no row yet. Callers use it to seed retry
+// behaviour; it does not read or change incidents.
+func (db *DB) LatestCheckStatus(serviceID string) (string, error) {
+	var status string
+	err := db.QueryRow(
+		`SELECT status FROM checks WHERE service_id = $1 ORDER BY id DESC LIMIT 1`,
+		serviceID,
+	).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return status, err
 }
 
 // ListChecks returns a service's stored cycles, newest first. beforeID is an

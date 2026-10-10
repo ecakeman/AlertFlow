@@ -49,13 +49,13 @@ invent a test command.
   (the app rewrites it atomically); **PostgreSQL** (`ALERTFLOW_DATABASE_URL`) holds users, sessions, checks history,
   TLS snapshots, incidents + comments, and integrations + notification log. YAML stays in the config dir
   (`/config` in Docker; `ALERTFLOW_CONFIG_DIR` / `--config-dir`, default `./config`). Hand-editable
-  config → YAML; history, high-volume and **secrets** → PostgreSQL. A finished check and its `outbox_events` row commit in one transaction; incident updates still run after that commit, in process. Switching config dir does not switch databases. Nothing publishes the outbox yet.
+  config → YAML; history, high-volume and **secrets** → PostgreSQL. A finished check and its `outbox_events` row commit in one transaction. The scheduler does not open incidents or send notifications from that path. Switching config dir does not switch databases. Nothing publishes the outbox yet.
 - **Backend packages** (`backend/internal/`): `state` (tiny `state.json` outside the config dir, recording
   which config dir is active — lets a custom config-dir setting survive restarts), `config` (yaml load/save/validate), `db` (pgx `database/sql`
   — keep `CGO_ENABLED=0`; schema via **goose** PostgreSQL migrations in `db/migrations/*.sql`, embedded and
   run on `Open`), `event` (`monitor.check.completed` payload), `auth` (bcrypt + session tokens; cookies are set by the api layer), `monitor` (HTTP
   checker + goroutine-per-service ticker scheduler; `Sync` reconciles on config change; also reads the
-  TLS cert off HTTPS responses and feeds status transitions to `incident`), `incident` (opens/resolves
+  TLS cert off HTTPS responses; it does not call `incident`), `incident` (opens/resolves
   outage incidents from online↔offline transitions; imports `db`+`notify`, never `monitor`, to avoid a
   cycle), `notify` (incident-start/resolve notifications; a `Dispatcher` fans out to per-type `Sender`s
   — telegram/slack/email/webhook — registered via `init()`), `image` (WebP
@@ -72,11 +72,11 @@ invent a test command.
 
 ## Invariants (breaking these causes real bugs)
 
-- **An incident is derived from a status _transition_, never from the status itself.** Only
-  `prev != current` inside a worker creates/resolves one — nothing scans for down services. At most
-  one `ongoing` incident per service, enforced by a **partial unique index**, which is what makes the
-  ticker-vs-`CheckNow` race safe. `lastStatus` is in-memory and re-seeded from the DB on start
-  (`InitialStatus`) so restarts mid-outage don't strand incidents. Full flow:
+- **An incident is derived from a status _transition_, never from the status itself.** The check
+  scheduler does not apply that transition: it commits the check and an outbox event, then stops.
+  `OnTransition` still holds the rule for the phase 3 consumer. At most one `ongoing` incident per
+  service, enforced by a **partial unique index**. `lastStatus` is in-memory, re-seeded from the
+  latest `checks` row, and used only to decide retries. Full flow:
   [ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-incident-lifecycle).
 - **`config.yaml` is mutated only via `Server.updateConfig`** (clone → mutate → validate → atomic save
   → swap → `Sync`). Never touch `s.cfg` directly; add new `Service` fields to `config/clone.go` too.

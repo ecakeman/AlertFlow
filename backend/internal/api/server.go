@@ -64,7 +64,7 @@ func New(configDir string) (*Server, error) {
 		configDir:  configDir,
 		cfg:        cfg,
 		database:   database,
-		sched:      monitor.New(database, dispatcher),
+		sched:      monitor.New(database),
 		dispatcher: dispatcher,
 		webFS:      web.FS(),
 		logins:     newLoginLimiter(),

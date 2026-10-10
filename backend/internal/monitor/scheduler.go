@@ -13,17 +13,14 @@ import (
 	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/db"
 	"github.com/ecakeman/alertflow/internal/event"
-	"github.com/ecakeman/alertflow/internal/incident"
-	"github.com/ecakeman/alertflow/internal/notify"
 )
 
 // Scheduler runs one goroutine per service, each checking on its own interval.
 // Sync reconciles the running workers with a new set of services (add / remove
 // / restart on change), so config edits take effect without a restart.
 type Scheduler struct {
-	db         *db.DB
-	dispatcher *notify.Dispatcher
-	client     *http.Client
+	db     *db.DB
+	client *http.Client
 
 	mu      sync.Mutex
 	workers map[string]*worker
@@ -52,13 +49,12 @@ type cycleResult struct {
 	Attempts int
 }
 
-// New creates a scheduler backed by database for storing results and dispatcher
-// for incident notifications (dispatcher may be nil).
-func New(database *db.DB, dispatcher *notify.Dispatcher) *Scheduler {
+// New creates a scheduler that stores check results. It does not open incidents
+// or send notifications; those wait for a later consumer of the outbox.
+func New(database *db.DB) *Scheduler {
 	return &Scheduler{
-		db:         database,
-		dispatcher: dispatcher,
-		workers:    make(map[string]*worker),
+		db:      database,
+		workers: make(map[string]*worker),
 		client: &http.Client{
 			Transport: &http.Transport{
 				Proxy:                 http.ProxyFromEnvironment,
@@ -104,7 +100,7 @@ func (s *Scheduler) Sync(services []config.Service) {
 // startWorker launches (and registers) a worker for svc. Caller holds the lock.
 func (s *Scheduler) startWorker(svc config.Service) {
 	ctx, cancel := context.WithCancel(context.Background())
-	w := &worker{svc: svc, cancel: cancel, lastStatus: incident.InitialStatus(s.db, svc.ID)}
+	w := &worker{svc: svc, cancel: cancel, lastStatus: seedStatus(s.db, svc.ID)}
 	warnIfLadderExceedsInterval(svc)
 	s.workers[svc.ID] = w
 	s.wg.Add(1)
@@ -134,8 +130,8 @@ func (s *Scheduler) run(ctx context.Context, w *worker) {
 
 // check runs one health check and stores the result, unless the worker was
 // cancelled mid-flight (which would otherwise record a spurious offline). It
-// also updates the current cert snapshot and feeds the status transition into
-// the incident detector.
+// also updates the current cert snapshot. It does not create incidents or
+// send notifications.
 func (s *Scheduler) check(parent context.Context, w *worker) {
 	w.runMu.Lock()
 	defer w.runMu.Unlock()
@@ -154,15 +150,15 @@ func (s *Scheduler) check(parent context.Context, w *worker) {
 	if parent.Err() != nil {
 		return
 	}
-	s.finishCycle(parent, w, svc, prev, cyc, start.Unix())
+	s.finishCycle(w, svc, cyc, start.Unix())
 }
 
 // finishCycle persists the cycle and, only after that transaction commits,
-// advances in-memory status and runs incident detection. A database error is
-// not a monitoring result: lastStatus stays where it was, and no notification
-// is sent for a check that was not stored. HTTP failures are already classified
+// updates the cert snapshot and lastStatus. lastStatus only feeds the next
+// cycle's retry ladder. A database error leaves lastStatus unchanged and does
+// not continue into the success path. HTTP failures are already classified
 // inside cyc (online, warning, or offline) before this runs.
-func (s *Scheduler) finishCycle(parent context.Context, w *worker, svc config.Service, prev string, cyc cycleResult, now int64) {
+func (s *Scheduler) finishCycle(w *worker, svc config.Service, cyc cycleResult, now int64) {
 	ev, err := event.NewCheckCompleted(svc.ID, svc.Name, svc.URL, now, cyc.Status, cyc.LatencyMs, cyc.StatusCode, cyc.Error, cyc.Attempts)
 	if err != nil {
 		slog.Error("monitor: build check event failed", "service", svc.ID, "error", err)
@@ -177,8 +173,21 @@ func (s *Scheduler) finishCycle(parent context.Context, w *worker, svc config.Se
 	w.mu.Lock()
 	w.lastStatus = cyc.Status
 	w.mu.Unlock()
-	incident.OnTransition(parent, s.db, s.dispatcher, svc, prev,
-		incident.Outcome{Status: cyc.Status, Attempts: cyc.Attempts, Error: cyc.Error}, now)
+}
+
+// seedStatus loads the newest stored check so a restarted worker still skips
+// retries while the service is already offline. No history means online, which
+// only affects that retry choice. It does not look at incidents.
+func seedStatus(database *db.DB, serviceID string) string {
+	status, err := database.LatestCheckStatus(serviceID)
+	if err != nil {
+		slog.Error("monitor: seed status", "service", serviceID, "error", err)
+		return db.StatusOnline
+	}
+	if status == "" {
+		return db.StatusOnline
+	}
+	return status
 }
 
 // runCycle performs up to RetryAttempts checks and classifies the cycle:
@@ -310,15 +319,16 @@ func (s *Scheduler) storeTLS(svc config.Service, res Result, now int64) {
 	}
 }
 
-// CheckNow runs a check for svc immediately and synchronously (manual trigger),
-// reusing the running worker so it participates in transition detection.
+// CheckNow runs a check for svc immediately and synchronously. It reuses the
+// running worker so the cycle shares that worker's runMu. It does not update
+// incidents.
 func (s *Scheduler) CheckNow(svc config.Service) {
 	s.mu.Lock()
 	w := s.workers[svc.ID]
 	s.mu.Unlock()
 	if w == nil {
 		// No running worker (e.g. service just added): synthesize an ephemeral one.
-		w = &worker{svc: svc, lastStatus: incident.InitialStatus(s.db, svc.ID)}
+		w = &worker{svc: svc, lastStatus: seedStatus(s.db, svc.ID)}
 	}
 	s.check(context.Background(), w)
 }
