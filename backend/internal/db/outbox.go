@@ -171,8 +171,8 @@ func (db *DB) ClaimOutbox(owner string, now, leaseUntil int64, limit int) ([]Out
 }
 
 // RecordOutboxFailure stores a delivery error and the next time to try.
-// The row stays unpublished and is not deleted, however many attempts it has.
-func (db *DB) RecordOutboxFailure(id int64, errMsg string, nextAttemptAt int64) error {
+// The row stays unpublished and is not deleted. owner must still hold the lease.
+func (db *DB) RecordOutboxFailure(id int64, owner string, now int64, errMsg string, nextAttemptAt int64) error {
 	res, err := db.Exec(
 		`UPDATE outbox_events
 		 SET attempt_count = attempt_count + 1,
@@ -180,8 +180,8 @@ func (db *DB) RecordOutboxFailure(id int64, errMsg string, nextAttemptAt int64) 
 		     next_attempt_at = $3,
 		     lease_owner = NULL,
 		     lease_until = NULL
-		 WHERE id = $1 AND published_at IS NULL`,
-		id, errMsg, nextAttemptAt,
+		 WHERE id = $1 AND published_at IS NULL AND lease_owner = $4 AND lease_until > $5`,
+		id, errMsg, nextAttemptAt, owner, now,
 	)
 	if err != nil {
 		return err
@@ -196,14 +196,14 @@ func (db *DB) RecordOutboxFailure(id int64, errMsg string, nextAttemptAt int64) 
 	return nil
 }
 
-// MarkOutboxPublished records that a publisher observed a broker acknowledgement.
-// The scheduler does not call this. Leaving published_at NULL is the unpublished state.
-func (db *DB) MarkOutboxPublished(id int64, publishedAt int64) error {
+// MarkOutboxPublished records that this lease owner observed a broker acknowledgement.
+// A publisher whose lease was taken by someone else updates nothing.
+func (db *DB) MarkOutboxPublished(id int64, owner string, now, publishedAt int64) error {
 	res, err := db.Exec(
 		`UPDATE outbox_events
 		 SET published_at = $2, lease_owner = NULL, lease_until = NULL
-		 WHERE id = $1 AND published_at IS NULL`,
-		id, publishedAt,
+		 WHERE id = $1 AND published_at IS NULL AND lease_owner = $3 AND lease_until > $4`,
+		id, publishedAt, owner, now,
 	)
 	if err != nil {
 		return err

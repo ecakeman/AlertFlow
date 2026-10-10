@@ -48,14 +48,15 @@ real work:
   pick which services count toward the average.
 - 🎛️ **Three widget modes** — icon only, icon + name, or a mini dashboard with
   response time, uptime and a sparkline. Switch mode in one click from the card.
-- 🔔 **Incidents that log themselves** — when a service goes down an incident
-  opens automatically and closes when it recovers, with start/end times and a
+- 🔔 **Incidents that log themselves** — when the consumer sees a service go
+  down it opens an incident and closes it on recovery, with start/end times and a
   duration; a check that recovers on a retry logs a warning event alongside
   them. Add your own for planned work, comment to keep the team in sync, and
   page through the full history.
-- 📣 **Get told about it** — send incidents to **Telegram, Slack, email or any
-  webhook**. Add a channel, hit *Send test*, done. Warnings are opt‑in per
-  channel, so only real outages page you by default.
+- 📣 **Get told about it** — channels are **Telegram, Slack, email or any
+  webhook**. Add a channel, hit *Send test*, done. An outage queues a pending
+  delivery for each enabled channel; this phase does not send that queue.
+  Warnings are opt‑in per channel, so only real outages are queued by default.
 - 🔍 **Per‑service detail** — uptime over 7/30/365 days, a response‑time chart,
   recent incidents (outages **and** warnings), a paginated **ping console**
   that logs every check, 10 rows a page (successful runs collapsed, failures
@@ -75,11 +76,13 @@ real work:
 
 ## Quick start
 
-Use Docker Compose. It starts two services: PostgreSQL 16 stores users,
-sessions, checks, incidents and integrations; the AlertFlow container serves
-the API and the embedded UI. The app connects with `ALERTFLOW_DATABASE_URL`
-from `.env`. No published image is required — Compose builds `alertflow:local`
-from this repository.
+Use Docker Compose. PostgreSQL 16 stores users, sessions, checks, incidents and
+integrations. Kafka (`apache/kafka:3.9.1`) carries check events. The `alertflow`
+container serves the API and the embedded UI and runs checks. `publisher` and
+`consumer` are the same binary with `ALERTFLOW_ROLE` set; run one publisher.
+The app connects with `ALERTFLOW_DATABASE_URL` from `.env`. No published image
+is required — Compose builds `alertflow:local` from this repository. The
+consumer records incidents and queues notification tasks. It does not send them.
 
 ```bash
 cp .env.example .env
@@ -136,6 +139,7 @@ imported.
 | HTTP port | `8080`                    | host side of `8080:8080` in `docker-compose.yml` |
 | Config    | volume mounted at `/config` | holds YAML, images and backups |
 | Database  | PostgreSQL service          | users, history, incidents, integrations |
+| Kafka     | `apache/kafka:3.9.1`        | topic `alert-events`, three partitions; host port `9092` |
 
 ### Environment variables
 
@@ -145,6 +149,8 @@ imported.
 | `ALERTFLOW_ADDR`         | `:8080`   | Listen address (`host:port`).                |
 | `ALERTFLOW_LOG_LEVEL`    | `info`    | Log verbosity: `debug`, `info`, `warn`, `error`. |
 | `ALERTFLOW_DATABASE_URL` | —         | PostgreSQL DSN. Required.                    |
+| `ALERTFLOW_ROLE`         | `server`  | `server`, `publisher`, or `consumer`.        |
+| `ALERTFLOW_KAFKA_BROKERS`| —        | Broker list for publisher and consumer.      |
 | `ALERTFLOW_DB_MAX_OPEN`  | `10`      | Maximum open database connections.           |
 | `ALERTFLOW_DB_MAX_IDLE`  | `5`       | Maximum idle database connections.           |
 | `ALERTFLOW_DB_CONN_MAX_LIFETIME` | `30m` | Maximum lifetime of a connection.       |
@@ -184,9 +190,10 @@ One static Go binary embeds the built Vue app and serves both the API and the UI
   users, sessions and metrics live in PostgreSQL.
 
 The application itself is one static binary. A running stack also needs
-PostgreSQL. The image-publish workflow is set up to build `linux/amd64` and
-`linux/arm64`, but this repository has not published an image, and the local
-`docker build` in phase 1 did not finish.
+PostgreSQL, one Kafka broker, one publisher, and one consumer. Publishing and
+consuming are not one atomic commit with the database. The image-publish
+workflow is set up to build `linux/amd64` and `linux/arm64`, but this repository
+has not published an image, and the local `docker build` in phase 1 did not finish.
 
 ## Local development
 

@@ -16,6 +16,7 @@ func TestMigrationsCreateTables(t *testing.T) {
 		"users", "sessions", "checks",
 		"service_tls", "incidents", "incident_comments",
 		"integrations", "notification_log", "outbox_events",
+		"processed_events", "dead_letter_events", "service_runtime_state", "notification_deliveries",
 	}
 	for _, table := range want {
 		var name string

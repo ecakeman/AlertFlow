@@ -1,5 +1,5 @@
 // Package event holds the versioned payloads written to the outbox.
-// Publishing them is a later stage; this package only builds the record.
+// Decide says what an event does to incidents. It does not write to the database.
 package event
 
 import (

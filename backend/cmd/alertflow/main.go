@@ -14,7 +14,10 @@ import (
 	"github.com/gofiber/fiber/v3"
 
 	"github.com/ecakeman/alertflow/internal/api"
+	"github.com/ecakeman/alertflow/internal/consume"
+	"github.com/ecakeman/alertflow/internal/db"
 	"github.com/ecakeman/alertflow/internal/logger"
+	"github.com/ecakeman/alertflow/internal/publish"
 	"github.com/ecakeman/alertflow/internal/state"
 )
 
@@ -29,6 +32,20 @@ func main() {
 	flag.StringVar(&configDir, "config-dir", "", "config directory (default: $ALERTFLOW_CONFIG_DIR or ./config)")
 	flag.Parse()
 
+	switch envOr("ALERTFLOW_ROLE", "server") {
+	case "server":
+		runServer(addr, configDir)
+	case "publisher":
+		runPublisher()
+	case "consumer":
+		runConsumer()
+	default:
+		slog.Error("ALERTFLOW_ROLE must be server, publisher, or consumer")
+		os.Exit(1)
+	}
+}
+
+func runServer(addr, configDir string) {
 	dir := resolveConfigDir(configDir)
 	slog.Info("starting alertflow", "config_dir", dir, "addr", addr)
 
@@ -58,6 +75,49 @@ func main() {
 	if err := app.ShutdownWithContext(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "error", err)
 	}
+}
+
+func runPublisher() {
+	database := openRoleDB()
+	defer database.Close()
+	pub, err := publish.New(database, os.Getenv("ALERTFLOW_KAFKA_BROKERS"), publish.Topic, "")
+	if err != nil {
+		slog.Error("publisher", "error", err)
+		os.Exit(1)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	slog.Info("publisher started", "topic", publish.Topic)
+	if err := pub.Run(ctx); err != nil && ctx.Err() == nil {
+		slog.Error("publisher stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func runConsumer() {
+	database := openRoleDB()
+	defer database.Close()
+	cons, err := consume.New(database, os.Getenv("ALERTFLOW_KAFKA_BROKERS"), publish.Topic, "")
+	if err != nil {
+		slog.Error("consumer", "error", err)
+		os.Exit(1)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	slog.Info("consumer started", "topic", publish.Topic)
+	if err := cons.Run(ctx); err != nil && ctx.Err() == nil {
+		slog.Error("consumer stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func openRoleDB() *db.DB {
+	database, err := db.Open(os.Getenv("ALERTFLOW_DATABASE_URL"))
+	if err != nil {
+		slog.Error("startup failed", "error", err)
+		os.Exit(1)
+	}
+	return database
 }
 
 // resolveConfigDir picks the config directory (flag > env > saved state > default)

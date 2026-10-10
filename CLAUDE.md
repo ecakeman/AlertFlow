@@ -27,6 +27,9 @@ follow the pointer instead of re-deriving behaviour from the code.
 **When you change behaviour, update the matching doc in the same change** — these files are the
 contract future sessions rely on.
 
+**When a phase or a patch is finished, commit it and push to `origin` without asking.**
+Do not commit `ALERTFLOW_CURSOR_PLAN (1).md`. Do not force-push. Do not push to upstream.
+
 ## Working directories
 
 Two toolchains: run `npm` from `web-ui/`, run `go` from `backend/`. In dev they run side by side
@@ -49,11 +52,11 @@ invent a test command.
   (the app rewrites it atomically); **PostgreSQL** (`ALERTFLOW_DATABASE_URL`) holds users, sessions, checks history,
   TLS snapshots, incidents + comments, and integrations + notification log. YAML stays in the config dir
   (`/config` in Docker; `ALERTFLOW_CONFIG_DIR` / `--config-dir`, default `./config`). Hand-editable
-  config → YAML; history, high-volume and **secrets** → PostgreSQL. A finished check and its `outbox_events` row commit in one transaction. The scheduler does not open incidents or send notifications from that path. Switching config dir does not switch databases. Nothing publishes the outbox yet.
+  config → YAML; history, high-volume and **secrets** → PostgreSQL. A finished check and its `outbox_events` row commit in one transaction. The scheduler does not open incidents or send notifications from that path. `ALERTFLOW_ROLE=publisher` (one replica) publishes those rows to Kafka topic `alert-events` after a broker ack. `ALERTFLOW_ROLE=consumer` then applies incidents and inserts `pending` notification tasks in one database transaction, and commits the Kafka offset after that. The database and Kafka are not one atomic commit. This phase does not send notifications. Switching config dir does not switch databases.
 - **Backend packages** (`backend/internal/`): `state` (tiny `state.json` outside the config dir, recording
   which config dir is active — lets a custom config-dir setting survive restarts), `config` (yaml load/save/validate), `db` (pgx `database/sql`
   — keep `CGO_ENABLED=0`; schema via **goose** PostgreSQL migrations in `db/migrations/*.sql`, embedded and
-  run on `Open`), `event` (`monitor.check.completed` payload), `auth` (bcrypt + session tokens; cookies are set by the api layer), `monitor` (HTTP
+  run on `Open`), `event` (`monitor.check.completed` payload and `Decide`), `publish` (outbox to Kafka), `consume` (Kafka to incidents and pending deliveries), `auth` (bcrypt + session tokens; cookies are set by the api layer), `monitor` (HTTP
   checker + goroutine-per-service ticker scheduler; `Sync` reconciles on config change; also reads the
   TLS cert off HTTPS responses; it does not call `incident`), `incident` (opens/resolves
   outage incidents from online↔offline transitions; imports `db`+`notify`, never `monitor`, to avoid a
@@ -63,7 +66,7 @@ invent a test command.
   config+db+scheduler and applies edits copy-on-write under a lock; **Fiber v3** app with per-route
   auth/admin middleware, a central `ErrorHandler` rendering `{ "error": ... }`, and a native SPA
   catch-all serving the embedded FS), `web` (`//go:embed dist`, exposes `web.FS()`). Entry:
-  `cmd/alertflow/main.go` (inits slog, `app.Listen`, graceful `app.ShutdownWithContext`).
+  `cmd/alertflow/main.go` (`ALERTFLOW_ROLE`: `server` listens and runs the scheduler; `publisher` and `consumer` do not).
 - **Frontend:** Vue 3 `<script setup>`, Pinia stores (`auth`, `services`, `incidents`, `integrations`,
   `settings`, `ui`), typed API client in `src/api/`, `useServicesPolling` (~10s) drives live updates.
   Router guards gate setup/login/role. `/incidents` is open to any signed-in user (anyone may comment);
@@ -74,7 +77,7 @@ invent a test command.
 
 - **An incident is derived from a status _transition_, never from the status itself.** The check
   scheduler does not apply that transition: it commits the check and an outbox event, then stops.
-  `OnTransition` still holds the rule for the phase 3 consumer. At most one `ongoing` incident per
+  The consumer applies that rule with `event.Decide` and does not call `OnTransition` or `Dispatcher.Notify`. At most one `ongoing` incident per
   service, enforced by a **partial unique index**. `lastStatus` is in-memory, re-seeded from the
   latest `checks` row, and used only to decide retries. Full flow:
   [ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-incident-lifecycle).

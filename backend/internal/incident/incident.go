@@ -1,5 +1,7 @@
 // Package incident derives outage incidents from service status transitions.
-// The check scheduler does not call it. A later consumer of check events will.
+// The check scheduler does not call it. The Kafka consumer applies the same
+// rule through event.Decide inside one database transaction and does not call
+// OnTransition, because OnTransition also sends notifications.
 package incident
 
 import (

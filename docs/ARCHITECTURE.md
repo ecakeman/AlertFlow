@@ -81,9 +81,11 @@ One `check()` does, in order:
 6. `storeTLS(...)` — upsert the cert snapshot (HTTPS only, offline cycles only).
 7. Update `w.lastStatus`, which the next cycle uses only to decide whether to retry.
 
-The scheduler stops there. It does not call `OnTransition` and it does not send notifications. `published_at` stays NULL; nothing in this process publishes the row. Claiming an outbox row uses `FOR UPDATE SKIP LOCKED` on `outbox_events` only. That is not a lock on a service, and `runMu` is not a lock across processes.
+The scheduler stops there. It does not call `OnTransition` and it does not send notifications. `published_at` stays NULL in the server process. Claiming an outbox row uses `FOR UPDATE SKIP LOCKED` on `outbox_events` only. That is not a lock on a service, and `runMu` is not a lock across processes.
 
-Phase 3 consumes those events, records consumption progress, and applies incident transitions. Notification delivery, retries, and duplicate-event handling belong on that consumer, not on this check path.
+`ALERTFLOW_ROLE=publisher` is a second process of the same binary. It claims one due outbox row at a time, in `id` order, and writes it to the Kafka topic `alert-events` with the service id as the key. `published_at` is set only after the broker ack, and only when that process still holds the lease. Run one publisher. The database commit and the Kafka ack are not one atomic action: a crash after the ack and before `published_at` can publish the same event again.
+
+`ALERTFLOW_ROLE=consumer` reads that topic. One message updates the incident, `processed_events`, `service_runtime_state`, and `pending` `notification_deliveries` in one PostgreSQL transaction. The Kafka offset is committed after that transaction commits. This process does not call `Dispatcher.Notify`. Sending the pending rows is a later phase. More consumer replicas than the topic's three partitions do not add parallelism.
 
 ### The retry ladder
 
@@ -132,9 +134,10 @@ after the check transaction commits.
 
 **The principle: an incident is derived from a status _transition_, never from
 the status itself.** The check scheduler does not apply that transition. It only
-stores the check and an outbox event. `OnTransition` still encodes the rule for
-the phase 3 consumer: **an incident is open exactly while the service is
-`offline`; `warning` counts as up.**
+stores the check and an outbox event. The consumer applies the same rule with
+`event.Decide` inside one database transaction. It does not call `OnTransition`,
+because that function also sends notifications. **An incident is open exactly
+while the service is `offline`; `warning` counts as up.**
 
 | prev ↓ / current → | `online` | `warning` | `offline` |
 | --- | --- | --- | --- |
@@ -162,6 +165,23 @@ separately — a service that warns often would otherwise crowd real, older
 outages out of a single shared, necessarily-bounded page before the chart
 ever saw them.
 
+The consumer takes the previous status from `service_runtime_state`, locked with
+`SELECT ... FOR UPDATE`, not from the newest check. A missing row uses the latest
+check with a smaller id, or `online` when that history is gone. If an ongoing
+incident exists and the state row is missing, the previous status is `offline`,
+so a later recovery still resolves it. An event with an older `check_id` than
+the state row is stored in `processed_events` and does not move the incident or
+the status. A repeated `event_id` is the same no-op. An unreadable message, or
+one whose `schema_version` is not 1, is written to `dead_letter_events` and then
+its offset is committed. A database error rolls the transaction back and leaves
+the offset uncommitted.
+
+Enabled integrations receive a `notification_deliveries` row in status `pending`.
+`warning` rows go only to integrations with `notify_warnings`. Recovery from
+`offline` to `warning` queues a resolve task and no warning task. The payload is
+a snapshot of the event and does not copy integration secrets. Nothing in this
+phase calls a sender.
+
 `prev == current` returns immediately, which is the overwhelmingly common path.
 `InitialStatus` deliberately still returns only `online`/`offline` — a third seed
 value would change nothing in the matrix. The one visible consequence: a restart
@@ -179,10 +199,10 @@ CREATE UNIQUE INDEX idx_incidents_one_ongoing ON incidents (service_id) WHERE st
 ```
 
 Any number of `resolved` rows, at most one `ongoing` per service. The check
-scheduler does not insert incidents. `CreateIncident` still returns
-`db.ErrOngoingExists` when a second ongoing row hits the index, and manual
-creation surfaces that as a `400`. The phase 3 consumer will use the same
-constraint.
+scheduler does not insert incidents. The consumer does, and a second ongoing
+row still hits this index. `CreateIncident` returns `db.ErrOngoingExists` in
+that case. Manual creation surfaces it as a `400`. Manual create, edit, and
+resolve stay on their existing handlers.
 
 ### Surviving a restart
 
@@ -241,7 +261,9 @@ server can't stall the check loop.
 `internal/notify/dispatcher.go` then: loads enabled integrations → **skips any
 whose `notify_warnings` is false when the event is `warning`** → one goroutine
 per integration → calls its `Sender` → writes a `notification_log` row for
-**every** attempt (sent or failed). No retries.
+**every** attempt (sent or failed). No retries. The consumer does not use this
+path. It only inserts `notification_deliveries` rows in status `pending`. The
+test-notification API still calls the dispatcher directly.
 
 Warnings are opt-in per channel and off by default: they are frequent by design,
 and a channel that pages a human wants outages only. A warning has no incident,

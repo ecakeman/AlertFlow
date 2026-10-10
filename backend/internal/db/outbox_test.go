@@ -112,7 +112,7 @@ func TestOutboxLeaseAndFailure(t *testing.T) {
 		t.Fatalf("expired lease not reclaimed: %+v", expired)
 	}
 
-	if err := database.RecordOutboxFailure(expired[0].ID, "broker down", 5000); err != nil {
+	if err := database.RecordOutboxFailure(expired[0].ID, "publisher", 2500, "broker down", 5000); err != nil {
 		t.Fatal(err)
 	}
 	stored, err := database.GetOutboxByEventID(ev.EventID)
@@ -137,7 +137,14 @@ func TestOutboxLeaseAndFailure(t *testing.T) {
 		t.Fatalf("claimed before next attempt: %+v", early)
 	}
 
-	if err := database.MarkOutboxPublished(stored.ID, 6000); err != nil {
+	again, err := database.ClaimOutbox("publisher", 5000, 7000, 10)
+	if err != nil || len(again) != 1 {
+		t.Fatalf("reclaim after failure: %v %+v", err, again)
+	}
+	if err := database.MarkOutboxPublished(again[0].ID, "other", 5500, 6000); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("stale owner marked published: %v", err)
+	}
+	if err := database.MarkOutboxPublished(again[0].ID, "publisher", 5500, 6000); err != nil {
 		t.Fatal(err)
 	}
 	ready, err := database.ClaimOutbox("publisher", 6000, 7000, 10)
@@ -147,7 +154,7 @@ func TestOutboxLeaseAndFailure(t *testing.T) {
 	if len(ready) != 0 {
 		t.Fatalf("published event still claimable: %+v", ready)
 	}
-	if err := database.RecordOutboxFailure(stored.ID, "late", 8000); !errors.Is(err, sql.ErrNoRows) {
+	if err := database.RecordOutboxFailure(stored.ID, "publisher", 6500, "late", 8000); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("failure on a published event: %v", err)
 	}
 }

@@ -13,8 +13,8 @@
 三个步骤不要混在一起：
 
 1. 阶段 2：检查记录和 Outbox 事件在同一事务里提交。
-2. 阶段 3：消费这些事件，记下消费进度，再处理 Incident 状态。
-3. 阶段 3：按处理过的事件发通知，并处理重试和重复消费。本阶段没有做第 2、3 步。
+2. 阶段 3：把这些事件发到 Kafka，消费后在同一事务里处理 Incident，并插入 pending 投递任务。
+3. 阶段 4：发送那些任务，并处理发送重试。本阶段没有做第 2、3 步。
 
 领取用短事务，`FOR UPDATE SKIP LOCKED` 只锁 Outbox 行，并写下 `lease_owner` 和 `lease_until`。失败记录增加 `attempt_count`、`last_error` 和 `next_attempt_at`，清掉租约，不删除行，也不标记已发布。没有发布循环，没有 Kafka。
 
