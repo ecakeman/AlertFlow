@@ -171,6 +171,21 @@ export interface IncidentDetail extends Incident {
   comments: IncidentComment[]
 }
 
+export interface Delivery {
+  id: number
+  eventId: string
+  incidentId: number | null
+  integrationId: number
+  integrationName: string
+  integrationType: string
+  eventType: string
+  status: 'pending' | 'running' | 'retry_wait' | 'succeeded' | 'dead'
+  attemptCount: number
+  nextAttemptAt: string
+  lastError: string
+  sentAt: string | null
+}
+
 export type IntegrationType = 'telegram' | 'slack' | 'email' | 'webhook'
 
 export interface Integration {

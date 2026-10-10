@@ -49,7 +49,7 @@ invent a test command.
   (the app rewrites it atomically); **PostgreSQL** (`ALERTFLOW_DATABASE_URL`) holds users, sessions, checks history,
   TLS snapshots, incidents + comments, and integrations + notification log. YAML stays in the config dir
   (`/config` in Docker; `ALERTFLOW_CONFIG_DIR` / `--config-dir`, default `./config`). Hand-editable
-  config → YAML; history, high-volume and **secrets** → PostgreSQL. A finished check and its `outbox_events` row commit in one transaction. The scheduler does not open incidents or send notifications from that path. `ALERTFLOW_ROLE=publisher` (one replica) publishes those rows to Kafka topic `alert-events` after a broker ack. `ALERTFLOW_ROLE=consumer` then applies incidents and inserts `pending` notification tasks in one database transaction, and commits the Kafka offset after that. The database and Kafka are not one atomic commit. This phase does not send notifications. Switching config dir does not switch databases.
+  config → YAML; history, high-volume and **secrets** → PostgreSQL. A finished check and its `outbox_events` row commit in one transaction. The scheduler does not open incidents or send notifications from that path. `ALERTFLOW_ROLE=publisher` (one replica) publishes those rows to Kafka topic `alert-events` after a broker ack. `ALERTFLOW_ROLE=consumer` then applies incidents and inserts `pending` notification tasks in one database transaction, and commits the Kafka offset after that. The database and Kafka are not one atomic commit. `ALERTFLOW_ROLE=delivery` sends those tasks one channel at a time. External delivery is at-least-once. Switching config dir does not switch databases.
 - **Backend packages** (`backend/internal/`): `state` (tiny `state.json` outside the config dir, recording
   which config dir is active — lets a custom config-dir setting survive restarts), `config` (yaml load/save/validate), `db` (pgx `database/sql`
   — keep `CGO_ENABLED=0`; schema via **goose** PostgreSQL migrations in `db/migrations/*.sql`, embedded and
@@ -63,7 +63,7 @@ invent a test command.
   config+db+scheduler and applies edits copy-on-write under a lock; **Fiber v3** app with per-route
   auth/admin middleware, a central `ErrorHandler` rendering `{ "error": ... }`, and a native SPA
   catch-all serving the embedded FS), `web` (`//go:embed dist`, exposes `web.FS()`). Entry:
-  `cmd/alertflow/main.go` (`ALERTFLOW_ROLE`: `server` listens and runs the scheduler; `publisher` and `consumer` do not).
+  `cmd/alertflow/main.go` (`ALERTFLOW_ROLE`: `server` listens and runs the scheduler; `publisher`, `consumer`, and `delivery` do not).
 - **Frontend:** Vue 3 `<script setup>`, Pinia stores (`auth`, `services`, `incidents`, `integrations`,
   `settings`, `ui`), typed API client in `src/api/`, `useServicesPolling` (~10s) drives live updates.
   Router guards gate setup/login/role. `/incidents` is open to any signed-in user (anyone may comment);

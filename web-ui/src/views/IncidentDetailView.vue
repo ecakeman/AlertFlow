@@ -12,7 +12,7 @@ import { toast } from '@/components/ui/sonner'
 import { useIncidentsStore, type IncidentInput } from '@/stores/incidents'
 import { useAuthStore } from '@/stores/auth'
 import { api, ApiError } from '@/api'
-import type { IncidentDetail } from '@/types'
+import type { Delivery, IncidentDetail } from '@/types'
 import { initials } from '@/lib/format'
 
 const route = useRoute()
@@ -22,7 +22,9 @@ const auth = useAuthStore()
 
 const id = computed(() => Number(route.params.id))
 const detail = ref<IncidentDetail | null>(null)
+const deliveries = ref<Delivery[]>([])
 const loading = ref(true)
+const retrying = ref<number | null>(null)
 const editOpen = ref(false)
 const confirmOpen = ref(false)
 const commentBody = ref('')
@@ -36,8 +38,14 @@ async function load() {
   loading.value = true
   try {
     detail.value = await store.getDetail(id.value)
+    try {
+      deliveries.value = await api.listDeliveries(id.value)
+    } catch {
+      deliveries.value = []
+    }
   } catch {
     detail.value = null
+    deliveries.value = []
   } finally {
     loading.value = false
   }
@@ -99,6 +107,18 @@ async function onDelete() {
     router.push('/incidents')
   } catch (e) {
     toast.error(errMsg(e))
+  }
+}
+async function retry(deliveryId: number) {
+  retrying.value = deliveryId
+  try {
+    await api.retryDelivery(deliveryId)
+    deliveries.value = await api.listDeliveries(id.value)
+    toast.success('Delivery queued again')
+  } catch (e) {
+    toast.error(errMsg(e))
+  } finally {
+    retrying.value = null
   }
 }
 async function postComment() {
@@ -194,6 +214,47 @@ async function postComment() {
           <p class="mt-1 text-sm font-semibold tabular-nums">{{ durationText }}</p>
         </div>
       </div>
+
+      <Card class="mt-6">
+        <CardHeader>
+          <CardTitle class="text-sm">Notifications</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p v-if="deliveries.length === 0" class="text-sm text-muted-foreground">
+            No notification tasks for this incident.
+          </p>
+          <ul v-else class="space-y-3">
+            <li
+              v-for="row in deliveries"
+              :key="row.id"
+              class="rounded-lg border border-border px-3 py-2 text-sm"
+            >
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <span class="font-medium">{{ row.integrationName }}</span>
+                <span class="text-xs uppercase text-muted-foreground">{{ row.status }}</span>
+              </div>
+              <p class="mt-1 text-xs text-muted-foreground">
+                {{ row.eventType }} · {{ row.attemptCount }} attempt{{ row.attemptCount === 1 ? '' : 's' }}
+                <template v-if="row.status === 'retry_wait'">
+                  · next {{ fmtDateTime(row.nextAttemptAt) }}
+                </template>
+                <template v-if="row.sentAt"> · sent {{ fmtDateTime(row.sentAt) }}</template>
+              </p>
+              <p v-if="row.lastError" class="mt-1 text-xs text-destructive">{{ row.lastError }}</p>
+              <Button
+                v-if="auth.isAdmin && row.status === 'dead'"
+                class="mt-2"
+                variant="outline"
+                size="sm"
+                :disabled="retrying === row.id"
+                @click="retry(row.id)"
+              >
+                Retry
+              </Button>
+            </li>
+          </ul>
+        </CardContent>
+      </Card>
 
       <!-- Comments -->
       <Card class="mt-6">

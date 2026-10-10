@@ -118,6 +118,7 @@ func (s *Server) routes() {
 	app.Get("/api/incidents", auth, s.handleListIncidents)
 	app.Get("/api/incidents/:id", auth, s.handleGetIncident)
 	app.Post("/api/incidents/:id/comments", auth, s.handleAddIncidentComment)
+	app.Get("/api/incidents/:id/deliveries", auth, s.handleListDeliveries)
 
 	// Admin only.
 	app.Post("/api/services", auth, admin, s.handleCreateService)
@@ -145,6 +146,7 @@ func (s *Server) routes() {
 	app.Put("/api/integrations/:id", auth, admin, s.handleUpdateIntegration)
 	app.Delete("/api/integrations/:id", auth, admin, s.handleDeleteIntegration)
 	app.Post("/api/integrations/:id/test", auth, admin, s.handleTestIntegration)
+	app.Post("/api/deliveries/:id/retry", auth, admin, s.handleRetryDelivery)
 
 	// Images (authenticated; the handler gates itself rather than via middleware
 	// so a missing cookie renders as a 401 body instead of a redirect).

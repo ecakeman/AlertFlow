@@ -54,9 +54,9 @@ real work:
   them. Add your own for planned work, comment to keep the team in sync, and
   page through the full history.
 - 📣 **Get told about it** — channels are **Telegram, Slack, email or any
-  webhook**. Add a channel, hit *Send test*, done. An outage queues a pending
-  delivery for each enabled channel; this phase does not send that queue.
-  Warnings are opt‑in per channel, so only real outages are queued by default.
+  webhook**. Add a channel, hit *Send test*, done. An outage queues one task per
+  enabled channel, and the delivery process sends it. A crash after the receiver
+  accepts the request can send it again. Warnings are opt‑in per channel.
 - 🔍 **Per‑service detail** — uptime over 7/30/365 days, a response‑time chart,
   recent incidents (outages **and** warnings), a paginated **ping console**
   that logs every check, 10 rows a page (successful runs collapsed, failures
@@ -78,11 +78,12 @@ real work:
 
 Use Docker Compose. PostgreSQL 16 stores users, sessions, checks, incidents and
 integrations. Kafka (`apache/kafka:3.9.1`) carries check events. The `alertflow`
-container serves the API and the embedded UI and runs checks. `publisher` and
-`consumer` are the same binary with `ALERTFLOW_ROLE` set; run one publisher.
-The app connects with `ALERTFLOW_DATABASE_URL` from `.env`. No published image
-is required — Compose builds `alertflow:local` from this repository. The
-consumer records incidents and queues notification tasks. It does not send them.
+container serves the API and the embedded UI and runs checks. `publisher`,
+`consumer`, and `delivery` are the same binary with `ALERTFLOW_ROLE` set; run
+one publisher. The app connects with `ALERTFLOW_DATABASE_URL` from `.env`. No
+published image is required — Compose builds `alertflow:local` from this
+repository. The consumer records incidents and queues notification tasks. The
+delivery process sends those tasks. Sending is at-least-once.
 
 ```bash
 cp .env.example .env
@@ -149,7 +150,7 @@ imported.
 | `ALERTFLOW_ADDR`         | `:8080`   | Listen address (`host:port`).                |
 | `ALERTFLOW_LOG_LEVEL`    | `info`    | Log verbosity: `debug`, `info`, `warn`, `error`. |
 | `ALERTFLOW_DATABASE_URL` | —         | PostgreSQL DSN. Required.                    |
-| `ALERTFLOW_ROLE`         | `server`  | `server`, `publisher`, or `consumer`.        |
+| `ALERTFLOW_ROLE`         | `server`  | `server`, `publisher`, `consumer`, or `delivery`. |
 | `ALERTFLOW_KAFKA_BROKERS`| —        | Broker list for publisher and consumer.      |
 | `ALERTFLOW_DB_MAX_OPEN`  | `10`      | Maximum open database connections.           |
 | `ALERTFLOW_DB_MAX_IDLE`  | `5`       | Maximum idle database connections.           |
@@ -190,8 +191,8 @@ One static Go binary embeds the built Vue app and serves both the API and the UI
   users, sessions and metrics live in PostgreSQL.
 
 The application itself is one static binary. A running stack also needs
-PostgreSQL, one Kafka broker, one publisher, and one consumer. Publishing and
-consuming are not one atomic commit with the database. The image-publish
+PostgreSQL, one Kafka broker, one publisher, one consumer, and one delivery
+worker. Publishing and consuming are not one atomic commit with the database. The image-publish
 workflow is set up to build `linux/amd64` and `linux/arm64`, but this repository
 has not published an image, and the local `docker build` in phase 1 did not finish.
 

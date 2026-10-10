@@ -85,7 +85,9 @@ The scheduler stops there. It does not call `OnTransition` and it does not send 
 
 `ALERTFLOW_ROLE=publisher` is a second process of the same binary. It claims one due outbox row at a time, in `id` order, and writes it to the Kafka topic `alert-events` with the service id as the key. `published_at` is set only after the broker ack, and only when that process still holds the lease. Run one publisher. The database commit and the Kafka ack are not one atomic action: a crash after the ack and before `published_at` can publish the same event again.
 
-`ALERTFLOW_ROLE=consumer` reads that topic. One message updates the incident, `processed_events`, `service_runtime_state`, and `pending` `notification_deliveries` in one PostgreSQL transaction. The Kafka offset is committed after that transaction commits. This process does not call `Dispatcher.Notify`. Sending the pending rows is a later phase. More consumer replicas than the topic's three partitions do not add parallelism.
+`ALERTFLOW_ROLE=consumer` reads that topic. One message updates the incident, `processed_events`, `service_runtime_state`, and `pending` `notification_deliveries` in one PostgreSQL transaction. The Kafka offset is committed after that transaction commits. This process does not call `Dispatcher.Notify`. More consumer replicas than the topic's three partitions do not add parallelism.
+
+`ALERTFLOW_ROLE=delivery` sends those rows. It claims one due task at a time, calls that channel's `Sender`, and does not fan out with `Dispatcher.Notify`. Success, retry, and dead updates require the same lease. A crash after the remote service accepts the request and before PostgreSQL records `succeeded` can send the task again. Delivery is at-least-once, not exactly-once. The test-notification API still calls `Dispatcher.Test` and does not enqueue a task.
 
 ### The retry ladder
 
@@ -265,12 +267,12 @@ recovered on a retry). Nothing else notifies.
 `go dispatcher.Notify(...)` — **deliberately in a goroutine**, so a slow SMTP
 server can't stall the check loop.
 
-`internal/notify/dispatcher.go` then: loads enabled integrations → **skips any
-whose `notify_warnings` is false when the event is `warning`** → one goroutine
-per integration → calls its `Sender` → writes a `notification_log` row for
-**every** attempt (sent or failed). No retries. The consumer does not use this
-path. It only inserts `notification_deliveries` rows in status `pending`. The
-test-notification API still calls the dispatcher directly.
+`internal/notify/dispatcher.go` still fans a message out to every enabled
+integration. The check path and the consumer do not call it. `Dispatcher.Test`
+remains the immediate "send test" API. Automatic delivery is the `delivery`
+role: one `notification_deliveries` row, one `Sender`, then a `notification_log`
+row for that attempt. `notification_deliveries` is the queue. `notification_log`
+is the attempt history. A lost lease does not write a success log.
 
 Warnings are opt-in per channel and off by default: they are frequent by design,
 and a channel that pages a human wants outages only. A warning has no incident,

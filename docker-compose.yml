@@ -87,6 +87,16 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  delivery:
+    image: alertflow:local
+    environment:
+      ALERTFLOW_ROLE: delivery
+      ALERTFLOW_DATABASE_URL: postgres://alertflow:${POSTGRES_PASSWORD:-alertflow}@postgres:5432/alertflow?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   alertflow-pg:
   alertflow-config:

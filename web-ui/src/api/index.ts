@@ -7,6 +7,7 @@ import type {
   IncidentSeverity,
   IncidentsPage,
   IncidentComment,
+  Delivery,
   IncidentDetail,
   Integration,
   IntegrationType,
@@ -129,6 +130,9 @@ export const api = {
   deleteIncident: (id: number) => request<void>('DELETE', `/api/incidents/${id}`),
   addIncidentComment: (id: number, body: string) =>
     request<IncidentComment>('POST', `/api/incidents/${id}/comments`, { body }),
+  listDeliveries: (incidentId: number) =>
+    request<Delivery[]>('GET', `/api/incidents/${incidentId}/deliveries`),
+  retryDelivery: (id: number) => request<{ ok: boolean }>('POST', `/api/deliveries/${id}/retry`),
 
   // Integrations.
   listIntegrations: () => request<Integration[]>('GET', '/api/integrations'),

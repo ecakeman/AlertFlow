@@ -16,6 +16,7 @@ import (
 	"github.com/ecakeman/alertflow/internal/api"
 	"github.com/ecakeman/alertflow/internal/consume"
 	"github.com/ecakeman/alertflow/internal/db"
+	"github.com/ecakeman/alertflow/internal/deliver"
 	"github.com/ecakeman/alertflow/internal/logger"
 	"github.com/ecakeman/alertflow/internal/publish"
 	"github.com/ecakeman/alertflow/internal/state"
@@ -39,8 +40,10 @@ func main() {
 		runPublisher()
 	case "consumer":
 		runConsumer()
+	case "delivery":
+		runDelivery()
 	default:
-		slog.Error("ALERTFLOW_ROLE must be server, publisher, or consumer")
+		slog.Error("ALERTFLOW_ROLE must be server, publisher, consumer, or delivery")
 		os.Exit(1)
 	}
 }
@@ -107,6 +110,19 @@ func runConsumer() {
 	slog.Info("consumer started", "topic", publish.Topic)
 	if err := cons.Run(ctx); err != nil && ctx.Err() == nil {
 		slog.Error("consumer stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func runDelivery() {
+	database := openRoleDB()
+	defer database.Close()
+	worker := deliver.New(database, "")
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	slog.Info("delivery worker started")
+	if err := worker.Run(ctx); err != nil && ctx.Err() == nil {
+		slog.Error("delivery worker stopped", "error", err)
 		os.Exit(1)
 	}
 }
