@@ -169,6 +169,14 @@ export interface IncidentComment {
 
 export interface IncidentDetail extends Incident {
   comments: IncidentComment[]
+  externalAlerts: ExternalAlert[]
+}
+
+export interface ExternalAlert {
+  source: string
+  alertKey: string
+  status: 'firing' | 'resolved'
+  title: string
 }
 
 export interface Delivery {

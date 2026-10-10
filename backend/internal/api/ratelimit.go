@@ -5,19 +5,29 @@ import (
 	"time"
 )
 
-// loginLimiter throttles login attempts per key (username) with a sliding window.
+// loginLimiter throttles attempts per key with a sliding window.
 type loginLimiter struct {
 	mu       sync.Mutex
 	attempts map[string][]time.Time
+	max      int
 }
 
 const (
 	loginWindow = time.Minute
 	loginMax    = 10
+	webhookMax  = 60
 )
 
 func newLoginLimiter() *loginLimiter {
-	return &loginLimiter{attempts: make(map[string][]time.Time)}
+	return newLimiter(loginMax)
+}
+
+func newWebhookLimiter() *loginLimiter {
+	return newLimiter(webhookMax)
+}
+
+func newLimiter(max int) *loginLimiter {
+	return &loginLimiter{attempts: make(map[string][]time.Time), max: max}
 }
 
 // allow records an attempt and reports whether it is within the rate limit.
@@ -32,7 +42,7 @@ func (l *loginLimiter) allow(key string) bool {
 			recent = append(recent, t)
 		}
 	}
-	if len(recent) >= loginMax {
+	if len(recent) >= l.max {
 		l.attempts[key] = recent
 		return false
 	}

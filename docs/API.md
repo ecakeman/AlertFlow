@@ -42,8 +42,9 @@ transitions; these endpoints cover reading them plus the manual/edit path. See
 
 | Method & path                       | Auth  | Description                                                        |
 | ----------------------------------- | ----- | ------------------------------------------------------------------ |
+| `POST /api/alerts/webhook`         | bearer | Accept one external alert. See below. |
 | `GET /api/incidents`                | user  | A page of incidents, newest first, plus the total matching the filter — `{ incidents, total }`. Filters: `?status=ongoing\|resolved`, `?severity=outage\|warning`, `?serviceId=`; paging: `?limit=` 1–200 (default 20), `?offset=`. |
-| `GET /api/incidents/{id}`           | user  | One incident **with its comments**.                                |
+| `GET /api/incidents/{id}`           | user  | One incident **with its comments** and overlapping external alerts. |
 | `POST /api/incidents`               | admin | Log one manually `{ serviceId, title?, startedAt?, resolvedAt? }`.¹ |
 | `PUT /api/incidents/{id}`           | admin | Edit `{ title?, startedAt?, resolvedAt? }`; setting `resolvedAt` resolves it.² |
 | `DELETE /api/incidents/{id}`        | admin | Delete the incident (comments cascade).                            |
@@ -54,6 +55,27 @@ ongoing incident (at most one per service) or the `serviceId` is unknown.
 ² Omitting a field leaves it unchanged. Timestamps are RFC3339.
 ³ **Any** signed-in user may comment — this is the one incident write that is not
 admin-gated.
+
+## External alerts
+
+`POST /api/alerts/webhook` does not use the session cookie. Send `Authorization: Bearer <ALERTFLOW_WEBHOOK_TOKEN>`. If that variable is empty, every request is rejected. The body is at most 64 KiB. One source address is limited to 60 requests per minute.
+
+```jsonc
+{
+  "source": "grafana",
+  "event_id": "evt-1",          // stable id for this delivery; retries must reuse it
+  "alert_key": "cpu-high",      // same value for the firing and resolved events
+  "service_id": "api",          // must already exist in config.yaml
+  "status": "firing",           // firing | resolved
+  "occurred_at": 1780000000,    // unix seconds
+  "title": "CPU high",
+  "description": "optional"
+}
+```
+
+`202` means the event and its outbox row were stored. `200` with `"duplicate": true` means this `source` and `event_id` were already stored. Neither response means the incident or a notification has been processed. Unknown services, missing fields, and a status other than `firing` or `resolved` return `400`.
+
+The same `alert_key` stays one alert instance. An incident stays open until the HTTP status is not `offline` and no external alert for that service is `firing`.
 
 ## Integrations
 
@@ -269,6 +291,9 @@ status.
   "comments": [
     { "id": 1, "incidentId": 1, "username": "admin",
       "body": "Looking into it", "createdAt": "2026-07-15T10:50:00Z" }
+  ],
+  "externalAlerts": [
+    { "source": "grafana", "alertKey": "cpu-high", "status": "firing", "title": "CPU high" }
   ]
 }
 ```

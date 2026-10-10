@@ -274,9 +274,17 @@ type incidentCommentDTO struct {
 	CreatedAt  string `json:"createdAt"`
 }
 
+type externalAlertDTO struct {
+	Source   string `json:"source"`
+	AlertKey string `json:"alertKey"`
+	Status   string `json:"status"`
+	Title    string `json:"title"`
+}
+
 type incidentDetailDTO struct {
 	incidentDTO
-	Comments []incidentCommentDTO `json:"comments"`
+	Comments       []incidentCommentDTO `json:"comments"`
+	ExternalAlerts []externalAlertDTO   `json:"externalAlerts"`
 }
 
 // incidentsResponse is a page of incidents plus the total matching the same

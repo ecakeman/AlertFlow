@@ -105,18 +105,37 @@ func applyCheckEventTx(tx *sql.Tx, ev event.CheckCompleted) error {
 	var incidentID *int64
 	var resolvedAt *int64
 	kind := ""
+	subject := notifySubject{
+		eventID: ev.EventID, serviceID: ev.ServiceID, serviceName: ev.ServiceName,
+		serviceURL: ev.ServiceURL, occurredAt: ev.OccurredAt, attempts: ev.Attempts, errText: ev.Error,
+	}
 	switch event.Decide(prev, ev.Status) {
 	case event.TransitionOpen:
-		id, err := insertOngoingTx(tx, ev.ServiceID, ev.OccurredAt, now)
+		var existing int64
+		err := tx.QueryRow(
+			`SELECT id FROM incidents WHERE service_id = $1 AND status = 'ongoing'`,
+			ev.ServiceID,
+		).Scan(&existing)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		id, err := insertOngoingTx(tx, ev.ServiceID, ev.OccurredAt, now, "")
 		if err != nil {
-			if errors.Is(err, ErrOngoingExists) {
-				break
-			}
 			return err
 		}
 		incidentID = &id
 		kind = "incident_start"
 	case event.TransitionResolve:
+		active, err := countFiringAlerts(tx, ev.ServiceID)
+		if err != nil {
+			return err
+		}
+		if active > 0 {
+			break
+		}
 		id, err := resolveOngoingTx(tx, ev.ServiceID, ev.OccurredAt, now)
 		if err != nil {
 			return err
@@ -137,7 +156,7 @@ func applyCheckEventTx(tx *sql.Tx, ev event.CheckCompleted) error {
 	}
 
 	if kind != "" {
-		if err := insertDeliveriesTx(tx, ev, kind, incidentID, resolvedAt, now); err != nil {
+		if err := insertDeliveriesTx(tx, subject, kind, incidentID, resolvedAt, now); err != nil {
 			return err
 		}
 	}
@@ -178,12 +197,16 @@ func previousStatus(tx *sql.Tx, serviceID string, beforeCheckID int64) (string, 
 	return status, nil
 }
 
-func insertOngoingTx(tx *sql.Tx, serviceID string, startedAt, now int64) (int64, error) {
+func insertOngoingTx(tx *sql.Tx, serviceID string, startedAt, now int64, title string) (int64, error) {
+	var titleVal any
+	if title != "" {
+		titleVal = title
+	}
 	var id int64
 	err := tx.QueryRow(
 		`INSERT INTO incidents (service_id, status, source, title, started_at, resolved_at, created_by, created_at, updated_at)
-		 VALUES ($1, 'ongoing', 'auto', NULL, $2, NULL, NULL, $3, $3) RETURNING id`,
-		serviceID, startedAt, now,
+		 VALUES ($1, 'ongoing', 'auto', $4, $2, NULL, NULL, $3, $3) RETURNING id`,
+		serviceID, startedAt, now, titleVal,
 	).Scan(&id)
 	if isUniqueViolation(err) {
 		return 0, ErrOngoingExists
@@ -215,7 +238,17 @@ func insertWarningTx(tx *sql.Tx, serviceID string, ts, now int64) (int64, error)
 	return id, err
 }
 
-func insertDeliveriesTx(tx *sql.Tx, ev event.CheckCompleted, kind string, incidentID, resolvedAt *int64, now int64) error {
+type notifySubject struct {
+	eventID     string
+	serviceID   string
+	serviceName string
+	serviceURL  string
+	occurredAt  int64
+	attempts    int
+	errText     string
+}
+
+func insertDeliveriesTx(tx *sql.Tx, ev notifySubject, kind string, incidentID, resolvedAt *int64, now int64) error {
 	rows, err := tx.Query(
 		`SELECT id, notify_warnings FROM integrations WHERE enabled`,
 	)
@@ -244,15 +277,15 @@ func insertDeliveriesTx(tx *sql.Tx, ev event.CheckCompleted, kind string, incide
 		}
 		snap := DeliverySnapshot{
 			Event:       kind,
-			EventID:     ev.EventID,
+			EventID:     ev.eventID,
 			IncidentID:  incidentID,
-			ServiceID:   ev.ServiceID,
-			ServiceName: ev.ServiceName,
-			ServiceURL:  ev.ServiceURL,
-			StartedAt:   ev.OccurredAt,
+			ServiceID:   ev.serviceID,
+			ServiceName: ev.serviceName,
+			ServiceURL:  ev.serviceURL,
+			StartedAt:   ev.occurredAt,
 			ResolvedAt:  resolvedAt,
-			Attempts:    ev.Attempts,
-			Error:       ev.Error,
+			Attempts:    ev.attempts,
+			Error:       ev.errText,
 		}
 		raw, err := json.Marshal(snap)
 		if err != nil {
@@ -263,7 +296,7 @@ func insertDeliveriesTx(tx *sql.Tx, ev event.CheckCompleted, kind string, incide
 				event_id, incident_id, integration_id, event_type, payload, status,
 				attempt_count, next_attempt_at, created_at, updated_at
 			) VALUES ($1, $2, $3, $4, $5, 'pending', 0, $6, $6, $6)`,
-			ev.EventID, incidentID, c.id, kind, string(raw), now,
+			ev.eventID, incidentID, c.id, kind, string(raw), now,
 		); err != nil {
 			return err
 		}

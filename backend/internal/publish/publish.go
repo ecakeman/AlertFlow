@@ -147,13 +147,20 @@ func (p *Publisher) publishAvailable(ctx context.Context) (int, error) {
 }
 
 func (p *Publisher) publishOne(ctx context.Context, row db.OutboxEvent) error {
-	var body event.CheckCompleted
-	if err := json.Unmarshal(row.Payload, &body); err != nil || body.EventID != row.EventID || body.SchemaVersion != event.SchemaVersion || body.EventType != event.TypeCheckCompleted {
-		reason := "payload does not match the outbox row"
-		if err != nil {
-			reason = err.Error()
-		}
-		return p.fail(row, errors.New(reason))
+	var body struct {
+		EventID       string `json:"event_id"`
+		EventType     string `json:"event_type"`
+		SchemaVersion int    `json:"schema_version"`
+		ServiceID     string `json:"service_id"`
+	}
+	if err := json.Unmarshal(row.Payload, &body); err != nil {
+		return p.fail(row, err)
+	}
+	if body.EventID != row.EventID || body.SchemaVersion != event.SchemaVersion || body.EventType != row.EventType {
+		return p.fail(row, errors.New("payload does not match the outbox row"))
+	}
+	if body.EventType != event.TypeCheckCompleted && body.EventType != event.TypeExternalAlert {
+		return p.fail(row, fmt.Errorf("unsupported event %s", body.EventType))
 	}
 	key := row.MessageKey
 	if key == "" {

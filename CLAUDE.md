@@ -72,11 +72,14 @@ invent a test command.
 
 ## Invariants (breaking these causes real bugs)
 
-- **An incident is derived from a status _transition_, never from the status itself.** The check
-  scheduler does not apply that transition: it commits the check and an outbox event, then stops.
-  The consumer applies that rule with `event.Decide` and does not call `OnTransition` or `Dispatcher.Notify`. At most one `ongoing` incident per
+- **An incident stays open while HTTP is `offline` or an external alert is `firing`.** The check
+  scheduler does not apply that change: it commits the check and an outbox event, then stops.
+  The consumer applies check transitions with `event.Decide` and external alerts in the same kind of
+  transaction. It does not call `OnTransition` or `Dispatcher.Notify`. A recovery from only one source
+  does not close the incident. At most one `ongoing` incident per
   service, enforced by a **partial unique index**. `lastStatus` is in-memory, re-seeded from the
-  latest `checks` row, and used only to decide retries. Full flow:
+  latest `checks` row, and used only to decide retries. `service_runtime_state` is the HTTP status,
+  not the external alert. Full flow:
   [ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-incident-lifecycle).
 - **`config.yaml` is mutated only via `Server.updateConfig`** (clone → mutate → validate → atomic save
   → swap → `Sync`). Never touch `s.cfg` directly; add new `Service` fields to `config/clone.go` too.

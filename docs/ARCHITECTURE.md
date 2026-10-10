@@ -85,7 +85,9 @@ The scheduler stops there. It does not call `OnTransition` and it does not send 
 
 `ALERTFLOW_ROLE=publisher` is a second process of the same binary. It claims one due outbox row at a time, in `id` order, and writes it to the Kafka topic `alert-events` with the service id as the key. `published_at` is set only after the broker ack, and only when that process still holds the lease. Run one publisher. The database commit and the Kafka ack are not one atomic action: a crash after the ack and before `published_at` can publish the same event again.
 
-`ALERTFLOW_ROLE=consumer` reads that topic. One message updates the incident, `processed_events`, `service_runtime_state`, and `pending` `notification_deliveries` in one PostgreSQL transaction. The Kafka offset is committed after that transaction commits. This process does not call `Dispatcher.Notify`. More consumer replicas than the topic's three partitions do not add parallelism.
+`ALERTFLOW_ROLE=consumer` reads that topic. One message updates the incident, `processed_events`, `service_runtime_state` or an external alert, and `pending` `notification_deliveries` in one PostgreSQL transaction. The Kafka offset is committed after that transaction commits. This process does not call `Dispatcher.Notify`. More consumer replicas than the topic's three partitions do not add parallelism.
+
+`POST /api/alerts/webhook` accepts one generic JSON alert with a bearer token (`ALERTFLOW_WEBHOOK_TOKEN`). That request writes `external_alert_events` and an `external.alert` outbox row, then returns. It does not wait for Kafka or for a notification. A repeated `source` and `event_id` does not write a second outbox row.
 
 `ALERTFLOW_ROLE=delivery` sends those rows. It claims one due task at a time, calls that channel's `Sender`, and does not fan out with `Dispatcher.Notify`. The lease is longer than the send timeout and is not renewed. Success, retry, and dead updates require the same lease. A crash after the remote service accepts the request and before PostgreSQL records `succeeded` can send the task again. Delivery is at-least-once, not exactly-once. If the worker keeps crashing before it finishes, the task still stops at the attempt limit: the next claim marks that expired row `dead`, clears the lease, and does not write a `notification_log` row. HTTP 408, 425, and 429 wait and retry; other 4xx responses are permanent. A warning delivery can point at its warning incident, but the `notification_log` row for `warning` keeps `incident_id` NULL. Stored and returned errors do not include channel secrets. The test-notification API still calls `Dispatcher.Test` and does not enqueue a task.
 
@@ -134,12 +136,7 @@ after the check transaction commits.
 
 ## 4. Incident lifecycle
 
-**The principle: an incident is derived from a status _transition_, never from
-the status itself.** The check scheduler does not apply that transition. It only
-stores the check and an outbox event. The consumer applies the same rule with
-`event.Decide` inside one database transaction. It does not call `OnTransition`,
-because that function also sends notifications. **An incident is open exactly
-while the service is `offline`; `warning` counts as up.**
+**The principle: an incident is derived from a fault-source change, never from a stored status by itself.** The check scheduler does not apply that change. It only stores the check and an outbox event. The consumer applies check transitions with `event.Decide`, and external alerts with the alert row, inside one database transaction. It does not call `OnTransition`, because that function also sends notifications. **An incident stays open while the HTTP status is `offline` or any external alert for that service is `firing`.** A recovery from only one of those sources does not close it. `warning` still counts as HTTP up. External alerts are not written as check rows and do not change `service_runtime_state.current_status`.
 
 | prev ↓ / current → | `online` | `warning` | `offline` |
 | --- | --- | --- | --- |
@@ -147,6 +144,8 @@ while the service is `offline`; `warning` counts as up.**
 | `warning` | no-op, no notification | no-op — this is what dedupes a service that blips every cycle | `CreateIncident` → `incident_start` |
 | `offline` | `ResolveOngoingIncident` → `incident_resolve` | same, and **no** warning notification or event log: the resolve already says we are back | no-op — why a service that stays down doesn't spawn an incident every tick |
 | `unknown` | resolve (silent) | logs a `CreateWarningEvent` (unreachable in practice — `InitialStatus` never seeds `unknown`) | `CreateIncident` → `incident_start` |
+
+The resolve cells do not close the incident while an external alert for that service is still `firing`. The HTTP status is still updated.
 
 ### Incident severity: outage vs. warning
 

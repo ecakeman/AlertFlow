@@ -76,10 +76,29 @@ func (s *Server) handleGetIncident(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "could not load comments")
 	}
+	end := inc.StartedAt
+	if inc.ResolvedAt != nil {
+		end = *inc.ResolvedAt
+	} else {
+		end = time.Now().Unix()
+	}
+	if end < inc.StartedAt {
+		end = inc.StartedAt
+	}
+	alerts, err := s.conn().ListExternalAlertsOverlapping(inc.ServiceID, inc.StartedAt, end)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "could not load external alerts")
+	}
 	out := incidentDetailDTO{incidentDTO: toIncidentDTO(*inc, s.serviceName(inc.ServiceID))}
 	out.Comments = make([]incidentCommentDTO, 0, len(comments))
 	for _, cm := range comments {
 		out.Comments = append(out.Comments, toIncidentCommentDTO(cm))
+	}
+	out.ExternalAlerts = make([]externalAlertDTO, 0, len(alerts))
+	for _, alert := range alerts {
+		out.ExternalAlerts = append(out.ExternalAlerts, externalAlertDTO{
+			Source: alert.Source, AlertKey: alert.AlertKey, Status: alert.Status, Title: alert.Title,
+		})
 	}
 	return c.JSON(out)
 }

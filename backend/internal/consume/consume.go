@@ -1,6 +1,7 @@
-// Package consume reads check events and applies them in one database transaction.
-// It commits the Kafka offset only after that transaction commits. It does not
-// send notifications; it only inserts pending delivery rows.
+// Package consume reads check and external-alert events and applies each one in
+// one database transaction. It commits the Kafka offset only after that
+// transaction commits. It does not send notifications; it only inserts pending
+// delivery rows.
 package consume
 
 import (
@@ -119,47 +120,92 @@ func (c *Consumer) reader() *kafka.Reader {
 // Handle applies one message. commit is true only after the database change is durable
 // or the message has been stored as a dead letter.
 func (c *Consumer) Handle(msg kafka.Message) (commit bool, err error) {
-	ev, reason := classify(msg)
+	env, reason := envelope(msg)
 	if reason != "" {
-		payload := msg.Value
-		if !json.Valid(payload) {
-			wrapped, _ := json.Marshal(map[string]string{"raw": string(payload)})
-			payload = wrapped
-		}
-		if err := c.DB.RecordDeadLetter(msg.Topic, msg.Partition, msg.Offset, ev.EventID, ev.EventType, payload, reason); err != nil {
-			return false, err
-		}
-		return true, nil
+		return c.deadLetter(msg, env, reason)
 	}
-	err = c.DB.ApplyCheckEvent(ev)
+	switch env.EventType {
+	case event.TypeCheckCompleted:
+		var ev event.CheckCompleted
+		if err := json.Unmarshal(msg.Value, &ev); err != nil {
+			return c.deadLetter(msg, env, err.Error())
+		}
+		if ev.EventID == "" || ev.ServiceID == "" || ev.CheckID == 0 {
+			return c.deadLetter(msg, env, "payload is missing event_id, service_id, or check_id")
+		}
+		if reason := matchMessage(msg, ev.EventID, ev.ServiceID); reason != "" {
+			return c.deadLetter(msg, env, reason)
+		}
+		err = c.DB.ApplyCheckEvent(ev)
+	case event.TypeExternalAlert:
+		var ev event.ExternalAlert
+		if err := json.Unmarshal(msg.Value, &ev); err != nil {
+			return c.deadLetter(msg, env, err.Error())
+		}
+		if ev.EventID == "" || ev.Source == "" || ev.AlertKey == "" || ev.ServiceID == "" {
+			return c.deadLetter(msg, env, "payload is missing event_id, source, alert_key, or service_id")
+		}
+		if ev.Status != "firing" && ev.Status != "resolved" {
+			return c.deadLetter(msg, env, "payload status must be firing or resolved")
+		}
+		if reason := matchMessage(msg, ev.EventID, ev.ServiceID); reason != "" {
+			return c.deadLetter(msg, env, reason)
+		}
+		err = c.DB.ApplyExternalAlert(ev)
+	default:
+		return c.deadLetter(msg, env, fmt.Sprintf("unsupported event %s version %d", env.EventType, env.SchemaVersion))
+	}
 	if err == nil || errors.Is(err, db.ErrAlreadyProcessed) {
 		return true, nil
 	}
 	return false, err
 }
 
-func classify(msg kafka.Message) (event.CheckCompleted, string) {
-	var ev event.CheckCompleted
+type messageEnvelope struct {
+	EventID       string `json:"event_id"`
+	EventType     string `json:"event_type"`
+	SchemaVersion int    `json:"schema_version"`
+	ServiceID     string `json:"service_id"`
+}
+
+func envelope(msg kafka.Message) (messageEnvelope, string) {
+	var env messageEnvelope
 	if len(msg.Value) == 0 || !json.Valid(msg.Value) {
-		return ev, "payload is not json"
+		return env, "payload is not json"
 	}
-	if err := json.Unmarshal(msg.Value, &ev); err != nil {
-		return ev, err.Error()
+	if err := json.Unmarshal(msg.Value, &env); err != nil {
+		return env, err.Error()
 	}
-	if ev.EventType != event.TypeCheckCompleted || ev.SchemaVersion != event.SchemaVersion {
-		return ev, fmt.Sprintf("unsupported event %s version %d", ev.EventType, ev.SchemaVersion)
+	if env.SchemaVersion != event.SchemaVersion {
+		return env, fmt.Sprintf("unsupported event %s version %d", env.EventType, env.SchemaVersion)
 	}
-	if ev.EventID == "" || ev.ServiceID == "" || ev.CheckID == 0 {
-		return ev, "payload is missing event_id, service_id, or check_id"
+	if env.EventType != event.TypeCheckCompleted && env.EventType != event.TypeExternalAlert {
+		return env, fmt.Sprintf("unsupported event %s version %d", env.EventType, env.SchemaVersion)
 	}
+	return env, ""
+}
+
+func matchMessage(msg kafka.Message, eventID, serviceID string) string {
 	header := headerValue(msg, "event_id")
-	if header != "" && header != ev.EventID {
-		return ev, "event_id header does not match the payload"
+	if header != "" && header != eventID {
+		return "event_id header does not match the payload"
 	}
-	if len(msg.Key) > 0 && string(msg.Key) != ev.ServiceID {
-		return ev, "message key does not match service_id"
+	if len(msg.Key) > 0 && string(msg.Key) != serviceID {
+		return "message key does not match service_id"
 	}
-	return ev, ""
+	return ""
+}
+
+func (c *Consumer) deadLetter(msg kafka.Message, env messageEnvelope, reason string) (bool, error) {
+	payload := msg.Value
+	if !json.Valid(payload) {
+		wrapped, _ := json.Marshal(map[string]string{"raw": string(payload)})
+		payload = wrapped
+	}
+	if err := c.DB.RecordDeadLetter(msg.Topic, msg.Partition, msg.Offset, env.EventID, env.EventType, payload, reason); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func headerValue(msg kafka.Message, key string) string {

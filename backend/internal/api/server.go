@@ -39,7 +39,10 @@ type Server struct {
 	app    *fiber.App
 	webFS  fs.FS
 	logins *loginLimiter
-	stop   chan struct{}
+	// webhookToken is ALERTFLOW_WEBHOOK_TOKEN. Empty means the endpoint rejects every request.
+	webhookToken string
+	webhooks     *loginLimiter
+	stop         chan struct{}
 }
 
 // New opens the database and config for configDir, builds the Fiber app, starts
@@ -61,14 +64,16 @@ func New(configDir string) (*Server, error) {
 
 	dispatcher := notify.NewDispatcher(database)
 	s := &Server{
-		configDir:  configDir,
-		cfg:        cfg,
-		database:   database,
-		sched:      monitor.New(database),
-		dispatcher: dispatcher,
-		webFS:      web.FS(),
-		logins:     newLoginLimiter(),
-		stop:       make(chan struct{}),
+		configDir:    configDir,
+		cfg:          cfg,
+		database:     database,
+		sched:        monitor.New(database),
+		dispatcher:   dispatcher,
+		webFS:        web.FS(),
+		logins:       newLoginLimiter(),
+		webhookToken: os.Getenv("ALERTFLOW_WEBHOOK_TOKEN"),
+		webhooks:     newWebhookLimiter(),
+		stop:         make(chan struct{}),
 	}
 	s.app = fiber.New(fiber.Config{
 		AppName:      "AlertFlow",
@@ -107,6 +112,7 @@ func (s *Server) routes() {
 	app.Post("/api/setup", s.handleSetup)
 	app.Post("/api/auth/login", s.handleLogin)
 	app.Post("/api/auth/logout", s.handleLogout)
+	app.Post("/api/alerts/webhook", s.handleAlertWebhook)
 
 	// Authenticated.
 	app.Get("/api/auth/me", auth, s.handleMe)
