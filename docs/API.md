@@ -64,7 +64,7 @@ Notification channels. Fire on incident start and resolve only.
 | `GET /api/integrations`              | admin | List channels — **secrets are never returned**.          |
 | `POST /api/integrations`             | admin | Create `{ type, name, enabled, notifyWarnings, config }`. |
 | `PUT /api/integrations/{id}`         | admin | Update; blank/omitted secrets keep their stored value. `notifyWarnings` is a plain overwrite — always send it. |
-| `DELETE /api/integrations/{id}`      | admin | Delete (its notification log cascades).                  |
+| `DELETE /api/integrations/{id}`      | admin | Delete. Its notification log and pending delivery tasks are removed. Removing a task is not a successful send. |
 | `POST /api/integrations/{id}/test`   | admin | Send one real test message. Always `200`; see below.     |
 
 `type` is `telegram` | `slack` | `email` | `webhook`. The `config` shape depends

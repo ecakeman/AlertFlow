@@ -60,7 +60,9 @@ func (db *DB) UpdateIntegration(id int64, name string, enabled, notifyWarnings b
 	return db.GetIntegration(id)
 }
 
-// DeleteIntegration removes a channel (its notification log cascades).
+// DeleteIntegration removes a channel. Its notification_log rows and pending
+// notification_deliveries rows are deleted with it. That deletion is not a
+// successful send.
 func (db *DB) DeleteIntegration(id int64) error {
 	_, err := db.Exec(`DELETE FROM integrations WHERE id = $1`, id)
 	return err
@@ -109,7 +111,9 @@ func (db *DB) LogNotification(integrationID int64, incidentID *int64, event, sta
 }
 
 // ReplaceIntegrations deletes all integrations and inserts the given ones,
-// preserving IDs (for archive import). notification_log rows cascade away.
+// preserving IDs (for archive import). The delete cascades notification_log
+// and notification_deliveries, so outstanding delivery tasks are removed and
+// are not marked sent. The delete, insert, and identity reset commit together.
 func (db *DB) ReplaceIntegrations(integrations []Integration) error {
 	tx, err := db.Begin()
 	if err != nil {

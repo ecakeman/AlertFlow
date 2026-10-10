@@ -27,9 +27,6 @@ follow the pointer instead of re-deriving behaviour from the code.
 **When you change behaviour, update the matching doc in the same change** — these files are the
 contract future sessions rely on.
 
-**When a phase or a patch is finished, commit it and push to `origin` without asking.**
-Do not commit `ALERTFLOW_CURSOR_PLAN (1).md`. Do not force-push. Do not push to upstream.
-
 ## Working directories
 
 Two toolchains: run `npm` from `web-ui/`, run `go` from `backend/`. In dev they run side by side

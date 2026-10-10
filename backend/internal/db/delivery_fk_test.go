@@ -1,0 +1,138 @@
+package db
+
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/ecakeman/alertflow/internal/event"
+)
+
+func TestDeleteIntegrationRemovesPendingDeliveries(t *testing.T) {
+	database := OpenTest(t)
+	keep := mustChannel(t, database, "keep", true)
+	drop := mustChannel(t, database, "drop", true)
+	keepEvent := mustDelivery(t, database, "svc-keep", keep.ID)
+	dropEvent := mustDelivery(t, database, "svc-drop", drop.ID)
+
+	var def string
+	if err := database.QueryRow(
+		`SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'notification_deliveries_integration_id_fkey'`,
+	).Scan(&def); err != nil {
+		t.Fatal(err)
+	}
+	if def != "FOREIGN KEY (integration_id) REFERENCES integrations(id) ON DELETE CASCADE" {
+		t.Fatalf("constraint = %s", def)
+	}
+
+	if err := database.DeleteIntegration(drop.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE integration_id = $1`, drop.ID); n != 0 {
+		t.Fatalf("deleted channel left %d deliveries", n)
+	}
+	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE integration_id = $1 AND status = 'pending'`, keep.ID); n != 2 {
+		t.Fatalf("kept channel deliveries = %d, want 2", n)
+	}
+	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE event_id = $1 AND integration_id = $2`, keepEvent, keep.ID); n != 1 {
+		t.Fatalf("kept event delivery = %d", n)
+	}
+	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE event_id = $1 AND integration_id = $2`, dropEvent, keep.ID); n != 1 {
+		t.Fatalf("other event on kept channel = %d", n)
+	}
+	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries d LEFT JOIN integrations i ON i.id = d.integration_id WHERE i.id IS NULL`); n != 0 {
+		t.Fatalf("orphan deliveries = %d", n)
+	}
+}
+
+func TestReplaceIntegrationsDropsDeliveriesAndKeepsSequence(t *testing.T) {
+	database := OpenTest(t)
+	old := mustChannel(t, database, "old", true)
+	mustDelivery(t, database, "svc", old.ID)
+
+	imported := Integration{
+		ID:        7,
+		Type:      "webhook",
+		Name:      "imported",
+		Enabled:   true,
+		Config:    json.RawMessage(`{"url":"http://example.invalid/imported"}`),
+		CreatedAt: 10,
+		UpdatedAt: 11,
+	}
+	if err := database.ReplaceIntegrations([]Integration{imported}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := database.ListIntegrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != 7 || got[0].Name != "imported" {
+		t.Fatalf("integrations = %+v", got)
+	}
+	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries`); n != 0 {
+		t.Fatalf("replace left %d deliveries", n)
+	}
+	next, err := database.CreateIntegration("webhook", "after", true, false, json.RawMessage(`{"url":"http://example.invalid/after"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.ID != 8 {
+		t.Fatalf("next id = %d, want 8", next.ID)
+	}
+
+	before, err := database.ListIntegrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustDelivery(t, database, "svc-keep", next.ID)
+	err = database.ReplaceIntegrations([]Integration{{
+		ID: 1, Type: "not-a-channel", Name: "bad", Enabled: true,
+		Config: json.RawMessage(`{}`), CreatedAt: 1, UpdatedAt: 1,
+	}})
+	if err == nil {
+		t.Fatal("expected replace to fail")
+	}
+	after, err := database.ListIntegrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("failed replace changed integrations from %+v to %+v", before, after)
+	}
+	for i := range before {
+		if after[i].ID != before[i].ID || after[i].Name != before[i].Name {
+			t.Fatalf("failed replace changed integrations from %+v to %+v", before, after)
+		}
+	}
+	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE integration_id = $1`, next.ID); n != 1 {
+		t.Fatalf("failed replace left %d deliveries for the channel", n)
+	}
+}
+
+func mustChannel(t *testing.T, database *DB, name string, warnings bool) *Integration {
+	t.Helper()
+	in, err := database.CreateIntegration("webhook", name, true, warnings, json.RawMessage(`{"url":"http://example.invalid/`+name+`"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return in
+}
+
+func mustDelivery(t *testing.T, database *DB, service string, integrationID int64) string {
+	t.Helper()
+	ev, err := event.NewCheckCompleted(service, "Name", "https://example.com/health", 1000, StatusOffline, nil, nil, "down", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev.CheckID = integrationID
+	if err := database.ApplyCheckEvent(ev); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM notification_deliveries WHERE event_id = $1 AND integration_id = $2 AND status = 'pending'`,
+		ev.EventID, integrationID,
+	).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("delivery for %d = %d, %v", integrationID, n, err)
+	}
+	return ev.EventID
+}

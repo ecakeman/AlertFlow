@@ -182,6 +182,13 @@ Enabled integrations receive a `notification_deliveries` row in status `pending`
 a snapshot of the event and does not copy integration secrets. Nothing in this
 phase calls a sender.
 
+`notification_deliveries.integration_id` is `ON DELETE CASCADE`, same as
+`notification_log`. Deleting a channel, or replacing the channel set from an
+archive, removes the delivery tasks for the deleted rows. Those rows are not
+marked sent. `ReplaceIntegrations` does the delete, the insert, and the identity
+reset in one transaction. An archive that has no `integrations.json` does not
+call it, so existing tasks stay.
+
 `prev == current` returns immediately, which is the overwhelmingly common path.
 `InitialStatus` deliberately still returns only `online`/`offline` — a third seed
 value would change nothing in the matrix. The one visible consequence: a restart

@@ -10,6 +10,7 @@ import (
 
 	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/db"
+	"github.com/ecakeman/alertflow/internal/event"
 )
 
 // jsonEqual compares JSON values. PostgreSQL jsonb does not preserve key
@@ -186,6 +187,53 @@ func TestRoundTripPreservesRetryAndWarningSettings(t *testing.T) {
 	}
 	if !list[0].NotifyWarnings {
 		t.Error("notifyWarnings was lost in the round trip")
+	}
+}
+
+func TestImportReplacesIntegrationsThatHavePendingDeliveries(t *testing.T) {
+	dir, database := seed(t)
+	channel, err := database.CreateIntegration("webhook", "old", true, false, []byte(`{"url":"http://example.invalid/old"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev, err := event.NewCheckCompleted("svc", "Name", "https://example.com/health", 1000, db.StatusOffline, nil, nil, "down", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev.CheckID = 1
+	if err := database.ApplyCheckEvent(ev); err != nil {
+		t.Fatal(err)
+	}
+	var pending int
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM notification_deliveries WHERE integration_id = $1 AND status = 'pending'`,
+		channel.ID,
+	).Scan(&pending); err != nil || pending != 1 {
+		t.Fatalf("pending deliveries = %d, %v", pending, err)
+	}
+
+	fresh := `{"integrations":[{"ID":4,"Type":"webhook","Name":"imported","Enabled":true,` +
+		`"Config":{"url":"http://example.invalid/imported"},"CreatedAt":1,"UpdatedAt":1}]}`
+	var buf bytes.Buffer
+	if err := writeLegacyBundle(&buf, dir, fresh); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Import(dir, buf.Bytes(), database); err != nil {
+		t.Fatal(err)
+	}
+	list, err := database.ListIntegrations()
+	if err != nil || len(list) != 1 || list[0].ID != 4 || list[0].Name != "imported" {
+		t.Fatalf("integrations = %+v, %v", list, err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM notification_deliveries`).Scan(&pending); err != nil || pending != 0 {
+		t.Fatalf("deliveries after import = %d, %v", pending, err)
+	}
+	next, err := database.CreateIntegration("webhook", "after", true, false, []byte(`{"url":"http://example.invalid/after"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.ID != 5 {
+		t.Fatalf("next id = %d, want 5", next.ID)
 	}
 }
 

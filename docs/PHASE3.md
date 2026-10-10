@@ -18,6 +18,8 @@ Consumer 先校验类型、`schema_version = 1`，以及 header 里的 `event_id
 - 没有多个 Publisher 副本。分区数多于 Consumer 副本时，多出来的 Consumer 不会提高并行度。
 - 没有把 `published_at` 改成 `processed_at`，也没有改已经应用的 `00001` / `00002`。
 
+随后的修补用 `00004_delivery_integration_cascade.sql` 把 `notification_deliveries.integration_id` 改成 `ON DELETE CASCADE`。删除集成或用归档替换集成时，关联的投递任务被删掉，这不是送达记录。`00003` 文件本身没有改。
+
 ## 测试
 
 ```text
