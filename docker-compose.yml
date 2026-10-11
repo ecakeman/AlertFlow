@@ -28,6 +28,7 @@ services:
       ALERTFLOW_CONFIG_DIR: /config
       ALERTFLOW_ADDR: :8080
       ALERTFLOW_WEBHOOK_TOKEN: ${ALERTFLOW_WEBHOOK_TOKEN:-}
+      ALERTFLOW_AGENT_TOKEN: ${ALERTFLOW_AGENT_TOKEN:-}
     volumes:
       - alertflow-config:/config
     depends_on:

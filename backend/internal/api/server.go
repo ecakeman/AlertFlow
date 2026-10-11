@@ -41,7 +41,9 @@ type Server struct {
 	logins *loginLimiter
 	// webhookToken is ALERTFLOW_WEBHOOK_TOKEN. Empty means the endpoint rejects every request.
 	webhookToken string
-	webhooks     *loginLimiter
+	// agentToken is ALERTFLOW_AGENT_TOKEN. Empty means the internal agent routes reject every request.
+	agentToken string
+	webhooks   *loginLimiter
 	stop         chan struct{}
 }
 
@@ -72,6 +74,7 @@ func New(configDir string) (*Server, error) {
 		webFS:        web.FS(),
 		logins:       newLoginLimiter(),
 		webhookToken: os.Getenv("ALERTFLOW_WEBHOOK_TOKEN"),
+		agentToken:   os.Getenv("ALERTFLOW_AGENT_TOKEN"),
 		webhooks:     newWebhookLimiter(),
 		stop:         make(chan struct{}),
 	}
@@ -154,6 +157,12 @@ func (s *Server) routes() {
 	app.Post("/api/integrations/:id/test", auth, admin, s.handleTestIntegration)
 	app.Post("/api/deliveries/:id/retry", auth, admin, s.handleRetryDelivery)
 
+	agent := s.agentAuth
+	app.Get("/internal/agent/v1/incidents", agent, s.handleListIncidents)
+	app.Get("/internal/agent/v1/incidents/:id", agent, s.handleGetIncident)
+	app.Get("/internal/agent/v1/services/:id/metrics", agent, s.handleServiceMetrics)
+	app.Get("/internal/agent/v1/services/:id/checks", agent, s.handleServiceChecks)
+
 	// Images (authenticated; the handler gates itself rather than via middleware
 	// so a missing cookie renders as a 401 body instead of a redirect).
 	app.Get("/images/:file", s.handleServeImage)
@@ -166,6 +175,15 @@ func (s *Server) routes() {
 // client-side routes. Unmatched /api paths return a JSON 404 instead.
 func (s *Server) serveSPA(c fiber.Ctx) error {
 	if strings.HasPrefix(c.Path(), "/api/") {
+		return fiber.NewError(fiber.StatusNotFound, "not found")
+	}
+	if strings.HasPrefix(c.Path(), "/internal/") {
+		if err := s.requireAgent(c); err != nil {
+			return err
+		}
+		if c.Method() != fiber.MethodGet && c.Method() != fiber.MethodHead {
+			return fiber.NewError(fiber.StatusMethodNotAllowed, "method not allowed")
+		}
 		return fiber.NewError(fiber.StatusNotFound, "not found")
 	}
 	p := strings.TrimPrefix(path.Clean(c.Path()), "/")
@@ -183,6 +201,23 @@ func (s *Server) serveSPA(c fiber.Ctx) error {
 		c.Type(ext)
 	}
 	return c.Send(data)
+}
+
+func (s *Server) requireAgent(c fiber.Ctx) error {
+	if s.agentToken == "" {
+		return fiber.NewError(fiber.StatusServiceUnavailable, "agent token is not configured")
+	}
+	if !bearerMatch(c.Get("Authorization"), s.agentToken) {
+		return fiber.NewError(fiber.StatusUnauthorized, "unauthorized")
+	}
+	return nil
+}
+
+func (s *Server) agentAuth(c fiber.Ctx) error {
+	if err := s.requireAgent(c); err != nil {
+		return err
+	}
+	return c.Next()
 }
 
 func (s *Server) sendIndex(c fiber.Ctx) error {

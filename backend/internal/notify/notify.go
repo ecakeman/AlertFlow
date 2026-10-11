@@ -37,6 +37,8 @@ type Message struct {
 	ResolvedAt  *time.Time // set for resolve events
 	Attempts    int        // warning: how many attempts the cycle needed
 	Error       string     // warning: why the first attempt failed
+	CheckID     int64      // 0 when the event is not a check
+	DeliveryID  int64      // notification_deliveries.id, used when IncidentID is 0
 }
 
 // Down reports whether the message is a service-down (start) event.

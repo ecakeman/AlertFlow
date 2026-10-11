@@ -112,6 +112,7 @@ func (w *Worker) sendOne(ctx context.Context, row db.ClaimedDelivery) error {
 	if err != nil {
 		return w.fail(row, err, true)
 	}
+	msg.DeliveryID = row.ID
 	sender, ok := notify.SenderFor(row.IntegrationType)
 	if !ok {
 		return w.fail(row, notify.ErrNoSender, true)
@@ -162,6 +163,7 @@ func messageFrom(raw json.RawMessage) (notify.Message, error) {
 		StartedAt:   time.Unix(snap.StartedAt, 0),
 		Attempts:    snap.Attempts,
 		Error:       snap.Error,
+		CheckID:     snap.CheckID,
 	}
 	if snap.IncidentID != nil {
 		msg.IncidentID = *snap.IncidentID

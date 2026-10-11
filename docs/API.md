@@ -103,6 +103,10 @@ on it:
   "bodyTemplate": "{{.ServiceName}} is {{.Event}}" }                 //   (blank ⇒ default JSON payload)
 ```
 
+A blank `bodyTemplate` sends the old fields plus the agent contract. `event`, `service`, `url`, `status` (`down`, `recovered`, or `warning`), and `message` stay as they were. The added fields are `schema_version`, `event_id`, `service_id`, `service_name`, `occurred_at`, `started_at`, and `severity`. `incident_id` is present when the delivery has an incident. `check_id` is present for a check and omitted for an external alert. `resolved_at` is present on resolve. `attempts` and `error` are present when the snapshot has them. `event_id` is `<event>:<incident_id>`, or `delivery:<notification_deliveries.id>` when there is no incident id. A custom `bodyTemplate` still renders the whole message and is not this contract.
+
+`GET /internal/agent/v1/incidents`, `/incidents/{id}`, `/services/{id}/metrics`, and `/services/{id}/checks` return the same JSON as the matching `/api` reads. Send `Authorization: Bearer <ALERTFLOW_AGENT_TOKEN>`. An empty token makes the whole group return 503. A wrong token returns 401. Other methods return 405, and unknown paths return JSON 404.
+
 The test endpoint reports delivery in the body rather than via a status code, so
 the UI can show the real reason:
 

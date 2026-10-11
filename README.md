@@ -153,6 +153,7 @@ imported.
 | `ALERTFLOW_ROLE`         | `server`  | `server`, `publisher`, `consumer`, or `delivery`. |
 | `ALERTFLOW_KAFKA_BROKERS`| —        | Broker list for publisher and consumer.      |
 | `ALERTFLOW_WEBHOOK_TOKEN`| —         | Bearer token for `POST /api/alerts/webhook`. Empty disables that endpoint. |
+| `ALERTFLOW_AGENT_TOKEN`  | —         | Bearer token for `GET /internal/agent/v1/...`. Empty disables those routes. |
 | `ALERTFLOW_DB_MAX_OPEN`  | `10`      | Maximum open database connections.           |
 | `ALERTFLOW_DB_MAX_IDLE`  | `5`       | Maximum idle database connections.           |
 | `ALERTFLOW_DB_CONN_MAX_LIFETIME` | `30m` | Maximum lifetime of a connection.       |

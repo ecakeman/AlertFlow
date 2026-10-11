@@ -27,6 +27,7 @@ type DeliverySnapshot struct {
 	ResolvedAt  *int64 `json:"resolvedAt,omitempty"`
 	Attempts    int    `json:"attempts,omitempty"`
 	Error       string `json:"error,omitempty"`
+	CheckID     int64  `json:"checkId,omitempty"`
 }
 
 // ApplyCheckEvent applies one check event: incident changes, the processed
@@ -108,6 +109,7 @@ func applyCheckEventTx(tx *sql.Tx, ev event.CheckCompleted) error {
 	subject := notifySubject{
 		eventID: ev.EventID, serviceID: ev.ServiceID, serviceName: ev.ServiceName,
 		serviceURL: ev.ServiceURL, occurredAt: ev.OccurredAt, attempts: ev.Attempts, errText: ev.Error,
+		checkID: ev.CheckID,
 	}
 	switch event.Decide(prev, ev.Status) {
 	case event.TransitionOpen:
@@ -246,6 +248,7 @@ type notifySubject struct {
 	occurredAt  int64
 	attempts    int
 	errText     string
+	checkID     int64
 }
 
 func insertDeliveriesTx(tx *sql.Tx, ev notifySubject, kind string, incidentID, resolvedAt *int64, now int64) error {
@@ -286,6 +289,7 @@ func insertDeliveriesTx(tx *sql.Tx, ev notifySubject, kind string, incidentID, r
 			ResolvedAt:  resolvedAt,
 			Attempts:    ev.attempts,
 			Error:       ev.errText,
+			CheckID:     ev.checkID,
 		}
 		raw, err := json.Marshal(snap)
 		if err != nil {
