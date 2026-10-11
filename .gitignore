@@ -23,6 +23,11 @@ backend/internal/web/dist/*
 node_modules/
 web-ui/dist/
 
+# --- Python ---
+__pycache__/
+*.pyc
+.pytest_cache/
+
 # --- OS / misc ---
 .DS_Store
 *.log
