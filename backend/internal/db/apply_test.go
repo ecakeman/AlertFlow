@@ -58,6 +58,17 @@ func TestApplyCheckEventTransitions(t *testing.T) {
 	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE event_id = $1 AND event_type = 'incident_resolve'`, back.EventID); n != 2 {
 		t.Fatalf("resolve deliveries = %d", n)
 	}
+	var resolvePayload string
+	if err := database.QueryRow(`SELECT payload::text FROM notification_deliveries WHERE event_id = $1 AND event_type = 'incident_resolve' LIMIT 1`, back.EventID).Scan(&resolvePayload); err != nil {
+		t.Fatal(err)
+	}
+	var resolveSnap DeliverySnapshot
+	if err := json.Unmarshal([]byte(resolvePayload), &resolveSnap); err != nil {
+		t.Fatal(err)
+	}
+	if resolveSnap.StartedAt != 1000 || resolveSnap.OccurredAt != 1100 || resolveSnap.ResolvedAt == nil || *resolveSnap.ResolvedAt != 1100 {
+		t.Fatalf("resolve snapshot = %+v", resolveSnap)
+	}
 	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE event_id = $1 AND event_type = 'warning'`, back.EventID); n != 0 {
 		t.Fatalf("recovery created warning deliveries: %d", n)
 	}
@@ -68,6 +79,17 @@ func TestApplyCheckEventTransitions(t *testing.T) {
 	}
 	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE event_id = $1 AND event_type = 'warning'`, blip.EventID); n != 1 {
 		t.Fatalf("warning deliveries = %d, want 1", n)
+	}
+	var warnPayload string
+	if err := database.QueryRow(`SELECT payload::text FROM notification_deliveries WHERE event_id = $1 AND event_type = 'warning'`, blip.EventID).Scan(&warnPayload); err != nil {
+		t.Fatal(err)
+	}
+	var warnSnap DeliverySnapshot
+	if err := json.Unmarshal([]byte(warnPayload), &warnSnap); err != nil {
+		t.Fatal(err)
+	}
+	if warnSnap.OccurredAt != 1200 || warnSnap.StartedAt != 0 || warnSnap.ResolvedAt != nil {
+		t.Fatalf("warning snapshot = %+v", warnSnap)
 	}
 }
 

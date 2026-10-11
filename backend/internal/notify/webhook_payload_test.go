@@ -44,7 +44,7 @@ func TestDefaultWebhookKeepsStatusAndAddsContractFields(t *testing.T) {
 	resolved := started.Add(time.Minute)
 	body, err = renderWebhookBody("", Message{
 		Event: EventIncidentResolve, IncidentID: 12, ServiceName: "API", ServiceURL: "https://example.com",
-		StartedAt: started, ResolvedAt: &resolved,
+		OccurredAt: resolved, StartedAt: started, ResolvedAt: &resolved,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -53,8 +53,11 @@ func TestDefaultWebhookKeepsStatusAndAddsContractFields(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got["status"] != "recovered" || got["resolved_at"] == nil {
-		t.Fatalf("resolve = %#v", got)
+	if got["status"] != "recovered" || got["resolved_at"] != got["occurred_at"] || got["started_at"] == got["occurred_at"] {
+		t.Fatalf("resolve times = %#v", got)
+	}
+	if got["started_at"] != started.Format(time.RFC3339) || got["occurred_at"] != resolved.Format(time.RFC3339) {
+		t.Fatalf("resolve times = %#v", got)
 	}
 	if _, ok := got["check_id"]; ok {
 		t.Fatalf("external resolve should omit check_id: %#v", got)
@@ -70,6 +73,12 @@ func TestDefaultWebhookKeepsStatusAndAddsContractFields(t *testing.T) {
 	}
 	if got["status"] != "warning" || got["event_id"] != "delivery:4" || got["attempts"] != float64(2) {
 		t.Fatalf("warning = %#v", got)
+	}
+	if _, ok := got["started_at"]; ok {
+		t.Fatalf("warning invented a fault start: %#v", got)
+	}
+	if _, ok := got["resolved_at"]; ok {
+		t.Fatalf("warning invented a recovery: %#v", got)
 	}
 	if strings.Contains(body, "offline") {
 		t.Fatalf("status was rewritten: %s", body)

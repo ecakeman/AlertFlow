@@ -159,7 +159,7 @@ imported.
 | `ALERTFLOW_DB_CONN_MAX_LIFETIME` | `30m` | Maximum lifetime of a connection.       |
 | `ALERTFLOW_DB_CONN_MAX_IDLE_TIME` | `5m` | Maximum time a connection may stay idle. |
 
-The optional agent process is `docker compose --profile agent`. It reads
+`docker compose --profile agent up --build` starts the notification path and the agent. `docker compose --profile agent up --no-deps --build agent` starts only the agent. The agent reads
 `AGENT_WEBHOOK_TOKEN` on `POST /webhooks/alertflow` and `AGENT_API_TOKEN` on
 `/api/v1`. Both require the `Bearer` scheme. `LLM_API_KEY` also requires
 `LLM_BASE_URL` and `LLM_MODEL`. `DIAGNOSTICS_FILE` is the only diagnostics URL

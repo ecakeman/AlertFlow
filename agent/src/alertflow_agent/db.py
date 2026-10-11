@@ -13,7 +13,7 @@ def _now() -> str:
 
 class MemoryStore:
     def __init__(self) -> None:
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.runs: dict[str, dict] = {}
         self.by_key: dict[str, str] = {}
         self.events: dict[str, list[dict]] = {}
@@ -70,9 +70,54 @@ class MemoryStore:
 
     def append_event(self, run_id: str, kind: str, payload: dict) -> int:
         with self.lock:
-            seq = len(self.events[run_id]) + 1
-            self.events[run_id].append({"seq": seq, "type": kind, "payload": payload, "ts": _now()})
-            return seq
+            return self._append_locked(run_id, kind, payload)
+
+    def _append_locked(self, run_id: str, kind: str, payload: dict) -> int:
+        seq = len(self.events[run_id]) + 1
+        self.events[run_id].append({"seq": seq, "type": kind, "payload": payload, "ts": _now()})
+        return seq
+
+    def record_resolve(self, run_id: str, event_id: str, resolved_at, revise: bool) -> str:
+        with self.lock:
+            row = self.runs.get(run_id)
+            if not row:
+                return "ignored"
+            if self.has_event(run_id, "incident.resolved", event_id):
+                return "duplicate"
+            current = json.loads(json.dumps(row.get("input_event") or {}))
+            current["resolved_at"] = resolved_at
+            action = "resolved"
+            if revise:
+                current["pending_revise"] = True
+                action = "recorded"
+                if row["status"] in {"completed", "partial"}:
+                    current["event"] = "incident_resolve"
+                    row["mode"] = "baseline"
+                    row["stage"] = "revise"
+                    row["status"] = "queued"
+                    action = "revise"
+            row["input_event"] = current
+            self._append_locked(run_id, "incident.resolved", {"event_id": event_id, "resolved_at": resolved_at})
+            return action
+
+    def commit_report(self, run_id: str, version: int, report: dict, status: str, stop_reason, usage: dict, queue_revise: bool = False, cited: list | None = None) -> str:
+        with self.lock:
+            row = self.runs[run_id]
+            if row["status"] == "cancelled":
+                return "cancelled"
+            rows = self.reports.setdefault(run_id, [])
+            if any(item["version"] == version for item in rows):
+                row.update(status="failed", failure_reason="report_conflict", stage="persist", finished_at=_now())
+                self._append_locked(run_id, "run.failed", {"reason": "report_conflict"})
+                return "conflict"
+            rows.append({"version": version, "report": report, "created_at": _now()})
+            row.update(status=status, stop_reason=stop_reason, stage="persist", finished_at=_now(), usage=usage or {})
+            self._append_locked(run_id, "report.saved", {"version": version, "status": status, "cited": cited or []})
+            if queue_revise and version == 1 and (row.get("input_event") or {}).get("pending_revise"):
+                current = json.loads(json.dumps(row["input_event"]))
+                current["event"] = "incident_resolve"
+                row.update(input_event=current, status="queued", stage="revise", mode="baseline")
+            return "saved"
 
     def list_events(self, run_id: str, after: int = 0) -> list[dict]:
         with self.lock:
@@ -209,8 +254,123 @@ class PostgresStore:
         return row is not None
 
     def append_event(self, run_id: str, kind: str, payload: dict) -> int:
-        seq = self.conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM run_events WHERE run_id = %s", (run_id,)).fetchone()[0]
-        self.conn.execute(
+        import psycopg
+
+        with psycopg.connect(self.url) as conn:
+            with conn.transaction():
+                locked = conn.execute("SELECT id FROM runs WHERE id = %s FOR UPDATE", (run_id,)).fetchone()
+                if not locked:
+                    raise KeyError(run_id)
+                seq = conn.execute(
+                    "SELECT COALESCE(MAX(seq), 0) + 1 FROM run_events WHERE run_id = %s",
+                    (run_id,),
+                ).fetchone()[0]
+                conn.execute(
+                    "INSERT INTO run_events (run_id, seq, type, payload) VALUES (%s, %s, %s, %s::jsonb)",
+                    (run_id, seq, kind, json.dumps(payload)),
+                )
+                return seq
+
+    def record_resolve(self, run_id: str, event_id: str, resolved_at, revise: bool) -> str:
+        import psycopg
+
+        with psycopg.connect(self.url) as conn:
+            try:
+                with conn.transaction():
+                    row = conn.execute(
+                        "SELECT status, input_event FROM runs WHERE id = %s FOR UPDATE",
+                        (run_id,),
+                    ).fetchone()
+                    if not row:
+                        return "ignored"
+                    seen = conn.execute(
+                        """SELECT 1 FROM run_events
+                           WHERE run_id = %s AND type = 'incident.resolved' AND payload->>'event_id' = %s""",
+                        (run_id, event_id),
+                    ).fetchone()
+                    if seen:
+                        return "duplicate"
+                    current = dict(row[1] or {})
+                    current["resolved_at"] = resolved_at
+                    status, stage, mode, action = row[0], None, None, "resolved"
+                    if revise:
+                        current["pending_revise"] = True
+                        action = "recorded"
+                        if row[0] in {"completed", "partial"}:
+                            current["event"] = "incident_resolve"
+                            status, stage, mode, action = "queued", "revise", "baseline", "revise"
+                    assignments = ["input_event = %s::jsonb", "status = %s"]
+                    values = [json.dumps(current), status]
+                    if stage is not None:
+                        assignments.append("stage = %s")
+                        values.append(stage)
+                    if mode is not None:
+                        assignments.append("mode = %s")
+                        values.append(mode)
+                    values.append(run_id)
+                    conn.execute(f"UPDATE runs SET {', '.join(assignments)} WHERE id = %s", values)
+                    seq = conn.execute(
+                        "SELECT COALESCE(MAX(seq), 0) + 1 FROM run_events WHERE run_id = %s",
+                        (run_id,),
+                    ).fetchone()[0]
+                    conn.execute(
+                        "INSERT INTO run_events (run_id, seq, type, payload) VALUES (%s, %s, 'incident.resolved', %s::jsonb)",
+                        (run_id, seq, json.dumps({"event_id": event_id, "resolved_at": resolved_at})),
+                    )
+                    return action
+            except psycopg.errors.UniqueViolation:
+                return "duplicate"
+
+    def commit_report(self, run_id: str, version: int, report: dict, status: str, stop_reason, usage: dict, queue_revise: bool = False, cited: list | None = None) -> str:
+        import psycopg
+
+        with psycopg.connect(self.url) as conn:
+            with conn.transaction():
+                row = conn.execute(
+                    "SELECT status, input_event FROM runs WHERE id = %s FOR UPDATE",
+                    (run_id,),
+                ).fetchone()
+                if not row:
+                    return "ignored"
+                if row[0] == "cancelled":
+                    return "cancelled"
+                inserted = conn.execute(
+                    """INSERT INTO reports (run_id, version, report) VALUES (%s, %s, %s::jsonb)
+                       ON CONFLICT DO NOTHING""",
+                    (run_id, version, json.dumps(report)),
+                )
+                if inserted.rowcount != 1:
+                    conn.execute(
+                        """UPDATE runs SET status = 'failed', failure_reason = 'report_conflict', stage = 'persist', finished_at = now()
+                           WHERE id = %s AND status <> 'cancelled'""",
+                        (run_id,),
+                    )
+                    self._append_tx(conn, run_id, "run.failed", {"reason": "report_conflict"})
+                    return "conflict"
+                current = dict(row[1] or {})
+                final_status, final_stage, final_mode = status, "persist", None
+                if queue_revise and version == 1 and current.get("pending_revise"):
+                    current["event"] = "incident_resolve"
+                    final_status, final_stage, final_mode = "queued", "revise", "baseline"
+                assignments = ["status = %s", "stop_reason = %s", "stage = %s", "finished_at = now()", "usage = %s::jsonb", "input_event = %s::jsonb"]
+                values = [final_status, stop_reason, final_stage, json.dumps(usage or {}), json.dumps(current)]
+                if final_mode is not None:
+                    assignments.append("mode = %s")
+                    values.append(final_mode)
+                values.append(run_id)
+                conn.execute(
+                    f"UPDATE runs SET {', '.join(assignments)} WHERE id = %s AND status <> 'cancelled'",
+                    values,
+                )
+                self._append_tx(conn, run_id, "report.saved", {"version": version, "status": status, "cited": cited or []})
+                return "saved"
+
+    def _append_tx(self, conn, run_id: str, kind: str, payload: dict) -> int:
+        seq = conn.execute(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM run_events WHERE run_id = %s",
+            (run_id,),
+        ).fetchone()[0]
+        conn.execute(
             "INSERT INTO run_events (run_id, seq, type, payload) VALUES (%s, %s, %s, %s::jsonb)",
             (run_id, seq, kind, json.dumps(payload)),
         )

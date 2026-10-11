@@ -155,11 +155,16 @@ func messageFrom(raw json.RawMessage) (notify.Message, error) {
 	default:
 		return notify.Message{}, fmt.Errorf("unsupported delivery event %q", snap.Event)
 	}
+	occurredAt := snap.OccurredAt
+	if occurredAt == 0 {
+		occurredAt = snap.StartedAt
+	}
 	msg := notify.Message{
 		Event:       notify.Event(snap.Event),
 		ServiceID:   snap.ServiceID,
 		ServiceName: snap.ServiceName,
 		ServiceURL:  snap.ServiceURL,
+		OccurredAt:  time.Unix(occurredAt, 0),
 		StartedAt:   time.Unix(snap.StartedAt, 0),
 		Attempts:    snap.Attempts,
 		Error:       snap.Error,

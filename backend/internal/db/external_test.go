@@ -88,6 +88,34 @@ func TestDuplicateFiringDoesNotOpenAnotherIncident(t *testing.T) {
 	}
 }
 
+func TestStaleExternalResolveDoesNotRewindFiring(t *testing.T) {
+	database := OpenTest(t)
+	mustPages(t, database)
+	if err := database.ApplyExternalAlert(mustExternal(t, database, firingAlert("e-new", 3_000))); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.ApplyExternalAlert(mustExternal(t, database, resolvedAlert("e-old", 2_000))); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.ApplyExternalAlert(mustExternal(t, database, resolvedAlert("e-same", 3_000))); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	var last int64
+	if err := database.QueryRow(`SELECT status, last_occurred_at FROM external_alerts WHERE alert_key = 'cpu'`).Scan(&status, &last); err != nil {
+		t.Fatal(err)
+	}
+	if status != "firing" || last != 3_000 {
+		t.Fatalf("alert = %s at %d", status, last)
+	}
+	if inc, err := database.GetOngoingIncident("svc"); err != nil || inc == nil {
+		t.Fatalf("incident rewound: %+v %v", inc, err)
+	}
+	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE event_type = 'incident_resolve'`); n != 0 {
+		t.Fatalf("resolve deliveries = %d", n)
+	}
+}
+
 func TestHTTPRecoveryDoesNotCloseExternalAlert(t *testing.T) {
 	database := OpenTest(t)
 	mustPages(t, database)

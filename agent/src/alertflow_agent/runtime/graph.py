@@ -84,17 +84,71 @@ class Runner:
 
     def execute(self, run_id: str, resume: bool = False) -> dict:
         row = self.store.get(run_id)
-        config = {"configurable": {"thread_id": run_id}}
-        if resume:
-            restored = None
-            reason = "empty_checkpoint"
-            try:
-                restored = self.graph.invoke(None, config)
-            except Exception as exc:
-                reason = type(exc).__name__
-            if restored:
-                return restored
-            self.store.append_event(run_id, "run.resumed_without_checkpoint", {"reason": reason})
+        if not row or row.get("status") == "cancelled":
+            return row or {}
+        try:
+            if resume:
+                self._resume(row)
+            else:
+                self._invoke_fresh(self._fresh_row(row), self._fresh_thread(row))
+        except Exception as exc:
+            self._fail(run_id, type(exc).__name__)
+        current = self.store.get(run_id) or {}
+        if current.get("status") == "running":
+            self._fail(run_id, "checkpoint_unresolved")
+        return self.store.get(run_id) or {}
+
+    def _fresh_thread(self, row: dict) -> str:
+        run_id = row["id"]
+        snap = self._snapshot(run_id)
+        if snap is not None and not getattr(snap, "next", ()):
+            usage = dict(row.get("usage") or {})
+            attempt = int(usage.get("attempt") or 0) + 1
+            usage["attempt"] = attempt
+            self.store.update(run_id, usage=usage)
+            return f"{run_id}:{attempt}"
+        return run_id
+
+    def _fresh_row(self, row: dict) -> dict:
+        return self.store.get(row["id"]) or row
+
+    def _resume(self, row: dict) -> None:
+        run_id = row["id"]
+        usage = dict(row.get("usage") or {})
+        attempt = int(usage.get("attempt") or 0)
+        threads = [run_id] + [f"{run_id}:{n}" for n in range(1, attempt + 1)]
+        pending = None
+        finished = False
+        for thread in threads:
+            snap = self._snapshot(thread)
+            if snap is None:
+                continue
+            if getattr(snap, "next", ()):
+                pending = thread
+            else:
+                finished = True
+        if pending:
+            self.graph.invoke(None, {"configurable": {"thread_id": pending}})
+            return
+        self.store.append_event(run_id, "run.resumed_without_checkpoint", {
+            "reason": "checkpoint_finished" if finished else "empty_checkpoint",
+        })
+        attempt += 1
+        usage["attempt"] = attempt
+        self.store.update(run_id, usage=usage)
+        self._invoke_fresh(self.store.get(run_id), f"{run_id}:{attempt}")
+
+    def _snapshot(self, thread_id: str):
+        try:
+            snap = self.graph.get_state({"configurable": {"thread_id": thread_id}})
+        except Exception:
+            return None
+        if not getattr(snap, "values", None):
+            return None
+        return snap
+
+    def _invoke_fresh(self, row: dict, thread_id: str) -> dict:
+        run_id = row["id"]
         occurred = row["input_event"]["occurred_at"]
         end_at = row["input_event"].get("resolved_at") or occurred
         return self.graph.invoke({
@@ -126,7 +180,11 @@ class Runner:
                 "diagnostic_calls": 0,
                 "prior_report": self._prior_report(row),
                 "replan_bad": row["input_event"].get("replan_bad"),
-        }, config)
+        }, {"configurable": {"thread_id": thread_id}})
+
+    def _fail(self, run_id: str, reason: str) -> None:
+        if self.store.finish(run_id, status="failed", failure_reason=reason, stage="failed", finished_at=iso_now()):
+            self.store.append_event(run_id, "run.failed", {"reason": reason})
 
     def _graph(self, checkpointer):
         graph = StateGraph(GraphState)
@@ -165,6 +223,13 @@ class Runner:
         if self._stop_if_cancelled(state):
             return state
         event = state["event"]
+        if event.get("event") == "incident_resolve" and event.get("resolved_at") and event.get("occurred_at"):
+            duration = _epoch(event["resolved_at"]) - _epoch(event["occurred_at"])
+            _evidence(state, "evt:resolve", "alertflow_incident", "resolve", "incident recovered", {
+                "occurred_at": event["occurred_at"],
+                "resolved_at": event["resolved_at"],
+                "duration_s": duration,
+            })
         gaps = list(state["coverage"].get("gaps") or [])
         status = {}
         detail = self._source(status, "incident", lambda: self.alertflow.incident(event["incident_id"]) if event.get("incident_id") else None)
@@ -217,11 +282,15 @@ class Runner:
     def collect_diagnostics(self, state):
         if self._stop_if_cancelled(state):
             return state
-        cfg = load_config(self.settings.diagnostics_file)
-        start = datetime.fromtimestamp(state["coverage"]["from"], timezone.utc).isoformat()
-        end = datetime.fromtimestamp(state["coverage"]["to"], timezone.utc).isoformat()
-        event_time = datetime.fromisoformat(state["event"]["occurred_at"].replace("Z", "+00:00"))
-        result = fetch(cfg, start, end, event_time)
+        try:
+            cfg = load_config(self.settings.diagnostics_file)
+            start = datetime.fromtimestamp(state["coverage"]["from"], timezone.utc).isoformat()
+            end = datetime.fromtimestamp(state["coverage"]["to"], timezone.utc).isoformat()
+            event_time = datetime.fromisoformat(state["event"]["occurred_at"].replace("Z", "+00:00"))
+            result = fetch(cfg, start, end, event_time)
+        except Exception:
+            log.warning("project diagnostics failed")
+            result = {"coverage": "invalid", "items": [], "dropped": 0}
         mapping = {
             "not_configured": "NO_PROJECT_DIAGNOSTICS",
             "unavailable": "DIAGNOSTICS_UNAVAILABLE",
@@ -456,8 +525,7 @@ class Runner:
             return state
         self.store.save_evidence(run_id, state.get("evidence") or {})
         if state.get("failure_reason"):
-            self.store.finish(run_id, status="failed", failure_reason=state["failure_reason"], stage="persist", finished_at=iso_now())
-            self.store.append_event(run_id, "run.failed", {"reason": state["failure_reason"]})
+            self._fail(run_id, state["failure_reason"])
             return state
         passed = (state.get("verification") or {}).get("passed")
         status = "completed" if passed and not state.get("stop_reason") else "partial"
@@ -490,18 +558,18 @@ class Runner:
         if state.get("stop_reason"):
             report.setdefault("unknowns", []).append({"text": "The investigation stopped because of an agent limit.", "code": state["stop_reason"], "evidence_ids": []})
         if not report.get("summary"):
-            self.store.finish(run_id, status="failed", failure_reason="report_missing", stage="persist", finished_at=iso_now())
+            self._fail(run_id, "report_missing")
             return state
-        self.store.save_report(run_id, version, report)
-        self.store.finish(run_id, status=status, stop_reason=state.get("stop_reason") or None, stage="persist", finished_at=iso_now(), usage=report["usage"])
-        self.store.append_event(run_id, "report.saved", {"version": version, "status": status, "cited": sorted(cited(report))})
         fresh = self.store.get(run_id) or {}
+        if fresh.get("stage") == "revise" or fresh.get("input_event", {}).get("event") == "incident_resolve":
+            version = 2
+        report["version"] = version
         pending = (fresh.get("input_event") or {}).get("pending_revise")
-        if pending and self.settings.agent_revise_on_resolve and version == 1:
-            current = dict(fresh.get("input_event") or {})
-            current["event"] = "incident_resolve"
-            self.store.update(run_id, input_event=current)
-            self.store.transition(run_id, {"completed", "partial"}, status="queued", stage="revise", mode="baseline")
+        self.store.commit_report(
+            run_id, version, report, status, state.get("stop_reason") or None, report["usage"],
+            queue_revise=bool(pending and self.settings.agent_revise_on_resolve and version == 1),
+            cited=sorted(cited(report)),
+        )
         state["report"] = report
         return state
 

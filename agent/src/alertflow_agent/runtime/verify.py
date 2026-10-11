@@ -85,7 +85,7 @@ def _fact(fact, evidence, findings) -> None:
         return
     try:
         got = lookup(item.get("data") or {}, fact["path"])
-    except (KeyError, IndexError, ValueError):
+    except (KeyError, IndexError, ValueError, TypeError):
         findings.append({"rule": "V3", "detail": fact.get("path")})
         return
     if not _same(got, fact.get("value")):
@@ -108,12 +108,10 @@ def _layer(hyp, evidence, findings) -> None:
             findings.append({"rule": "V5", "detail": layer})
     if layer == "tls":
         kinds = {_source(i, evidence) for i in support}
-        tls_count = ((evidence.get("ana:errors@0") or {}).get("data") or {}).get("classes", {}).get("tls", 0)
-        if "alertflow_tls" not in kinds and not tls_count:
+        if "alertflow_tls" not in kinds and not _cited_class(evidence, support, "tls"):
             findings.append({"rule": "V5", "detail": "tls"})
     if layer == "network_dns":
-        dns = ((evidence.get("ana:errors@0") or {}).get("data") or {}).get("classes", {}).get("dns", 0)
-        if not dns:
+        if not _cited_class(evidence, support, "dns"):
             findings.append({"rule": "V5", "detail": "dns"})
 
 
@@ -129,10 +127,31 @@ def _confidence(hyp, evidence, findings) -> None:
             findings.append({"rule": "V6", "detail": "high"})
 
 
+def _cited_class(evidence, support, name) -> int:
+    total = 0
+    for ident in support:
+        if not str(ident).startswith("ana:errors@"):
+            continue
+        classes = ((evidence.get(ident) or {}).get("data") or {}).get("classes") or {}
+        try:
+            total += int(classes.get(name) or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
 def _numbers(draft, evidence, warnings) -> None:
     cited = set()
     for obs in draft.get("observations") or []:
         cited.update(obs.get("evidence_ids") or [])
+        for fact in obs.get("facts") or []:
+            if fact.get("evidence_id"):
+                cited.add(fact["evidence_id"])
+    for hyp in draft.get("hypotheses") or []:
+        cited.update(hyp.get("supporting_evidence_ids") or [])
+        cited.update(hyp.get("weakening_evidence_ids") or [])
+    for unknown in draft.get("unknowns") or []:
+        cited.update(unknown.get("evidence_ids") or [])
     blob = json.dumps({
         "summary": draft.get("summary"),
         "observations": draft.get("observations"),

@@ -31,6 +31,10 @@ CREATE TABLE IF NOT EXISTS run_evidence (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS run_resolve_event_id
+    ON run_events (run_id, (payload->>'event_id'))
+    WHERE type = 'incident.resolved' AND payload ? 'event_id';
+
 CREATE TABLE IF NOT EXISTS reports (
     run_id uuid NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     version int NOT NULL,

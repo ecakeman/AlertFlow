@@ -33,7 +33,8 @@ type Message struct {
 	ServiceID   string
 	ServiceName string
 	ServiceURL  string
-	StartedAt   time.Time
+	OccurredAt  time.Time  // this notification's event time
+	StartedAt   time.Time  // incident start; zero for a warning
 	ResolvedAt  *time.Time // set for resolve events
 	Attempts    int        // warning: how many attempts the cycle needed
 	Error       string     // warning: why the first attempt failed
@@ -69,7 +70,7 @@ func (m Message) Body() string {
 		// The first attempt's error is the only record of why it blipped, so it
 		// belongs in the message even though the service is up.
 		b := m.ServiceName + " (" + m.ServiceURL + ") failed a check at " +
-			m.StartedAt.UTC().Format(time.RFC1123) + " but recovered on attempt " +
+			m.eventTime().UTC().Format(time.RFC1123) + " but recovered on attempt " +
 			strconv.Itoa(m.Attempts) + "."
 		if m.Error != "" {
 			b += " First failure: " + m.Error + "."
@@ -82,6 +83,13 @@ func (m Message) Body() string {
 	}
 	return m.ServiceName + " (" + m.ServiceURL + ") recovered at " +
 		when.UTC().Format(time.RFC1123) + "."
+}
+
+func (m Message) eventTime() time.Time {
+	if !m.OccurredAt.IsZero() {
+		return m.OccurredAt
+	}
+	return m.StartedAt
 }
 
 // Sender delivers a message to one channel. config is the integration's stored

@@ -72,3 +72,23 @@ jobs:
       - name: Frontend build
         working-directory: web-ui
         run: npm ci && npm run build
+
+  agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Agent tests
+        working-directory: agent
+        run: pip install -e ".[dev]" && python -m pytest -q
+
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build AlertFlow and the agent
+        run: docker compose --profile agent build --progress=plain alertflow agent

@@ -23,7 +23,8 @@ type DeliverySnapshot struct {
 	ServiceID   string `json:"serviceId"`
 	ServiceName string `json:"serviceName"`
 	ServiceURL  string `json:"serviceUrl"`
-	StartedAt   int64  `json:"startedAt"`
+	OccurredAt  int64  `json:"occurredAt"`
+	StartedAt   int64  `json:"startedAt,omitempty"`
 	ResolvedAt  *int64 `json:"resolvedAt,omitempty"`
 	Attempts    int    `json:"attempts,omitempty"`
 	Error       string `json:"error,omitempty"`
@@ -129,6 +130,7 @@ func applyCheckEventTx(tx *sql.Tx, ev event.CheckCompleted) error {
 			return err
 		}
 		incidentID = &id
+		subject.startedAt = ev.OccurredAt
 		kind = "incident_start"
 	case event.TransitionResolve:
 		active, err := countFiringAlerts(tx, ev.ServiceID)
@@ -138,13 +140,14 @@ func applyCheckEventTx(tx *sql.Tx, ev event.CheckCompleted) error {
 		if active > 0 {
 			break
 		}
-		id, err := resolveOngoingTx(tx, ev.ServiceID, ev.OccurredAt, now)
+		id, startedAt, err := resolveOngoingTx(tx, ev.ServiceID, ev.OccurredAt, now)
 		if err != nil {
 			return err
 		}
 		if id != 0 {
 			incidentID = &id
 			resolvedAt = &ev.OccurredAt
+			subject.startedAt = startedAt
 			kind = "incident_resolve"
 		}
 	case event.TransitionWarning:
@@ -153,7 +156,6 @@ func applyCheckEventTx(tx *sql.Tx, ev event.CheckCompleted) error {
 			return err
 		}
 		incidentID = &id
-		resolvedAt = &ev.OccurredAt
 		kind = "warning"
 	}
 
@@ -216,18 +218,18 @@ func insertOngoingTx(tx *sql.Tx, serviceID string, startedAt, now int64, title s
 	return id, err
 }
 
-func resolveOngoingTx(tx *sql.Tx, serviceID string, resolvedAt, now int64) (int64, error) {
-	var id int64
+func resolveOngoingTx(tx *sql.Tx, serviceID string, resolvedAt, now int64) (int64, int64, error) {
+	var id, startedAt int64
 	err := tx.QueryRow(
 		`UPDATE incidents SET status = 'resolved', resolved_at = $2, updated_at = $3
 		 WHERE service_id = $1 AND status = 'ongoing'
-		 RETURNING id`,
+		 RETURNING id, started_at`,
 		serviceID, resolvedAt, now,
-	).Scan(&id)
+	).Scan(&id, &startedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
+		return 0, 0, nil
 	}
-	return id, err
+	return id, startedAt, err
 }
 
 func insertWarningTx(tx *sql.Tx, serviceID string, ts, now int64) (int64, error) {
@@ -246,6 +248,7 @@ type notifySubject struct {
 	serviceName string
 	serviceURL  string
 	occurredAt  int64
+	startedAt   int64
 	attempts    int
 	errText     string
 	checkID     int64
@@ -278,6 +281,12 @@ func insertDeliveriesTx(tx *sql.Tx, ev notifySubject, kind string, incidentID, r
 		if kind == "warning" && !c.warnings {
 			continue
 		}
+		startedAt := ev.startedAt
+		resolved := resolvedAt
+		if kind == "warning" {
+			startedAt = 0
+			resolved = nil
+		}
 		snap := DeliverySnapshot{
 			Event:       kind,
 			EventID:     ev.eventID,
@@ -285,8 +294,9 @@ func insertDeliveriesTx(tx *sql.Tx, ev notifySubject, kind string, incidentID, r
 			ServiceID:   ev.serviceID,
 			ServiceName: ev.serviceName,
 			ServiceURL:  ev.serviceURL,
-			StartedAt:   ev.occurredAt,
-			ResolvedAt:  resolvedAt,
+			OccurredAt:  ev.occurredAt,
+			StartedAt:   startedAt,
+			ResolvedAt:  resolved,
 			Attempts:    ev.attempts,
 			Error:       ev.errText,
 			CheckID:     ev.checkID,

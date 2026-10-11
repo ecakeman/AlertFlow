@@ -167,28 +167,8 @@ def _resolve(store, body, event, settings):
     found = store.find_incident(body.incident_id) if body.incident_id else None
     if not found:
         return {"run_id": None, "action": "ignored"}
-    if store.has_event(found["id"], "incident.resolved", body.event_id):
-        latest = store.latest_report(found["id"])
-        current = store.get(found["id"])
-        if latest and latest["version"] >= 2 or current["stage"] == "revise":
-            return JSONResponse({"run_id": found["id"], "action": "duplicate"}, status_code=200)
-        if settings.agent_revise_on_resolve and current["status"] in {"completed", "partial"}:
-            if store.transition(found["id"], {"completed", "partial"}, status="queued", stage="revise", mode="baseline"):
-                return JSONResponse({"run_id": found["id"], "action": "revise"}, status_code=202)
-        return JSONResponse({"run_id": found["id"], "action": "duplicate"}, status_code=200)
-    current = dict(found["input_event"])
-    current["resolved_at"] = event.get("resolved_at")
-    if settings.agent_revise_on_resolve:
-        current["pending_revise"] = True
-    store.update(found["id"], input_event=current)
-    store.append_event(found["id"], "incident.resolved", {"event_id": body.event_id, "resolved_at": event.get("resolved_at")})
-    if not settings.agent_revise_on_resolve:
-        return JSONResponse({"run_id": found["id"], "action": "resolved"}, status_code=202)
-    latest = store.latest_report(found["id"])
-    if latest and latest["version"] >= 2:
-        return JSONResponse({"run_id": found["id"], "action": "duplicate"}, status_code=200)
-    if found["status"] == "running":
-        return JSONResponse({"run_id": found["id"], "action": "recorded"}, status_code=202)
-    if found["status"] in {"completed", "partial"} and store.transition(found["id"], {"completed", "partial"}, status="queued", stage="revise", mode="baseline"):
-        return JSONResponse({"run_id": found["id"], "action": "revise"}, status_code=202)
-    return JSONResponse({"run_id": found["id"], "action": "recorded"}, status_code=202)
+    action = store.record_resolve(
+        found["id"], body.event_id, event.get("resolved_at"), settings.agent_revise_on_resolve,
+    )
+    code = 202 if action in {"revise", "recorded", "resolved"} else 200
+    return JSONResponse({"run_id": found["id"], "action": action}, status_code=code)

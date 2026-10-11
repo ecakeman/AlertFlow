@@ -94,9 +94,20 @@ def _metrics(args, state, clients) -> dict:
         {"ts": point.get("ts"), "avgLatency": point.get("avgLatency")}
         for point in (body.get("series") or [])[:200]
     ]
+    values = [point["avgLatency"] for point in series if isinstance(point.get("avgLatency"), (int, float))]
+    stats = {
+        "range": span,
+        "samples": len(series),
+        "from": series[0]["ts"] if series else None,
+        "to": series[-1]["ts"] if series else None,
+        "min_avg_latency": min(values) if values else None,
+        "max_avg_latency": max(values) if values else None,
+        "last_avg_latency": values[-1] if values else None,
+        "preview": series[:20],
+    }
     ident = f"met:{span}"
-    _add(state, ident, "alertflow_metric", ident, "metric_series", f"{len(series)} buckets", {"series": series}, replace=True)
-    return {"status": "success" if series else "empty", "evidence_ids": [ident], "data": {"points": len(series)}}
+    _add(state, ident, "alertflow_metric", ident, "metric_series", json.dumps(stats), {"series": series, "stats": stats}, replace=True)
+    return {"status": "success" if series else "empty", "evidence_ids": [ident], "data": {"points": len(series), "stats": stats}}
 
 
 def _incident(args, state, clients) -> dict:

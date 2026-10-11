@@ -73,9 +73,11 @@ func renderWebhookBody(tmpl string, msg Message) (string, error) {
 			"event_id":       contractEventID(msg),
 			"service_id":     msg.ServiceID,
 			"service_name":   msg.ServiceName,
-			"occurred_at":    msg.StartedAt.UTC().Format(time.RFC3339),
-			"started_at":     msg.StartedAt.UTC().Format(time.RFC3339),
+			"occurred_at":    msg.eventTime().UTC().Format(time.RFC3339),
 			"severity":       severityOf(msg.Event),
+		}
+		if msg.Event != EventWarning && !msg.StartedAt.IsZero() {
+			payload["started_at"] = msg.StartedAt.UTC().Format(time.RFC3339)
 		}
 		if msg.IncidentID != 0 {
 			payload["incident_id"] = msg.IncidentID
@@ -83,7 +85,7 @@ func renderWebhookBody(tmpl string, msg Message) (string, error) {
 		if msg.CheckID != 0 {
 			payload["check_id"] = msg.CheckID
 		}
-		if msg.ResolvedAt != nil {
+		if msg.Event != EventWarning && msg.ResolvedAt != nil {
 			payload["resolved_at"] = msg.ResolvedAt.UTC().Format(time.RFC3339)
 		}
 		if msg.Warning() || msg.Attempts > 0 {

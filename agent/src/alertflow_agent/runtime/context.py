@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -19,7 +20,7 @@ def build_context(node: str, state: dict) -> str:
         _event_block(state.get("event") or {}),
     ]
     if node == "subagent" and state.get("question"):
-        parts.append(f'<untrusted source="history_review.question">{state["question"]}</untrusted>')
+        parts.append("Untrusted history_review.question: " + json.dumps(state["question"], ensure_ascii=False))
     if node != "subagent" and state.get("plan"):
         parts.append("Plan:\n" + _clip(str(state["plan"]), 2000))
     if node == "write_report" and state.get("prior_report"):
@@ -49,10 +50,10 @@ def _event_block(event: dict) -> str:
         "occurred_at": event.get("occurred_at"),
         "resolved_at": event.get("resolved_at"),
     }
-    lines = ["Event:\n" + str(safe)]
+    lines = ["Event:\n" + json.dumps(safe, ensure_ascii=False)]
     for key in ("message", "error", "service_name"):
         if event.get(key):
-            lines.append(f'<untrusted source="event.{key}">{event[key]}</untrusted>')
+            lines.append(f"Untrusted event.{key}: " + json.dumps(event[key], ensure_ascii=False))
     return "\n".join(lines)
 
 
@@ -61,8 +62,10 @@ def _evidence_block(evidence: dict) -> str:
     for ident, item in list(evidence.items())[:40]:
         summary = item.get("summary") or ""
         if item.get("source_type") in {"alertflow_comment", "alertflow_external_alert", "project_diagnostic"}:
-            summary = f'<untrusted source="{item.get("source_type")}">{summary}</untrusted>'
-        limit = 1500 if str(ident).startswith("ana:") else 400
+            summary = "Untrusted " + str(item.get("source_type")) + ": " + json.dumps(summary, ensure_ascii=False)
+        if item.get("kind") == "metric_series":
+            summary = json.dumps((item.get("data") or {}).get("stats") or {}, ensure_ascii=False)
+        limit = 1500 if str(ident).startswith("ana:") or item.get("kind") == "metric_series" else 400
         lines.append(f"[{ident}] {item.get('kind')} @{item.get('observed_at')} — {_clip(summary, limit)}")
     return "Evidence:\n" + "\n".join(lines)
 

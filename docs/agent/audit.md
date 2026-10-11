@@ -92,6 +92,6 @@
  }
 ```
 
-`event_id` 用 `<event>:<incident_id>`。快照没有 incident 时用 `delivery:<notification_deliveries.id>`。`check_id` 只在检查触发时出现。`occurred_at` 与 `started_at` 都来自快照的事件时间，不是 `sent_at`。`resolved_at` 只在恢复事件上有值。
+`event_id` 用 `<event>:<incident_id>`。快照没有 incident 时用 `delivery:<notification_deliveries.id>`。`check_id` 只在检查触发时出现。`occurred_at` 是这次事件的时间，`started_at` 是故障开始时间；warning 不带 `started_at` 或 `resolved_at`。`resolved_at` 只在恢复事件上有值，并与该事件的 `occurred_at` 相同。
 
 §4.5 的错误分类先保持规格中的正则。`http.StatusText` 的 `Service Unavailable` 不会命中 `http_status` 正则，除非分类同时看 `status_code`。P1 不改分类；Agent 分析应同时看 `status_code`。

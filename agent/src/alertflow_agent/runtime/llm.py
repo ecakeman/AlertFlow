@@ -57,14 +57,26 @@ def _lead(state: dict) -> dict:
 def draft_from_state(state: dict) -> dict:
     status = (state["evidence"].get("ana:status@0") or {}).get("data") or {}
     offline = (status.get("offline") or {}).get("n", 0)
+    observations = [{
+        "id": "o1",
+        "text": "The status analysis counts the checks in the window.",
+        "evidence_ids": ["ana:status@0"],
+        "facts": [{"evidence_id": "ana:status@0", "path": "offline.n", "value": offline}],
+    }]
+    resolved = (state["evidence"].get("evt:resolve") or {}).get("data") or {}
+    if resolved:
+        observations.append({
+            "id": "o2",
+            "text": "The incident recovered after the recorded outage.",
+            "evidence_ids": ["evt:resolve"],
+            "facts": [
+                {"evidence_id": "evt:resolve", "path": "resolved_at", "value": resolved.get("resolved_at")},
+                {"evidence_id": "evt:resolve", "path": "duration_s", "value": resolved.get("duration_s")},
+            ],
+        })
     return {
         "summary": "Collected checks were analyzed without claiming an internal root cause.",
-        "observations": [{
-            "id": "o1",
-            "text": "The status analysis counts the checks in the window.",
-            "evidence_ids": ["ana:status@0"],
-            "facts": [{"evidence_id": "ana:status@0", "path": "offline.n", "value": offline}],
-        }],
+        "observations": observations,
         "hypotheses": [{
             "id": "h1",
             "text": "The external probe recorded the status mix in the analysis.",

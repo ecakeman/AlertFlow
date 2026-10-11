@@ -16,11 +16,19 @@ export AGENT_DATABASE_URL=postgres://alertflow:alertflow@127.0.0.1:5432/alertflo
 alertflow-agent
 ```
 
-Compose profile:
+Compose. The profile command starts Postgres, Kafka, the AlertFlow server, and the publisher, consumer, and delivery processes, then the agent:
 
 ```bash
-docker compose --profile agent up --build agent
+docker compose --profile agent up --build
 ```
+
+To start only the agent against an already running database and AlertFlow:
+
+```bash
+docker compose --profile agent up --no-deps --build agent
+```
+
+`POSTGRES_IMAGE`, `KAFKA_IMAGE`, `NODE_IMAGE`, `GO_IMAGE`, `RUNTIME_IMAGE`, `PYTHON_IMAGE`, `PIP_INDEX_URL`, `NPM_REGISTRY`, and `GOPROXY` override the official defaults. Leave them unset unless a pull or a package download fails.
 
 ## Configuration
 

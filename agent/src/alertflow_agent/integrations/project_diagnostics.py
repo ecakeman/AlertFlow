@@ -11,16 +11,25 @@ _ORDER = ("not_configured", "unavailable", "invalid", "partial", "stale", "empty
 def load_config(path: str) -> dict | None:
     if not path or not os.path.exists(path):
         return None
-    with open(path, encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {}
-    if not isinstance(data, dict) or not data.get("url"):
-        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+    except Exception:
+        return {"_invalid": True}
+    if not isinstance(data, dict) or not _http_url(data.get("url")):
+        return {"_invalid": True}
     return data
+
+
+def _http_url(value) -> bool:
+    return isinstance(value, str) and value.startswith(("http://", "https://"))
 
 
 def fetch(cfg: dict | None, since: str, until: str, event_time: datetime | None = None) -> dict:
     if not cfg:
         return {"coverage": "not_configured", "items": [], "dropped": 0}
+    if cfg.get("_invalid"):
+        return {"coverage": "invalid", "items": [], "dropped": 0}
     if since == until:
         return {"coverage": "invalid", "items": [], "dropped": 0}
     headers = {}
@@ -37,6 +46,8 @@ def fetch(cfg: dict | None, since: str, until: str, event_time: datetime | None 
         )
     except Exception:
         return {"coverage": "unavailable", "items": [], "dropped": 0}
+    if 300 <= response.status_code < 400:
+        return {"coverage": "invalid", "items": [], "dropped": 0}
     if response.status_code < 200 or response.status_code >= 300:
         return {"coverage": "unavailable", "items": [], "dropped": 0}
     if len(response.content) > 512 * 1024:

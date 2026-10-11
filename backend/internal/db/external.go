@@ -151,10 +151,11 @@ func applyExternalAlertTx(tx *sql.Tx, ev event.ExternalAlert) error {
 		return err
 	}
 	var alertStatus, alertService string
+	var lastOccurred int64
 	err = tx.QueryRow(
-		`SELECT status, service_id FROM external_alerts WHERE source = $1 AND alert_key = $2 FOR UPDATE`,
+		`SELECT status, service_id, last_occurred_at FROM external_alerts WHERE source = $1 AND alert_key = $2 FOR UPDATE`,
 		ev.Source, ev.AlertKey,
-	).Scan(&alertStatus, &alertService)
+	).Scan(&alertStatus, &alertService, &lastOccurred)
 	exists := err == nil
 	if errors.Is(err, sql.ErrNoRows) {
 		exists = false
@@ -166,6 +167,11 @@ func applyExternalAlertTx(tx *sql.Tx, ev event.ExternalAlert) error {
 	if exists && alertService != ev.ServiceID {
 		return nil
 	}
+	// occurred_at is whole seconds. An equal timestamp does not prove which
+	// event happened last, so only a strictly newer event may change state.
+	if exists && ev.OccurredAt <= lastOccurred {
+		return nil
+	}
 
 	subject := notifySubject{
 		eventID: ev.EventID, serviceID: ev.ServiceID, serviceName: ev.ServiceName,
@@ -175,9 +181,9 @@ func applyExternalAlertTx(tx *sql.Tx, ev event.ExternalAlert) error {
 		if exists && alertStatus == "firing" {
 			_, err = tx.Exec(
 				`UPDATE external_alerts
-				 SET title = $3, description = $4, last_event_id = $5, updated_at = $6
+				 SET title = $3, description = $4, last_event_id = $5, last_occurred_at = $6, updated_at = $7
 				 WHERE source = $1 AND alert_key = $2`,
-				ev.Source, ev.AlertKey, ev.Title, ev.Description, ev.EventID, now,
+				ev.Source, ev.AlertKey, ev.Title, ev.Description, ev.EventID, ev.OccurredAt, now,
 			)
 			return err
 		}
@@ -185,16 +191,16 @@ func applyExternalAlertTx(tx *sql.Tx, ev event.ExternalAlert) error {
 			_, err = tx.Exec(
 				`UPDATE external_alerts
 				 SET service_id = $3, status = 'firing', title = $4, description = $5,
-				     opened_at = $6, resolved_at = NULL, last_event_id = $7, updated_at = $8
+				     opened_at = $6, resolved_at = NULL, last_event_id = $7, last_occurred_at = $8, updated_at = $9
 				 WHERE source = $1 AND alert_key = $2`,
-				ev.Source, ev.AlertKey, ev.ServiceID, ev.Title, ev.Description, ev.OccurredAt, ev.EventID, now,
+				ev.Source, ev.AlertKey, ev.ServiceID, ev.Title, ev.Description, ev.OccurredAt, ev.EventID, ev.OccurredAt, now,
 			)
 		} else {
 			_, err = tx.Exec(
 				`INSERT INTO external_alerts (
-					source, alert_key, service_id, status, title, description, opened_at, last_event_id, updated_at
-				) VALUES ($1, $2, $3, 'firing', $4, $5, $6, $7, $8)`,
-				ev.Source, ev.AlertKey, ev.ServiceID, ev.Title, ev.Description, ev.OccurredAt, ev.EventID, now,
+					source, alert_key, service_id, status, title, description, opened_at, last_event_id, last_occurred_at, updated_at
+				) VALUES ($1, $2, $3, 'firing', $4, $5, $6, $7, $8, $9)`,
+				ev.Source, ev.AlertKey, ev.ServiceID, ev.Title, ev.Description, ev.OccurredAt, ev.EventID, ev.OccurredAt, now,
 			)
 		}
 		if err != nil {
@@ -211,6 +217,7 @@ func applyExternalAlertTx(tx *sql.Tx, ev event.ExternalAlert) error {
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
+		subject.startedAt = ev.OccurredAt
 		id, err := insertOngoingTx(tx, ev.ServiceID, ev.OccurredAt, now, ev.Title)
 		if err != nil {
 			return err
@@ -223,9 +230,9 @@ func applyExternalAlertTx(tx *sql.Tx, ev event.ExternalAlert) error {
 	}
 	_, err = tx.Exec(
 		`UPDATE external_alerts
-		 SET status = 'resolved', resolved_at = $3, last_event_id = $4, updated_at = $5
+		 SET status = 'resolved', resolved_at = $3, last_event_id = $4, last_occurred_at = $5, updated_at = $6
 		 WHERE source = $1 AND alert_key = $2`,
-		ev.Source, ev.AlertKey, ev.OccurredAt, ev.EventID, now,
+		ev.Source, ev.AlertKey, ev.OccurredAt, ev.EventID, ev.OccurredAt, now,
 	)
 	if err != nil {
 		return err
@@ -237,10 +244,11 @@ func applyExternalAlertTx(tx *sql.Tx, ev event.ExternalAlert) error {
 	if httpStatus == StatusOffline || active > 0 {
 		return nil
 	}
-	id, err := resolveOngoingTx(tx, ev.ServiceID, ev.OccurredAt, now)
+	id, startedAt, err := resolveOngoingTx(tx, ev.ServiceID, ev.OccurredAt, now)
 	if err != nil || id == 0 {
 		return err
 	}
+	subject.startedAt = startedAt
 	return insertDeliveriesTx(tx, subject, "incident_resolve", &id, &ev.OccurredAt, now)
 }
 
