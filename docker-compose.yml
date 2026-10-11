@@ -111,8 +111,26 @@ services:
       ALERTFLOW_BASE_URL: http://alertflow:8080
       AGENT_DATABASE_URL: postgres://alertflow:${POSTGRES_PASSWORD:-alertflow}@postgres:5432/alertflow_agent?sslmode=disable
       LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      DIAGNOSTICS_FILE: /diagnostics/diagnostics.yaml
+      CHECK_LOOKBACK_MINUTES: ${CHECK_LOOKBACK_MINUTES:-60}
+      CHECK_MAX_ROWS: ${CHECK_MAX_ROWS:-500}
+      MAX_LEAD_ROUNDS: ${MAX_LEAD_ROUNDS:-8}
+      MAX_LLM_CALLS: ${MAX_LLM_CALLS:-24}
+      MAX_TOOL_CALLS: ${MAX_TOOL_CALLS:-14}
+      MAX_REPLANS: ${MAX_REPLANS:-2}
+      MAX_REVISIONS: ${MAX_REVISIONS:-2}
+      MAX_SUBAGENT_RUNS: ${MAX_SUBAGENT_RUNS:-2}
+      SUBAGENT_MAX_ROUNDS: ${SUBAGENT_MAX_ROUNDS:-4}
+      MAX_TOTAL_TOKENS: ${MAX_TOTAL_TOKENS:-150000}
+      RUN_TIMEOUT_SECONDS: ${RUN_TIMEOUT_SECONDS:-300}
+      REPORT_GRACE_SECONDS: ${REPORT_GRACE_SECONDS:-90}
+      MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-2}
       AGENT_REVISE_ON_RESOLVE: ${AGENT_REVISE_ON_RESOLVE:-false}
       AGENT_ENABLE_WARNING_RUNS: ${AGENT_ENABLE_WARNING_RUNS:-false}
+    volumes:
+      - ./agent/diagnostics.example.yaml:/diagnostics/diagnostics.yaml:ro
     depends_on:
       postgres:
         condition: service_healthy

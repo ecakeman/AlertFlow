@@ -27,4 +27,5 @@ def test_agent_finish_is_the_exit():
     runner = Runner(Settings(), store, FakeAlertFlow(), ScriptedModel())
     runner.execute(row["id"])
     assert store.get(row["id"])["status"] == "completed"
-    assert store.latest_report(row["id"])["report"]["usage"]["tool_calls"] == 0
+    assert store.latest_report(row["id"])["report"]["usage"]["tool_calls"] == 1
+    assert any(event["type"] == "tool.completed" for event in store.list_events(row["id"]))

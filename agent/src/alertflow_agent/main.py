@@ -1,5 +1,5 @@
+import logging
 import threading
-import time
 
 from alertflow_agent.config import Settings
 from alertflow_agent.db import MemoryStore, PostgresStore, ensure_database
@@ -7,32 +7,33 @@ from alertflow_agent.integrations.alertflow import AlertFlowClient
 from alertflow_agent.runtime.graph import Runner
 from alertflow_agent.runtime.llm import OpenAIModel, ScriptedModel
 
+log = logging.getLogger("alertflow_agent")
+
 
 def build(settings: Settings | None = None):
     settings = settings or Settings()
+    if settings.llm_api_key and (not settings.llm_model or not settings.llm_base_url):
+        raise RuntimeError("LLM_MODEL and LLM_BASE_URL are required when LLM_API_KEY is set")
+    checkpoint = None
     if settings.agent_database_url:
         ensure_database(settings.agent_database_url)
         store = PostgresStore(settings.agent_database_url)
+        checkpoint = _checkpointer(settings.agent_database_url)
     else:
         store = MemoryStore()
     model = OpenAIModel(settings) if settings.llm_api_key else ScriptedModel()
     client = AlertFlowClient(settings.alertflow_base_url, settings.alertflow_agent_token)
-    runner = Runner(settings, store, client, model, checkpointer=_checkpointer(settings))
-    return settings, store, runner
+    runner = Runner(settings, store, client, model, checkpointer=checkpoint[0] if checkpoint else None)
+    return settings, store, runner, checkpoint
 
 
-def _checkpointer(settings: Settings):
-    if not settings.agent_database_url:
-        return None
-    try:
-        from langgraph.checkpoint.postgres import PostgresSaver
+def _checkpointer(url: str):
+    from langgraph.checkpoint.postgres import PostgresSaver
 
-        opened = PostgresSaver.from_conn_string(settings.agent_database_url)
-        saver = opened.__enter__() if hasattr(opened, "__enter__") else opened
-        saver.setup()
-        return saver
-    except Exception:
-        return None
+    opened = PostgresSaver.from_conn_string(url)
+    saver = opened.__enter__()
+    saver.setup()
+    return saver, opened
 
 
 def serve(settings: Settings | None = None) -> None:
@@ -40,14 +41,28 @@ def serve(settings: Settings | None = None) -> None:
 
     from alertflow_agent.api.app import create_app
 
-    settings, store, runner = build(settings)
-    threading.Thread(target=_loop, args=(settings, store, runner), daemon=True).start()
-    uvicorn.run(create_app(settings, store, runner), host="0.0.0.0", port=8000)
+    settings, store, runner, checkpoint = build(settings)
+    stop = threading.Event()
+    worker = threading.Thread(target=_loop, args=(settings, store, runner, stop), name="agent-worker")
+    worker.start()
+    app = create_app(settings, store, runner)
+
+    @app.on_event("shutdown")
+    def _shutdown():
+        stop.set()
+        worker.join(timeout=settings.run_timeout_seconds)
+        if checkpoint is not None:
+            checkpoint[1].__exit__(None, None, None)
+        closer = getattr(store, "conn", None)
+        if closer is not None:
+            closer.close()
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
 
 
-def _loop(settings, store, runner) -> None:
+def _loop(settings, store, runner, stop: threading.Event) -> None:
     for run_id in store.running_ids():
-        store.update(run_id, status="queued", stage="resume")
+        store.transition(run_id, {"running"}, status="queued", stage="resume")
     active = 0
     lock = threading.Lock()
 
@@ -56,12 +71,14 @@ def _loop(settings, store, runner) -> None:
         try:
             runner.execute(row["id"], resume=row.get("stage") == "resume")
         except Exception:
-            store.update(row["id"], status="failed", failure_reason="internal_error", stage="failed")
+            log.exception("run failed")
+            store.finish(row["id"], status="failed", failure_reason="internal_error", stage="failed")
         finally:
             with lock:
                 active -= 1
 
-    while True:
+    threads = []
+    while not stop.is_set():
         with lock:
             room = settings.max_concurrent_runs - active
         if room > 0:
@@ -69,9 +86,9 @@ def _loop(settings, store, runner) -> None:
             if row and row.get("status") != "cancelled":
                 with lock:
                     active += 1
-                threading.Thread(target=run, args=(row,), daemon=True).start()
-        time.sleep(0.5)
-
-
-if __name__ == "__main__":
-    serve()
+                thread = threading.Thread(target=run, args=(row,), name=f"run-{row['id']}")
+                thread.start()
+                threads.append(thread)
+        stop.wait(0.5)
+    for thread in threads:
+        thread.join(timeout=settings.run_timeout_seconds)

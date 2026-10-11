@@ -3,6 +3,8 @@ import math
 import re
 from datetime import datetime
 
+from alertflow_agent.runtime.schemas import ReportDraft
+
 
 def lookup(data, path: str):
     cur = data
@@ -17,6 +19,10 @@ def lookup(data, path: str):
 
 
 def _same(left, right) -> bool:
+    if isinstance(left, float) and not math.isfinite(left):
+        return False
+    if isinstance(right, float) and not math.isfinite(right):
+        return False
     if isinstance(left, (int, float)) and isinstance(right, (int, float)):
         return abs(float(left) - float(right)) <= max(0.5, abs(float(right)) * 0.001)
     if isinstance(left, str) and isinstance(right, str):
@@ -29,16 +35,19 @@ def _same(left, right) -> bool:
     return left == right
 
 
-def verify(draft: dict, evidence: dict, tokens: list[str]) -> dict:
+def verify(draft: dict, evidence: dict, tokens: list[str], gaps: list[str] | None = None) -> dict:
     findings = []
     warnings = []
-    if not isinstance(draft.get("summary"), str) or len(draft["summary"]) > 300:
-        findings.append({"rule": "V1", "detail": "summary"})
-    for obs in draft.get("observations") or []:
+    try:
+        parsed = ReportDraft.model_validate(draft).model_dump()
+    except Exception:
+        findings.append({"rule": "V1", "detail": "schema"})
+        parsed = draft if isinstance(draft, dict) else {}
+    for obs in parsed.get("observations") or []:
         _ids(obs.get("evidence_ids") or [], evidence, findings, "V2")
         for fact in obs.get("facts") or []:
             _fact(fact, evidence, findings)
-    for hyp in draft.get("hypotheses") or []:
+    for hyp in parsed.get("hypotheses") or []:
         _ids(hyp.get("supporting_evidence_ids") or [], evidence, findings, "V2")
         _ids(hyp.get("weakening_evidence_ids") or [], evidence, findings, "V2")
         status = hyp.get("status")
@@ -50,8 +59,15 @@ def verify(draft: dict, evidence: dict, tokens: list[str]) -> dict:
             findings.append({"rule": "V4", "detail": "rationale"})
         _layer(hyp, evidence, findings)
         _confidence(hyp, evidence, findings)
-    _numbers(draft, evidence, warnings)
-    redacted = _redact(draft, tokens)
+    for unknown in parsed.get("unknowns") or []:
+        _ids(unknown.get("evidence_ids") or [], evidence, findings, "V2")
+    _numbers(parsed, evidence, warnings)
+    present = {item.get("code") for item in parsed.get("unknowns") or []}
+    parsed.setdefault("unknowns", [])
+    for gap in gaps or []:
+        if gap not in present:
+            parsed["unknowns"].append({"text": f"Coverage gap {gap}.", "code": gap, "evidence_ids": []})
+    redacted = _redact(parsed, tokens)
     return {"passed": not findings, "findings": findings, "warnings": warnings, "draft": redacted}
 
 
@@ -114,9 +130,17 @@ def _confidence(hyp, evidence, findings) -> None:
 
 
 def _numbers(draft, evidence, warnings) -> None:
-    blob = json.dumps(draft)
+    cited = set()
+    for obs in draft.get("observations") or []:
+        cited.update(obs.get("evidence_ids") or [])
+    blob = json.dumps({
+        "summary": draft.get("summary"),
+        "observations": draft.get("observations"),
+        "hypotheses": draft.get("hypotheses"),
+    })
     present = set()
-    for item in evidence.values():
+    for ident in cited:
+        item = evidence.get(ident) or {}
         present.update(re.findall(r"\d+", json.dumps(item.get("data")) + " " + item.get("summary", "")))
     for number in re.findall(r"\d+", blob):
         if number not in present and number not in {"0", "1"}:

@@ -5,9 +5,9 @@ def test_fact_must_match_evidence():
     evidence = {"ana:status@0": {"source_type": "analysis", "data": {"offline": {"n": 2}}, "summary": "2"}}
     draft = {
         "summary": "two offline checks",
-        "observations": [{"evidence_ids": ["ana:status@0"], "facts": [{"evidence_id": "ana:status@0", "path": "offline.n", "value": 2}]}],
+        "observations": [{"id": "o1", "text": "offline count", "evidence_ids": ["ana:status@0"], "facts": [{"evidence_id": "ana:status@0", "path": "offline.n", "value": 2}]}],
         "hypotheses": [{
-            "id": "h1", "layer": "probe", "status": "possible", "confidence": "low", "rationale": "probe",
+            "id": "h1", "text": "probe", "layer": "probe", "status": "possible", "confidence": "low", "rationale": "probe",
             "supporting_evidence_ids": ["ana:status@0"], "weakening_evidence_ids": [],
         }],
     }

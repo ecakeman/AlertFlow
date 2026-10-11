@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+from datetime import datetime
+
+
+def _epoch(value) -> int:
+    if isinstance(value, (int, float)):
+        return int(value)
+    return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp())
+
 
 def _ts(row: dict) -> int:
-    return int(row["ts"])
+    return _epoch(row["ts"])
 
 
 def status_counts(rows: list[dict]) -> dict:
@@ -46,7 +54,7 @@ def segments(rows: list[dict]) -> dict:
         if status == "offline":
             if first_failure is None:
                 first_failure = ts
-            span = int(out[-1]["end"]) - int(out[-1]["start"])
+            span = _epoch(out[-1]["end"]) - _epoch(out[-1]["start"])
             longest = max(longest, span)
         if status in ("online", "warning") and first_failure is None:
             last_success_before = ts
@@ -116,11 +124,11 @@ def coverage(rows: list[dict], window_from: int, window_to: int, interval: int |
     gaps = []
     first_ts = ordered[0]["ts"] if ordered else None
     last_ts = ordered[-1]["ts"] if ordered else None
-    if ordered and int(first_ts) > window_from:
+    if ordered and _ts(ordered[0]) > window_from:
         gaps.append("HISTORY_TRIMMED")
     if interval and interval > 0 and len(ordered) > 1:
         for prev, nxt in zip(ordered, ordered[1:]):
-            if int(nxt["ts"]) - int(prev["ts"]) > 2 * interval:
+            if _ts(nxt) - _ts(prev) > 2 * interval:
                 gaps.append("SPARSE_CHECKS")
                 break
     expected = None

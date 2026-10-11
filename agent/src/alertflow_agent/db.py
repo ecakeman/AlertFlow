@@ -45,6 +45,29 @@ class MemoryStore:
         with self.lock:
             self.runs[run_id].update(fields)
 
+    def finish(self, run_id: str, **fields) -> bool:
+        with self.lock:
+            row = self.runs[run_id]
+            if row["status"] == "cancelled":
+                return False
+            row.update(fields)
+            return True
+
+    def transition(self, run_id: str, allowed: set[str], **fields) -> bool:
+        with self.lock:
+            row = self.runs.get(run_id)
+            if not row or row["status"] not in allowed:
+                return False
+            row.update(fields)
+            return True
+
+    def has_event(self, run_id: str, kind: str, event_id: str) -> bool:
+        with self.lock:
+            return any(
+                item["type"] == kind and (item["payload"] or {}).get("event_id") == event_id
+                for item in self.events.get(run_id, [])
+            )
+
     def append_event(self, run_id: str, kind: str, payload: dict) -> int:
         with self.lock:
             seq = len(self.events[run_id]) + 1
@@ -102,17 +125,20 @@ class PostgresStore:
         self.conn = psycopg.connect(url, autocommit=True)
 
     def insert_run(self, row: dict) -> dict | None:
-        existing = self.conn.execute("SELECT id::text FROM runs WHERE dedupe_key = %s", (row["dedupe_key"],)).fetchone()
-        if existing:
-            return self.get(existing[0])
-        self.conn.execute(
-            """INSERT INTO runs (id, dedupe_key, incident_id, service_id, event_type, mode, status, stage, input_event, usage)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)""",
-            (
-                row["id"], row["dedupe_key"], row.get("incident_id"), row["service_id"], row["event_type"],
-                row["mode"], row["status"], row.get("stage") or "", json.dumps(row["input_event"]), json.dumps(row.get("usage") or {}),
-            ),
-        )
+        import psycopg
+
+        try:
+            self.conn.execute(
+                """INSERT INTO runs (id, dedupe_key, incident_id, service_id, event_type, mode, status, stage, input_event, usage)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)""",
+                (
+                    row["id"], row["dedupe_key"], row.get("incident_id"), row["service_id"], row["event_type"],
+                    row["mode"], row["status"], row.get("stage") or "", json.dumps(row["input_event"]), json.dumps(row.get("usage") or {}),
+                ),
+            )
+        except psycopg.errors.UniqueViolation:
+            existing = self.conn.execute("SELECT id::text FROM runs WHERE dedupe_key = %s", (row["dedupe_key"],)).fetchone()
+            return self.get(existing[0]) if existing else None
         return None
 
     def get(self, run_id: str) -> dict | None:
@@ -150,6 +176,37 @@ class PostgresStore:
                 vals.append(value)
         vals.append(run_id)
         self.conn.execute(f"UPDATE runs SET {', '.join(sets)} WHERE id = %s", vals)
+
+    def finish(self, run_id: str, **fields) -> bool:
+        return self._update_where(run_id, "status <> 'cancelled'", fields)
+
+    def transition(self, run_id: str, allowed: set[str], **fields) -> bool:
+        marks = ", ".join(["%s"] * len(allowed))
+        return self._update_where(run_id, f"status IN ({marks})", fields, list(allowed))
+
+    def _update_where(self, run_id: str, clause: str, fields: dict, extra: list | None = None) -> bool:
+        if not fields:
+            return False
+        sets = []
+        vals = []
+        for key, value in fields.items():
+            if key in {"input_event", "usage"}:
+                sets.append(f"{key} = %s::jsonb")
+                vals.append(json.dumps(value))
+            else:
+                sets.append(f"{key} = %s")
+                vals.append(value)
+        vals.extend(extra or [])
+        vals.append(run_id)
+        cur = self.conn.execute(f"UPDATE runs SET {', '.join(sets)} WHERE {clause} AND id = %s", vals)
+        return cur.rowcount == 1
+
+    def has_event(self, run_id: str, kind: str, event_id: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM run_events WHERE run_id = %s AND type = %s AND payload->>'event_id' = %s LIMIT 1",
+            (run_id, kind, event_id),
+        ).fetchone()
+        return row is not None
 
     def append_event(self, run_id: str, kind: str, payload: dict) -> int:
         seq = self.conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM run_events WHERE run_id = %s", (run_id,)).fetchone()[0]
@@ -224,7 +281,7 @@ def apply_schema(url: str) -> None:
 
 
 def ensure_database(url: str) -> None:
-    """Create alertflow_agent when the role is allowed to. A refusal is not fatal."""
+    """Apply schema.sql. Create the database when the role is allowed to."""
     import psycopg
     from urllib.parse import urlparse
 
@@ -237,5 +294,10 @@ def ensure_database(url: str) -> None:
             if not exists:
                 conn.execute(f'CREATE DATABASE "{name}"')
     except Exception:
-        return
-    apply_schema(url)
+        pass
+    try:
+        apply_schema(url)
+    except Exception as exc:
+        raise RuntimeError(
+            f"could not apply schema to {name}; create that database first if this role cannot CREATE DATABASE"
+        ) from exc

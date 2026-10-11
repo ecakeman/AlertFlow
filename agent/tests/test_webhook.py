@@ -41,8 +41,8 @@ def test_dedupe_warning_and_resolve():
     assert resolved.status_code == 202
     assert store.get(first.json()["run_id"])["status"] == "queued"
     repeat = client.post("/webhooks/alertflow", json=_event("incident_resolve", "incident_resolve:1"), headers={"Authorization": "Bearer hook"})
-    # no report yet, so a second resolve still queues; a saved v2 would be a duplicate
+    assert repeat.status_code == 200
+    assert repeat.json()["action"] == "duplicate"
     store.save_report(first.json()["run_id"], 2, {"summary": "v2"})
     third = client.post("/webhooks/alertflow", json=_event("incident_resolve", "incident_resolve:1"), headers={"Authorization": "Bearer hook"})
     assert third.json()["action"] == "duplicate"
-    assert repeat.status_code == 202

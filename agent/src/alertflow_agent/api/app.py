@@ -10,11 +10,24 @@ from alertflow_agent.runtime.verify import cited
 from alertflow_agent.schemas.events import WebhookBody
 
 
+def _bearer(header: str) -> str | None:
+    if not header:
+        return None
+    scheme, _, token = header.partition(" ")
+    if scheme.lower() != "bearer" or not token or " " in token.strip():
+        return None
+    return token.strip()
+
+
 def _auth(header: str, token: str) -> bool:
     if not token:
         return False
-    given = header.removeprefix("Bearer ").strip()
+    given = _bearer(header)
+    if given is None:
+        hmac.compare_digest(token, token)
+        return False
     if len(given) != len(token):
+        hmac.compare_digest(token, token)
         return False
     return hmac.compare_digest(given, token)
 
@@ -105,7 +118,8 @@ def create_app(settings, store, runner) -> FastAPI:
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         if not store.get(run_id):
             return JSONResponse({"error": "not found"}, status_code=404)
-        store.update(run_id, status="queued")
+        if not store.transition(run_id, {"failed", "partial"}, status="queued", stage="resume"):
+            return JSONResponse({"error": "run cannot be resumed"}, status_code=409)
         return JSONResponse({"run_id": run_id, "action": "resume"}, status_code=202)
 
     @app.post("/api/v1/runs/{run_id}/cancel")
@@ -114,7 +128,8 @@ def create_app(settings, store, runner) -> FastAPI:
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         if not store.get(run_id):
             return JSONResponse({"error": "not found"}, status_code=404)
-        store.update(run_id, status="cancelled", finished_at=datetime.now(timezone.utc).isoformat())
+        if not store.transition(run_id, {"queued", "running", "failed", "partial"}, status="cancelled", finished_at=datetime.now(timezone.utc).isoformat()):
+            return JSONResponse({"error": "run cannot be cancelled"}, status_code=409)
         return {"run_id": run_id, "action": "cancelled"}
 
     return app
@@ -152,18 +167,28 @@ def _resolve(store, body, event, settings):
     found = store.find_incident(body.incident_id) if body.incident_id else None
     if not found:
         return {"run_id": None, "action": "ignored"}
-    current = found["input_event"]
+    if store.has_event(found["id"], "incident.resolved", body.event_id):
+        latest = store.latest_report(found["id"])
+        current = store.get(found["id"])
+        if latest and latest["version"] >= 2 or current["stage"] == "revise":
+            return JSONResponse({"run_id": found["id"], "action": "duplicate"}, status_code=200)
+        if settings.agent_revise_on_resolve and current["status"] in {"completed", "partial"}:
+            if store.transition(found["id"], {"completed", "partial"}, status="queued", stage="revise", mode="baseline"):
+                return JSONResponse({"run_id": found["id"], "action": "revise"}, status_code=202)
+        return JSONResponse({"run_id": found["id"], "action": "duplicate"}, status_code=200)
+    current = dict(found["input_event"])
     current["resolved_at"] = event.get("resolved_at")
+    if settings.agent_revise_on_resolve:
+        current["pending_revise"] = True
     store.update(found["id"], input_event=current)
-    store.append_event(found["id"], "incident.resolved", {"resolved_at": event.get("resolved_at")})
+    store.append_event(found["id"], "incident.resolved", {"event_id": body.event_id, "resolved_at": event.get("resolved_at")})
     if not settings.agent_revise_on_resolve:
         return JSONResponse({"run_id": found["id"], "action": "resolved"}, status_code=202)
     latest = store.latest_report(found["id"])
     if latest and latest["version"] >= 2:
         return JSONResponse({"run_id": found["id"], "action": "duplicate"}, status_code=200)
-    store.update(found["id"], status="queued", stage="revise")
-    event = dict(current)
-    event["event"] = "incident_resolve"
-    event["event_id"] = body.event_id
-    store.update(found["id"], input_event=event)
-    return JSONResponse({"run_id": found["id"], "action": "revise"}, status_code=202)
+    if found["status"] == "running":
+        return JSONResponse({"run_id": found["id"], "action": "recorded"}, status_code=202)
+    if found["status"] in {"completed", "partial"} and store.transition(found["id"], {"completed", "partial"}, status="queued", stage="revise", mode="baseline"):
+        return JSONResponse({"run_id": found["id"], "action": "revise"}, status_code=202)
+    return JSONResponse({"run_id": found["id"], "action": "recorded"}, status_code=202)

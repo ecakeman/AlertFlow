@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timezone
 from typing import TypedDict
 
@@ -8,11 +9,14 @@ from alertflow_agent.analysis.errors import classify_error
 from alertflow_agent.analysis.stats import error_stats, latency_stats
 from alertflow_agent.analysis.timeline import coverage, key_checks, segments, status_counts
 from alertflow_agent.integrations.alertflow import collect_checks, iso_now
-from alertflow_agent.integrations.project_diagnostics import fetch, load_config, mark_stale
-from alertflow_agent.runtime.guards import before_lead, charge_llm, fresh_guard, note_tool
-from alertflow_agent.runtime.llm import draft_from_state
+from alertflow_agent.integrations.project_diagnostics import fetch, load_config
+from alertflow_agent.runtime.guards import before_lead, fresh_guard, note_tool
+from alertflow_agent.runtime.model import call_model
+from alertflow_agent.runtime.planner import validate_plan_diff
 from alertflow_agent.runtime.tools import clip, run_tool
 from alertflow_agent.runtime.verify import cited, verify
+
+log = logging.getLogger("alertflow_agent")
 
 
 class GraphState(TypedDict, total=False):
@@ -42,6 +46,13 @@ class GraphState(TypedDict, total=False):
     diagnostic_source: str
     pending_tool: dict
     source_error: str
+    source_status: dict
+    skill_texts: dict
+    diagnostic_calls: int
+    prior_report: dict
+    replan_bad: bool
+    cancelled: bool
+    script_args: dict
 
 
 def _epoch(value: str) -> int:
@@ -75,12 +86,17 @@ class Runner:
         row = self.store.get(run_id)
         config = {"configurable": {"thread_id": run_id}}
         if resume:
+            restored = None
+            reason = "empty_checkpoint"
             try:
-                return self.graph.invoke(None, config)
-            except Exception:
-                # A process restart can miss the last checkpoint. The tools are read-only, so the run starts again.
-                pass
+                restored = self.graph.invoke(None, config)
+            except Exception as exc:
+                reason = type(exc).__name__
+            if restored:
+                return restored
+            self.store.append_event(run_id, "run.resumed_without_checkpoint", {"reason": reason})
         occurred = row["input_event"]["occurred_at"]
+        end_at = row["input_event"].get("resolved_at") or occurred
         return self.graph.invoke({
                 "run_id": run_id,
                 "mode": row["mode"],
@@ -88,7 +104,7 @@ class Runner:
                 "evidence": {},
                 "raw_checks": [],
                 "series": [],
-                "coverage": {"from": _epoch(occurred) - self.settings.check_lookback_minutes * 60, "to": _epoch(occurred), "gaps": []},
+                "coverage": {"from": _epoch(occurred) - self.settings.check_lookback_minutes * 60, "to": _epoch(end_at), "gaps": []},
                 "skills": [],
                 "skills_loaded": [],
                 "plan": None,
@@ -105,6 +121,11 @@ class Runner:
                 "analysis_n": 0,
                 "interval": None,
                 "started": datetime.now(timezone.utc).timestamp(),
+                "source_status": {},
+                "skill_texts": {},
+                "diagnostic_calls": 0,
+                "prior_report": self._prior_report(row),
+                "replan_bad": row["input_event"].get("replan_bad"),
         }, config)
 
     def _graph(self, checkpointer):
@@ -127,10 +148,10 @@ class Runner:
         graph.add_edge("collect_diagnostics", "analyze")
         graph.add_edge("analyze", "select_skills")
         graph.add_conditional_edges("select_skills", self.after_skills, {"plan": "initial_plan", "report": "write_report", "persist": "persist"})
-        graph.add_edge("initial_plan", "lead_model")
-        graph.add_conditional_edges("lead_model", self.after_lead, {"tools": "lead_tools", "replan": "replan", "report": "write_report"})
-        graph.add_edge("lead_tools", "lead_model")
-        graph.add_edge("replan", "lead_model")
+        graph.add_conditional_edges("initial_plan", self.after_plan, {"lead": "lead_model", "persist": "persist"})
+        graph.add_conditional_edges("lead_model", self.after_lead, {"tools": "lead_tools", "report": "write_report", "persist": "persist", "lead": "lead_model"})
+        graph.add_conditional_edges("lead_tools", self.after_tools, {"lead": "lead_model", "replan": "replan", "report": "write_report", "persist": "persist"})
+        graph.add_conditional_edges("replan", self.after_replan, {"lead": "lead_model", "report": "write_report", "persist": "persist"})
         graph.add_edge("write_report", "verify")
         graph.add_conditional_edges("verify", self.after_verify, {"revise": "write_report", "persist": "persist"})
         graph.add_edge("persist", END)
@@ -141,52 +162,66 @@ class Runner:
         return graph.compile(checkpointer=checkpointer)
 
     def collect_alertflow(self, state):
+        if self._stop_if_cancelled(state):
+            return state
         event = state["event"]
         gaps = list(state["coverage"].get("gaps") or [])
-        try:
-            detail = self.alertflow.incident(event["incident_id"]) if event.get("incident_id") else None
-            listing = self.alertflow.incidents(event["service_id"], 10)
-            metrics = self.alertflow.metrics(event["service_id"], "24h")
-            rows = collect_checks(self.alertflow, event["service_id"], state["coverage"]["from"], state["coverage"]["to"], self.settings.check_max_rows)
-        except Exception as exc:
-            state["failure_reason"] = "collect_failed" if not state.get("raw_checks") else ""
+        status = {}
+        detail = self._source(status, "incident", lambda: self.alertflow.incident(event["incident_id"]) if event.get("incident_id") else None)
+        listing = self._source(status, "incidents", lambda: self.alertflow.incidents(event["service_id"], 10))
+        metrics = self._source(status, "metrics", lambda: self.alertflow.metrics(event["service_id"], "24h"))
+        rows = self._source(status, "checks", lambda: collect_checks(
+            self.alertflow, event["service_id"], state["coverage"]["from"], state["coverage"]["to"], self.settings.check_max_rows,
+        ))
+        state["source_status"] = status
+        if rows is None and detail is None:
+            state["failure_reason"] = "collect_failed"
             gaps.append("ALERTFLOW_PARTIAL")
             state["coverage"]["gaps"] = gaps
-            state["source_error"] = str(exc)
             return state
-        if detail is None and not rows:
-            state["failure_reason"] = "collect_failed"
-            return state
-        state["raw_checks"] = rows
-        state["series"] = [
-            {"ts": p.get("ts"), "avg_latency": p.get("avgLatency")}
-            for p in (metrics.get("series") or [])
-        ]
-        state["interval"] = ((metrics.get("check") or {}).get("interval"))
+        if any(value == "unavailable" for value in status.values()):
+            gaps.append("ALERTFLOW_PARTIAL")
+        state["raw_checks"] = rows or []
+        if metrics:
+            state["series"] = [{"ts": point.get("ts"), "avg_latency": point.get("avgLatency")} for point in (metrics.get("series") or [])]
+            state["interval"] = ((metrics.get("check") or {}).get("interval"))
+            if metrics.get("tls"):
+                _evidence(state, f"tls:{event['service_id']}", "alertflow_tls", "tls", metrics["tls"].get("error") or "tls snapshot", metrics["tls"], ["TLS_SNAPSHOT_ONLY"])
+                gaps.append("TLS_SNAPSHOT_ONLY")
+            _evidence(state, f"svc:{event['service_id']}", "alertflow_service", "service", "check configuration from the metrics payload", metrics.get("check") or {})
+            _evidence(state, "met:24h", "alertflow_metric", "metric_series", "24h series", {"series": state["series"][:200]})
         if detail:
             _evidence(state, f"inc:{detail['id']}", "alertflow_incident", "incident", detail.get("title") or detail.get("status") or "incident", {"status": detail.get("status"), "severity": detail.get("severity")})
             for comment in detail.get("comments") or []:
                 _evidence(state, f"cmt:{detail['id']}:{comment['id']}", "alertflow_comment", "comment", comment.get("body") or "", {"body": comment.get("body")})
             for alert in detail.get("externalAlerts") or []:
-                _evidence(state, f"ext:{detail['id']}:{alert.get('source')}:{alert.get('alertKey')}", "alertflow_external_alert", "external_alert", alert.get("title") or alert.get("status"), alert)
-        for inc in listing.get("incidents") or []:
-            _evidence(state, f"inc:{inc['id']}", "alertflow_incident", "incident", inc.get("title") or inc.get("status") or "incident", {"status": inc.get("status"), "severity": inc.get("severity")})
-        if metrics.get("tls"):
-            _evidence(state, f"tls:{event['service_id']}", "alertflow_tls", "tls", metrics["tls"].get("error") or "tls snapshot", metrics["tls"], ["TLS_SNAPSHOT_ONLY"])
-            gaps.append("TLS_SNAPSHOT_ONLY")
-        check = metrics.get("check") or {}
-        _evidence(state, f"svc:{event['service_id']}", "alertflow_service", "service", "check configuration from the metrics payload", check)
-        _evidence(state, "met:24h", "alertflow_metric", "metric_series", "24h series", {"points": len(state["series"])})
-        for row in key_checks(rows):
+                _evidence(state, f"ext:{detail['id']}:{alert.get('source')}:{alert.get('alertKey')}", "alertflow_external_alert", "external_alert", alert.get("title") or alert.get("status") or "", alert)
+        if listing:
+            for inc in listing.get("incidents") or []:
+                _evidence(state, f"inc:{inc['id']}", "alertflow_incident", "incident", inc.get("title") or inc.get("status") or "incident", {"status": inc.get("status"), "severity": inc.get("severity")})
+        for row in key_checks(state["raw_checks"]):
             _evidence(state, f"chk:{row['id']}", "alertflow_check", "http_check", row.get("error") or row["status"], row)
         state["coverage"]["gaps"] = gaps
         return state
 
+    def _source(self, status: dict, name: str, fn):
+        try:
+            value = fn()
+        except Exception:
+            log.warning("alertflow source unavailable", extra={"source": name})
+            status[name] = "unavailable"
+            return None
+        status[name] = "empty" if value in (None, [], {}) else "ok"
+        return value
+
     def collect_diagnostics(self, state):
+        if self._stop_if_cancelled(state):
+            return state
         cfg = load_config(self.settings.diagnostics_file)
-        result = fetch(cfg, state["event"]["occurred_at"], state["event"]["occurred_at"])
-        if cfg:
-            result = mark_stale(result, datetime.fromisoformat(state["event"]["occurred_at"].replace("Z", "+00:00")))
+        start = datetime.fromtimestamp(state["coverage"]["from"], timezone.utc).isoformat()
+        end = datetime.fromtimestamp(state["coverage"]["to"], timezone.utc).isoformat()
+        event_time = datetime.fromisoformat(state["event"]["occurred_at"].replace("Z", "+00:00"))
+        result = fetch(cfg, start, end, event_time)
         mapping = {
             "not_configured": "NO_PROJECT_DIAGNOSTICS",
             "unavailable": "DIAGNOSTICS_UNAVAILABLE",
@@ -201,7 +236,7 @@ class Runner:
         state["diagnostic_source"] = result["coverage"]
         for item in result["items"]:
             ident = f"diag:{item['kind']}:{item['name']}"
-            _evidence(state, ident, "project_diagnostic", item["kind"], item.get("summary") or item.get("status") or item["name"], item)
+            _evidence(state, ident, "project_diagnostic", item["kind"], item.get("summary") or item.get("status") or item["name"], item, item.get("limitations") or [])
         return state
 
     def analyze(self, state):
@@ -264,27 +299,37 @@ class Runner:
         return "plan"
 
     def initial_plan(self, state):
-        plan = self.model.complete("initial_plan", state)
+        if self._stop_if_cancelled(state):
+            return state
+        plan = call_model(self.model, "initial_plan", state, self.settings, self.store)
+        if not plan:
+            return state
         state["plan"] = plan
-        state["guard"]["llm_calls"] += 1
         self.store.append_event(state["run_id"], "plan.created", {"version": plan.get("version")})
         return state
 
+    def after_plan(self, state):
+        if state.get("cancelled"):
+            return "persist"
+        if state.get("failure_reason"):
+            return "persist"
+        return "lead"
+
     def lead_model(self, state):
-        reason = before_lead(state["guard"], self.settings, state["started"], datetime.now(timezone.utc).timestamp())
-        if reason or state.get("finished"):
-            state["stop_reason"] = reason or state.get("stop_reason") or ""
+        if self._stop_if_cancelled(state):
+            return state
+        now = datetime.now(timezone.utc).timestamp()
+        reason = before_lead(state["guard"], self.settings, state["started"], now)
+        if reason or state.get("finished") or state.get("failure_reason"):
+            state["stop_reason"] = state.get("stop_reason") or reason or ""
             state["finished"] = True
             return state
-        decision = self.model.complete("lead", state)
-        state["guard"]["lead_rounds"] += 1
-        stop = charge_llm(state["guard"], self.settings, json.dumps(decision))
-        if stop:
-            state["stop_reason"] = stop
-            state["finished"] = True
+        decision = call_model(self.model, "lead", state, self.settings, self.store)
+        if decision is None:
+            return state
         state["pending_tool"] = decision
-        state["messages"].append({"role": "ai", "content": json.dumps(decision)})
-        if decision.get("tool") is None:
+        state["messages"].append({"role": "ai", "content": json.dumps({"tool": decision.get("tool"), "text": decision.get("text")})})
+        if not decision.get("tool"):
             state["guard"]["plain_text_streak"] += 1
             if state["guard"]["plain_text_streak"] >= 2:
                 state["stop_reason"] = "no_progress"
@@ -294,64 +339,101 @@ class Runner:
         return state
 
     def after_lead(self, state):
-        if state.get("finished") and (state.get("pending_tool") or {}).get("tool") != "finish_investigation":
+        if state.get("cancelled") or state.get("failure_reason"):
+            return "persist"
+        if (state.get("pending_tool") or {}).get("tool"):
+            return "tools"
+        if state.get("finished"):
             return "report"
-        tool = (state.get("pending_tool") or {}).get("tool")
-        if tool == "finish_investigation" or state.get("finished"):
-            return "report"
-        if tool == "request_replan":
-            return "replan"
-        return "tools"
+        return "lead"
 
     def lead_tools(self, state):
+        if self._stop_if_cancelled(state):
+            return state
         decision = state.get("pending_tool") or {}
         name = decision.get("tool")
         args = decision.get("args") or {}
-        signature = name + json.dumps(args, sort_keys=True)
-        previous = state["guard"]["tool_sigs"]
-        if len(previous) >= 1 and previous[-1] == signature:
-            result = {"status": "success", "note": "cached", "evidence_ids": []}
+        signature = name + json.dumps(args, sort_keys=True, default=str)
+        cache = state["guard"].setdefault("tool_cache", {})
+        if signature in cache:
+            result = cache[signature]
+            result = {**result, "note": "cached"}
         else:
-            result = clip(run_tool(name, args, state, self.settings, {"alertflow": self.alertflow, "model": self.model}))
+            result = clip(run_tool(name, args, state, self.settings, {
+                "alertflow": self.alertflow, "model": self.model, "store": self.store,
+            }))
+            cache[signature] = result
         stop = note_tool(state["guard"], signature)
         if stop:
             state["stop_reason"] = stop
             state["finished"] = True
         state["messages"].append({"role": "tool", "name": name, "content": json.dumps(result)})
-        self.store.append_event(state["run_id"], "tool.completed", {"name": name, "status": result.get("status")})
+        self.store.append_event(state["run_id"], "tool.completed", {"name": name, "status": result.get("status"), "evidence_ids": result.get("evidence_ids") or []})
         return state
 
+    def after_tools(self, state):
+        if state.get("cancelled") or state.get("failure_reason") == "llm_error":
+            return "persist"
+        name = (state.get("pending_tool") or {}).get("tool")
+        if name == "finish_investigation":
+            return "report"
+        if name == "request_replan":
+            return "replan"
+        if state.get("stop_reason"):
+            return "report"
+        return "lead"
+
     def replan(self, state):
+        if self._stop_if_cancelled(state):
+            return state
         if state["guard"]["replans"] >= self.settings.max_replans:
             state["stop_reason"] = "budget_replans"
             state["finished"] = True
             return state
-        new = self.model.complete("replan", state)
         state["guard"]["replans"] += 1
-        if _plan_ok(state.get("plan"), new, state["evidence"]):
-            state["plan"] = new
-            self.store.append_event(state["run_id"], "plan.revised", {"version": new.get("version")})
+        accepted = None
+        for _ in range(2):
+            new = call_model(self.model, "replan", state, self.settings, self.store)
+            if state.get("failure_reason"):
+                return state
+            if new and validate_plan_diff(state.get("plan"), new, state["evidence"]):
+                accepted = new
+                break
+        if accepted:
+            state["plan"] = accepted
+            self.store.append_event(state["run_id"], "plan.revised", {"version": accepted.get("version")})
         else:
             self.store.append_event(state["run_id"], "plan.rejected", {})
         state["replan_requested"] = ""
-        state["pending_tool"] = {"tool": "finish_investigation", "args": {}}
         return state
 
+    def after_replan(self, state):
+        if state.get("cancelled") or state.get("failure_reason"):
+            return "persist"
+        if state.get("stop_reason"):
+            return "report"
+        return "lead"
+
     def write_report(self, state):
-        if state.get("failure_reason") == "collect_failed":
+        if self._stop_if_cancelled(state) or state.get("failure_reason") in {"collect_failed", "llm_error"}:
             return state
-        draft = self.model.complete("write_report", state)
-        if not isinstance(draft, dict) or "observations" not in draft:
-            draft = draft_from_state(state)
+        now = datetime.now(timezone.utc).timestamp()
+        if now - state["started"] > self.settings.run_timeout_seconds + self.settings.report_grace_seconds:
+            state["failure_reason"] = "report_timeout"
+            return state
+        draft = call_model(self.model, "write_report", state, self.settings, self.store)
+        if not draft:
+            if not state.get("failure_reason"):
+                state["failure_reason"] = "llm_error"
+            return state
         state["report"] = draft
-        state["guard"]["llm_calls"] += 1
         return state
 
     def verify_node(self, state):
-        if state.get("failure_reason") == "collect_failed":
+        if state.get("failure_reason") or state.get("cancelled") or not state.get("report"):
             return state
-        tokens = [self.settings.agent_webhook_token, self.settings.agent_api_token, self.settings.alertflow_agent_token, self.settings.llm_api_key]
-        result = verify(state["report"], state["evidence"], tokens)
+        tokens = [self.settings.agent_webhook_token, self.settings.agent_api_token, self.settings.alertflow_agent_token, self.settings.llm_base_url, self.settings.llm_api_key]
+        result = verify(state["report"], state["evidence"], tokens, state["coverage"].get("gaps") or [])
         state["report"] = result["draft"]
         state["verification"] = {"passed": result["passed"], "findings": result["findings"], "warnings": result["warnings"]}
         if not result["passed"]:
@@ -359,7 +441,7 @@ class Runner:
         return state
 
     def after_verify(self, state):
-        if state.get("failure_reason") == "collect_failed":
+        if state.get("failure_reason") or state.get("cancelled") or not state.get("verification"):
             return "persist"
         if state["verification"]["passed"]:
             return "persist"
@@ -369,20 +451,24 @@ class Runner:
 
     def persist(self, state):
         run_id = state["run_id"]
+        if state.get("cancelled") or self._stop_if_cancelled(state):
+            self.store.save_evidence(run_id, state.get("evidence") or {})
+            return state
         self.store.save_evidence(run_id, state.get("evidence") or {})
-        if state.get("failure_reason") == "collect_failed":
-            self.store.update(run_id, status="failed", failure_reason="collect_failed", stage="persist", finished_at=iso_now())
-            self.store.append_event(run_id, "run.failed", {"reason": "collect_failed"})
+        if state.get("failure_reason"):
+            self.store.finish(run_id, status="failed", failure_reason=state["failure_reason"], stage="persist", finished_at=iso_now())
+            self.store.append_event(run_id, "run.failed", {"reason": state["failure_reason"]})
             return state
         passed = (state.get("verification") or {}).get("passed")
         status = "completed" if passed and not state.get("stop_reason") else "partial"
         report = dict(state.get("report") or {})
+        version = 2 if state["event"].get("event") == "incident_resolve" else 1
         report.update({
             "schema_version": "v1",
             "run_id": run_id,
             "incident_id": state["event"].get("incident_id"),
             "service_id": state["event"]["service_id"],
-            "version": 1,
+            "version": version,
             "status": status,
             "coverage": {
                 "from": state["coverage"].get("from"),
@@ -392,33 +478,44 @@ class Runner:
                 "gaps": state["coverage"].get("gaps") or [],
             },
             "verification": state.get("verification"),
-            "usage": {"llm_calls": state["guard"]["llm_calls"], "tool_calls": state["guard"]["tool_calls"], "tokens": state["guard"]["tokens"], "mode": state["mode"]},
+            "usage": {
+                "llm_calls": state["guard"]["llm_calls"],
+                "tool_calls": state["guard"]["tool_calls"],
+                "tokens": state["guard"]["tokens"],
+                "estimated": bool(state["guard"].get("tokens_estimated")),
+                "mode": state["mode"],
+            },
             "completed_at": iso_now(),
         })
         if state.get("stop_reason"):
-            report.setdefault("unknowns", []).append({"text": "The investigation stopped because of the agent budget.", "code": state["stop_reason"], "evidence_ids": []})
-        version = 2 if state["event"].get("event") == "incident_resolve" else 1
-        report["version"] = version
+            report.setdefault("unknowns", []).append({"text": "The investigation stopped because of an agent limit.", "code": state["stop_reason"], "evidence_ids": []})
+        if not report.get("summary"):
+            self.store.finish(run_id, status="failed", failure_reason="report_missing", stage="persist", finished_at=iso_now())
+            return state
         self.store.save_report(run_id, version, report)
-        self.store.update(run_id, status=status, stop_reason=state.get("stop_reason") or None, stage="persist", finished_at=iso_now(), usage=report["usage"])
+        self.store.finish(run_id, status=status, stop_reason=state.get("stop_reason") or None, stage="persist", finished_at=iso_now(), usage=report["usage"])
         self.store.append_event(run_id, "report.saved", {"version": version, "status": status, "cited": sorted(cited(report))})
+        fresh = self.store.get(run_id) or {}
+        pending = (fresh.get("input_event") or {}).get("pending_revise")
+        if pending and self.settings.agent_revise_on_resolve and version == 1:
+            current = dict(fresh.get("input_event") or {})
+            current["event"] = "incident_resolve"
+            self.store.update(run_id, input_event=current)
+            self.store.transition(run_id, {"completed", "partial"}, status="queued", stage="revise", mode="baseline")
         state["report"] = report
         return state
 
+    def _prior_report(self, row: dict):
+        if row.get("stage") != "revise" and row["input_event"].get("event") != "incident_resolve":
+            return None
+        saved = self.store.latest_report(row["id"])
+        if not saved or saved["version"] != 1:
+            return None
+        return {"summary": saved["report"].get("summary"), "version": 1}
 
-def _plan_ok(old, new, evidence) -> bool:
-    if not old or not isinstance(new, dict):
+    def _stop_if_cancelled(self, state) -> bool:
+        row = self.store.get(state["run_id"])
+        if row and row.get("status") == "cancelled":
+            state["cancelled"] = True
+            return True
         return False
-    if new.get("version", 0) <= old.get("version", 0):
-        return False
-    old_ids = {h["id"]: h for h in old.get("hypotheses") or []}
-    new_ids = {h["id"]: h for h in new.get("hypotheses") or []}
-    for ident, hyp in old_ids.items():
-        if ident not in new_ids or new_ids[ident].get("layer") != hyp.get("layer"):
-            return False
-    for hyp in new.get("hypotheses") or []:
-        if hyp.get("status") in {"supported", "weakened", "ruled_out"}:
-            ids = (hyp.get("evidence_for") or []) + (hyp.get("evidence_against") or [])
-            if not ids or any(i not in evidence for i in ids):
-                return False
-    return True
