@@ -42,7 +42,15 @@ def call_model(model, node: str, state: dict, settings, store):
             last = exc
             log.warning("llm call failed", extra={"node": node})
     state["failure_reason"] = "llm_error"
-    store.append_event(state["run_id"], "llm.failed", {"node": node, "error": type(last).__name__ if last else "error"})
+    detail = str(last) if last else "error"
+    for secret in (settings.llm_api_key, settings.agent_api_token, settings.agent_webhook_token, settings.alertflow_agent_token):
+        if secret:
+            detail = detail.replace(secret, "[redacted]")
+    store.append_event(state["run_id"], "llm.failed", {
+        "node": node,
+        "error": type(last).__name__ if last else "error",
+        "detail": detail[:400],
+    })
     return None
 
 

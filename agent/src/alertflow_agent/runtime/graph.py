@@ -569,6 +569,7 @@ class Runner:
             run_id, version, report, status, state.get("stop_reason") or None, report["usage"],
             queue_revise=bool(pending and self.settings.agent_revise_on_resolve and version == 1),
             cited=sorted(cited(report)),
+            replace_partial=fresh.get("stage") == "resume" and version == 1,
         )
         state["report"] = report
         return state

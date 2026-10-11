@@ -397,7 +397,7 @@ reports(run_id, version int, report jsonb, created_at, primary key(run_id, versi
 ```
 
 - run 状态：`queued / running / completed / partial / failed / cancelled`。
-- 执行：写 `runs` 后立即返回；用 `asyncio` 后台任务跑图（`thread_id = run_id`）。`resume` = 以 `None` 输入从最近检查点继续（工具全是只读，可安全重跑；resume 可能重复发事件，不处理）。
+- 执行：写 `runs` 后立即返回；后台任务跑图。第一次尝试的 `thread_id` 是 `run_id`。`resume` 只接受 `failed` 或 `partial`。检查点还有下一步时以 `None` 继续该 thread；检查点已结束或缺失时换 `{run_id}:{attempt}` 重跑，并记录原因。重跑仍写 v1：若原 v1 的 `status` 是 `partial`，在同一提交里替换它；若原 v1 已是 `completed`，保持冲突，不覆盖。v2 只来自恢复修订，不来自普通 resume。重跑可能再次追加只读工具事件。
 
 | 接口 | 鉴权 |
 |---|---|
@@ -515,8 +515,8 @@ reports(run_id, version int, report jsonb, created_at, primary key(run_id, versi
 **做什么**
 
 1. `evals/run_evals.py`（§6.2）+ 结果记录。
-2. incident_resolve 触发的报告修订（`AGENT_REVISE_ON_RESOLVE`）：以 baseline 模式重新收集（窗口含 `resolved_at`），把 v1 报告作为上下文，生成 `version=2`，补充故障持续时长与恢复事实；同样过校验。
-3. `resume` 端点；（可选）`cancel`。
+2. incident_resolve 触发的报告修订（`AGENT_REVISE_ON_RESOLVE`）：以 baseline 模式重新收集（窗口含 `resolved_at`），把 v1 报告作为上下文，生成 `version=2`，补充故障持续时长与恢复事实；同样过校验。普通 resume 不写 v2。
+3. `resume` 端点替换 `partial` 的 v1，不覆盖 `completed` 的 v1；（可选）`cancel`。
 4. `agent/Dockerfile` + compose 的 `agent` profile（依赖 postgres 与 alertflow；环境变量来自 `.env`；`.env.example` 补全）。
 5. `agent/README.md`：一张架构图（mermaid）、5 分钟 demo 步骤（stub 版 + 真实链路版）、评测结果表（模型名、日期、各场景通过 / 失败、平均 token / 秒）、一份示例报告 JSON、"设计取舍"一节（§1 的取舍表 + 已知局限）。
 6. 真实链路冒烟（手工）：`flaky_target` + AlertFlow + Agent；在 AlertFlow 里建 webhook 渠道（URL=`http://agent:8000/webhooks/alertflow`，header `Authorization: Bearer <AGENT_WEBHOOK_TOKEN>`，`bodyTemplate` 留空）；制造 503 → 查到报告；恢复 → 出现 v2。截图 / 录屏由用户自己做。

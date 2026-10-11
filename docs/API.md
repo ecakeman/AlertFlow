@@ -75,7 +75,7 @@ admin-gated.
 
 `202` means the event and its outbox row were stored. `200` with `"duplicate": true` means this `source` and `event_id` were already stored. Neither response means the incident or a notification has been processed. Unknown services, missing fields, and a status other than `firing` or `resolved` return `400`.
 
-The same `alert_key` stays one alert instance. An incident stays open until the HTTP status is not `offline` and no external alert for that service is `firing`.
+The same `alert_key` stays one alert instance. An incident stays open until the HTTP status is not `offline` and no external alert for that service is `firing`. A later event is applied only when its `occurred_at` is strictly greater than both the alert's `last_occurred_at` and every stored event for that `source` and `alert_key`. An equal timestamp does not prove which event happened last, so the state already stored stays. A resolved event that arrives before any firing does not by itself open or close an incident, and it does block an older firing from opening one.
 
 ## Integrations
 

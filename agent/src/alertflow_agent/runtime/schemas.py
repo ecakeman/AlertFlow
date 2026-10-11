@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 Layer = Literal["probe", "network_dns", "tls", "app_internal", "dependency", "unknown"]
@@ -68,11 +68,16 @@ class NextStep(BaseModel):
 
 class ReportDraft(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    summary: str = Field(max_length=300)
+    summary: str
     observations: list[Observation]
     hypotheses: list[ReportHypothesis]
     unknowns: list[UnknownItem] = Field(default_factory=list)
     recommended_next_steps: list[NextStep] = Field(default_factory=list)
+
+    @field_validator("summary")
+    @classmethod
+    def clip_summary(cls, value: str) -> str:
+        return value[:300]
 
 
 class SubagentResult(BaseModel):

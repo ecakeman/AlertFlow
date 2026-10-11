@@ -331,6 +331,65 @@ def test_startup_marks_running_for_resume_and_refuses_a_partial_model_config():
         raise AssertionError("empty model config should fail")
 
 
+def test_resume_replaces_a_partial_v1_and_keeps_it_when_the_rerun_fails():
+    store, row, _, runner = _run(script=["finish"], settings=Settings(max_llm_calls=1))
+    saved = store.latest_report(row["id"])
+    assert saved["version"] == 1
+    assert saved["report"]["status"] == "partial"
+    saved["report"]["summary"] = "old-partial"
+    store.transition(row["id"], {"partial"}, status="failed", stage="failed")
+    store.transition(row["id"], {"failed"}, status="queued", stage="resume")
+    _claim(store, row["id"])
+    runner.execute(row["id"], resume=True)
+    replaced = store.latest_report(row["id"])
+    assert replaced["version"] == 1
+    assert replaced["report"]["summary"] != "old-partial"
+    assert store.get(row["id"]).get("failure_reason") != "report_conflict"
+    assert store.get(row["id"])["status"] == "partial"
+    assert sum(1 for item in store.reports[row["id"]] if item["version"] == 1) == 1
+
+    store2, row2, _, runner2 = _run(script=["finish"], settings=Settings(max_llm_calls=1))
+    original = copy.deepcopy(store2.latest_report(row2["id"])["report"])
+    store2.transition(row2["id"], {"partial"}, status="failed", stage="failed")
+    store2.transition(row2["id"], {"failed"}, status="queued", stage="resume")
+    _claim(store2, row2["id"])
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("model down")
+
+    runner2.model.complete = _boom
+    runner2.execute(row2["id"], resume=True)
+    assert store2.latest_report(row2["id"])["report"]["summary"] == original["summary"]
+    assert store2.latest_report(row2["id"])["report"]["status"] == "partial"
+    assert store2.get(row2["id"])["status"] == "failed"
+
+
+def test_resume_does_not_overwrite_a_completed_v1_or_a_v2():
+    store, row, _, runner = _run("baseline")
+    original = store.latest_report(row["id"])["report"]["summary"]
+    assert store.latest_report(row["id"])["report"]["status"] == "completed"
+    store.transition(row["id"], {"completed"}, status="failed", stage="failed")
+    store.transition(row["id"], {"failed"}, status="queued", stage="resume")
+    _claim(store, row["id"])
+    runner.execute(row["id"], resume=True)
+    assert store.get(row["id"])["status"] == "failed"
+    assert store.get(row["id"])["failure_reason"] == "report_conflict"
+    assert store.latest_report(row["id"])["report"]["summary"] == original
+    assert store.latest_report(row["id"])["report"]["status"] == "completed"
+
+    other = event_row("baseline")
+    other["id"] = "33333333-3333-3333-3333-333333333333"
+    other["dedupe_key"] = "v2-keep"
+    store.insert_run(other)
+    store.update(other["id"], status="running")
+    assert store.commit_report(other["id"], 2, {"summary": "recovery", "status": "completed"}, "completed", None, {}) == "saved"
+    assert store.commit_report(
+        other["id"], 2, {"summary": "replaced", "status": "completed"}, "completed", None, {}, replace_partial=True,
+    ) == "conflict"
+    assert store.latest_report(other["id"])["report"]["summary"] == "recovery"
+    assert store.get(other["id"])["failure_reason"] == "report_conflict"
+
+
 def test_resume_api_rejects_running_and_completed():
     from fastapi.testclient import TestClient
 

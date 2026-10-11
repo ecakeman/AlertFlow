@@ -8,6 +8,8 @@
 
 ## Q2 默认 Webhook 字段
 
+审计当时，`bodyTemplate` 为空的默认 JSON 只有下面这些字段。当前代码已经加上契约字段，见本文件末尾“当前代码”。
+
 `backend/internal/notify/webhook.go` 的 `renderWebhookBody` 在 `bodyTemplate` 为空时输出：
 
 - `event`：`incident_start`、`incident_resolve` 或 `warning`（`notify.Event`）
@@ -44,7 +46,7 @@
 
 `userLocal` 只在创建、更新事故时可选地写入 `createdBy`。`ALERTFLOW_WEBHOOK_TOKEN` 在 `handleAlertWebhook`：未配置返回 503，错误 Bearer 返回 401，比较用 `crypto/subtle`。内部 API 应复制这个比较，使用另一个变量 `ALERTFLOW_AGENT_TOKEN`。
 
-未知 `/api/` 由 `serveSPA` 返回 JSON 404。`/internal/` 现在会落到 SPA，返回 HTML。
+未知 `/api/` 由 `serveSPA` 返回 JSON 404。审计当时 `/internal/` 会落到 SPA 并返回 HTML。当前 `/internal/agent/v1` 未命中的路径返回 JSON 404。
 
 ## Q6 error 文案
 
@@ -95,3 +97,7 @@
 `event_id` 用 `<event>:<incident_id>`。快照没有 incident 时用 `delivery:<notification_deliveries.id>`。`check_id` 只在检查触发时出现。`occurred_at` 是这次事件的时间，`started_at` 是故障开始时间；warning 不带 `started_at` 或 `resolved_at`。`resolved_at` 只在恢复事件上有值，并与该事件的 `occurred_at` 相同。
 
 §4.5 的错误分类先保持规格中的正则。`http.StatusText` 的 `Service Unavailable` 不会命中 `http_status` 正则，除非分类同时看 `status_code`。P1 不改分类；Agent 分析应同时看 `status_code`。
+
+## 当前代码
+
+上面 Q2 和 Q5 记录的是 2026-10-11 审计时的代码。当前 `renderWebhookBody` 在 `bodyTemplate` 为空时已经输出 `schema_version`、`event_id`、`service_id`、`service_name`、`occurred_at` 和 `severity`。`started_at` 在 warning 上省略，`resolved_at` 只在恢复事件上出现并等于该事件的 `occurred_at`。`/internal/agent/v1` 的未知路径返回 JSON 404。同一秒的外部告警仍不能判断先后。

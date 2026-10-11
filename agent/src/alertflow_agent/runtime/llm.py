@@ -99,20 +99,26 @@ class OpenAIModel:
 
         if not settings.llm_model or not settings.llm_base_url:
             raise RuntimeError("LLM_MODEL and LLM_BASE_URL are required when LLM_API_KEY is set")
+        extra = {}
+        # DeepSeek thinking mode rejects the tool_choice used for structured output.
+        if "deepseek.com" in settings.llm_base_url:
+            extra["extra_body"] = {"thinking": {"type": "disabled"}}
         self.chat = ChatOpenAI(
             model=settings.llm_model,
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
             temperature=0,
+            **extra,
         )
 
     def complete(self, node: str, state: dict, prompt: str = "") -> tuple[dict, dict]:
         schema = SCHEMAS[node]
-        runnable = self.chat.with_structured_output(schema, include_raw=True)
+        runnable = self.chat.with_structured_output(schema, method="function_calling", include_raw=True)
         raw = runnable.invoke(prompt)
         parsed = raw["parsed"] if isinstance(raw, dict) else raw
         if parsed is None:
-            raise ValueError("model output did not match the schema")
+            err = raw.get("parsing_error") if isinstance(raw, dict) else None
+            raise ValueError(str(err) if err else "model output did not match the schema")
         message = raw.get("raw") if isinstance(raw, dict) else None
         meta = getattr(message, "usage_metadata", None) or {}
         if meta.get("total_tokens"):

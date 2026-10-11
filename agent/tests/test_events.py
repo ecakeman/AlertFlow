@@ -91,3 +91,19 @@ def test_postgres_event_sequences_and_resolve_are_atomic():
     assert sorted(results) == ["duplicate", "revise"]
     assert left.get(row["id"])["stage"] == "revise"
     assert left.get(row["id"])["input_event"]["event"] == "incident_resolve"
+
+    partial = event_row("agent")
+    partial["id"] = str(uuid.uuid4())
+    partial["dedupe_key"] = partial["id"]
+    left.insert_run(partial)
+    left.update(partial["id"], status="running", stage="resume")
+    assert left.commit_report(partial["id"], 1, {"summary": "old", "status": "partial"}, "partial", "budget", {}) == "saved"
+    assert left.commit_report(
+        partial["id"], 1, {"summary": "new", "status": "partial"}, "partial", None, {}, replace_partial=True,
+    ) == "saved"
+    assert left.latest_report(partial["id"])["report"]["summary"] == "new"
+    assert left.commit_report(
+        partial["id"], 1, {"summary": "nope", "status": "completed"}, "completed", None, {}, replace_partial=False,
+    ) == "conflict"
+    kept = left.latest_report(partial["id"])["report"]["summary"]
+    assert kept == "new"

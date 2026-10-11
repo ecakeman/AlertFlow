@@ -1,6 +1,6 @@
 # AlertFlow Agent
 
-The agent accepts AlertFlow's default webhook and reads `GET /internal/agent/v1`. It does not change incidents or delivery. A run is `queued` in Postgres until a worker slot is free (`MAX_CONCURRENT_RUNS`). On startup, runs left `running` are queued again and resumed from the LangGraph checkpoint. Resume can repeat the last read-only tool call and can append the same event twice.
+The agent accepts AlertFlow's default webhook and reads `GET /internal/agent/v1`. It does not change incidents or delivery. A run is `queued` in Postgres until a worker slot is free (`MAX_CONCURRENT_RUNS`). On startup, runs left `running` are queued again. Resume continues a checkpoint only while it still has a next node. A finished or missing checkpoint starts another attempt on a new thread, so the same read-only tool call and its event can be appended again. That rerun replaces a partial v1 report. It does not replace a completed v1, and it does not create the recovery report v2.
 
 ## Start
 
@@ -32,7 +32,7 @@ docker compose --profile agent up --no-deps --build agent
 
 ## Configuration
 
-See `.env.example`. `AGENT_WEBHOOK_TOKEN` is the inbound webhook. `AGENT_API_TOKEN` is the query API. `ALERTFLOW_AGENT_TOKEN` is sent to AlertFlow and is a different value from `ALERTFLOW_WEBHOOK_TOKEN`. Empty `LLM_API_KEY` uses a scripted model so the graph can run; that output is not a model-quality result.
+See `.env.example`. `AGENT_WEBHOOK_TOKEN` is the inbound webhook. `AGENT_API_TOKEN` is the query API. `ALERTFLOW_AGENT_TOKEN` is sent to AlertFlow and is a different value from `ALERTFLOW_WEBHOOK_TOKEN`. Empty `LLM_API_KEY` uses a scripted model so the graph can run; that output is not a model-quality result. Structured output uses function calling. A DeepSeek base URL also sends `thinking.type=disabled`, because that service rejects tool choice while thinking is on.
 
 ## Smoke
 

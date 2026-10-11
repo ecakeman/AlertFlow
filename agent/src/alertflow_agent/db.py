@@ -100,18 +100,23 @@ class MemoryStore:
             self._append_locked(run_id, "incident.resolved", {"event_id": event_id, "resolved_at": resolved_at})
             return action
 
-    def commit_report(self, run_id: str, version: int, report: dict, status: str, stop_reason, usage: dict, queue_revise: bool = False, cited: list | None = None) -> str:
+    def commit_report(self, run_id: str, version: int, report: dict, status: str, stop_reason, usage: dict, queue_revise: bool = False, cited: list | None = None, replace_partial: bool = False) -> str:
         with self.lock:
             row = self.runs[run_id]
             if row["status"] == "cancelled":
                 return "cancelled"
             rows = self.reports.setdefault(run_id, [])
-            if any(item["version"] == version for item in rows):
-                row.update(status="failed", failure_reason="report_conflict", stage="persist", finished_at=_now())
-                self._append_locked(run_id, "run.failed", {"reason": "report_conflict"})
-                return "conflict"
-            rows.append({"version": version, "report": report, "created_at": _now()})
-            row.update(status=status, stop_reason=stop_reason, stage="persist", finished_at=_now(), usage=usage or {})
+            existing = next((item for item in rows if item["version"] == version), None)
+            if existing is not None:
+                old_status = (existing.get("report") or {}).get("status")
+                if not (replace_partial and version == 1 and old_status == "partial"):
+                    row.update(status="failed", failure_reason="report_conflict", stage="persist", finished_at=_now())
+                    self._append_locked(run_id, "run.failed", {"reason": "report_conflict"})
+                    return "conflict"
+                existing["report"] = report
+            else:
+                rows.append({"version": version, "report": report, "created_at": _now()})
+            row.update(status=status, stop_reason=stop_reason, failure_reason=None, stage="persist", finished_at=_now(), usage=usage or {})
             self._append_locked(run_id, "report.saved", {"version": version, "status": status, "cited": cited or []})
             if queue_revise and version == 1 and (row.get("input_event") or {}).get("pending_revise"):
                 current = json.loads(json.dumps(row["input_event"]))
@@ -321,7 +326,7 @@ class PostgresStore:
             except psycopg.errors.UniqueViolation:
                 return "duplicate"
 
-    def commit_report(self, run_id: str, version: int, report: dict, status: str, stop_reason, usage: dict, queue_revise: bool = False, cited: list | None = None) -> str:
+    def commit_report(self, run_id: str, version: int, report: dict, status: str, stop_reason, usage: dict, queue_revise: bool = False, cited: list | None = None, replace_partial: bool = False) -> str:
         import psycopg
 
         with psycopg.connect(self.url) as conn:
@@ -340,19 +345,27 @@ class PostgresStore:
                     (run_id, version, json.dumps(report)),
                 )
                 if inserted.rowcount != 1:
-                    conn.execute(
-                        """UPDATE runs SET status = 'failed', failure_reason = 'report_conflict', stage = 'persist', finished_at = now()
-                           WHERE id = %s AND status <> 'cancelled'""",
-                        (run_id,),
-                    )
-                    self._append_tx(conn, run_id, "run.failed", {"reason": "report_conflict"})
-                    return "conflict"
+                    replaced = None
+                    if replace_partial and version == 1:
+                        replaced = conn.execute(
+                            """UPDATE reports SET report = %s::jsonb
+                               WHERE run_id = %s AND version = 1 AND report->>'status' = 'partial'""",
+                            (json.dumps(report), run_id),
+                        )
+                    if replaced is None or replaced.rowcount != 1:
+                        conn.execute(
+                            """UPDATE runs SET status = 'failed', failure_reason = 'report_conflict', stage = 'persist', finished_at = now()
+                               WHERE id = %s AND status <> 'cancelled'""",
+                            (run_id,),
+                        )
+                        self._append_tx(conn, run_id, "run.failed", {"reason": "report_conflict"})
+                        return "conflict"
                 current = dict(row[1] or {})
                 final_status, final_stage, final_mode = status, "persist", None
                 if queue_revise and version == 1 and current.get("pending_revise"):
                     current["event"] = "incident_resolve"
                     final_status, final_stage, final_mode = "queued", "revise", "baseline"
-                assignments = ["status = %s", "stop_reason = %s", "stage = %s", "finished_at = now()", "usage = %s::jsonb", "input_event = %s::jsonb"]
+                assignments = ["status = %s", "stop_reason = %s", "failure_reason = NULL", "stage = %s", "finished_at = now()", "usage = %s::jsonb", "input_event = %s::jsonb"]
                 values = [final_status, stop_reason, final_stage, json.dumps(usage or {}), json.dumps(current)]
                 if final_mode is not None:
                     assignments.append("mode = %s")

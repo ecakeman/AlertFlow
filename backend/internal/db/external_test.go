@@ -88,6 +88,48 @@ func TestDuplicateFiringDoesNotOpenAnotherIncident(t *testing.T) {
 	}
 }
 
+func TestNewerResolvedBlocksAnOlderFiring(t *testing.T) {
+	database := OpenTest(t)
+	mustPages(t, database)
+	if err := database.ApplyExternalAlert(mustExternal(t, database, resolvedAlert("e-new", 3_000))); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.ApplyExternalAlert(mustExternal(t, database, firingAlert("e-old", 2_000))); err != nil {
+		t.Fatal(err)
+	}
+	var alerts int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM external_alerts WHERE alert_key = 'cpu'`).Scan(&alerts); err != nil {
+		t.Fatal(err)
+	}
+	if alerts != 0 {
+		t.Fatalf("stale firing opened an alert")
+	}
+	if inc, err := database.GetOngoingIncident("svc"); err != nil || inc != nil {
+		t.Fatalf("stale firing opened an incident: %+v %v", inc, err)
+	}
+	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE event_type = 'incident_start'`); n != 0 {
+		t.Fatalf("start deliveries = %d", n)
+	}
+}
+
+func TestOlderResolvedDoesNotBlockANewerFiring(t *testing.T) {
+	database := OpenTest(t)
+	mustPages(t, database)
+	if err := database.ApplyExternalAlert(mustExternal(t, database, resolvedAlert("e-old", 1_000))); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.ApplyExternalAlert(mustExternal(t, database, firingAlert("e-new", 2_000))); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := database.QueryRow(`SELECT status FROM external_alerts WHERE alert_key = 'cpu'`).Scan(&status); err != nil || status != "firing" {
+		t.Fatalf("status = %s, %v", status, err)
+	}
+	if inc, err := database.GetOngoingIncident("svc"); err != nil || inc == nil {
+		t.Fatalf("newer firing did not open an incident: %+v %v", inc, err)
+	}
+}
+
 func TestStaleExternalResolveDoesNotRewindFiring(t *testing.T) {
 	database := OpenTest(t)
 	mustPages(t, database)

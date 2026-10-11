@@ -172,6 +172,19 @@ func applyExternalAlertTx(tx *sql.Tx, ev event.ExternalAlert) error {
 	if exists && ev.OccurredAt <= lastOccurred {
 		return nil
 	}
+	// A newer event for this alert may already be stored even when this
+	// instance has no row yet. Equal timestamps do not prove order.
+	var newer int
+	if err = tx.QueryRow(
+		`SELECT COUNT(*) FROM external_alert_events
+		 WHERE source = $1 AND alert_key = $2 AND occurred_at > $3`,
+		ev.Source, ev.AlertKey, ev.OccurredAt,
+	).Scan(&newer); err != nil {
+		return err
+	}
+	if newer > 0 {
+		return nil
+	}
 
 	subject := notifySubject{
 		eventID: ev.EventID, serviceID: ev.ServiceID, serviceName: ev.ServiceName,
