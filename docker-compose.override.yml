@@ -1,0 +1,10 @@
+services:
+  alertflow:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  agent:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  kafka:
+    environment:
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx512m"

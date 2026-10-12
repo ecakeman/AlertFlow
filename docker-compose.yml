@@ -36,6 +36,8 @@ services:
       ALERTFLOW_ADDR: :8080
       ALERTFLOW_WEBHOOK_TOKEN: ${ALERTFLOW_WEBHOOK_TOKEN:-}
       ALERTFLOW_AGENT_TOKEN: ${ALERTFLOW_AGENT_TOKEN:-}
+      AGENT_BASE_URL: ${AGENT_BASE_URL:-http://agent:8000}
+      AGENT_API_TOKEN: ${AGENT_API_TOKEN:-}
     volumes:
       - alertflow-config:/config
     depends_on:
@@ -156,6 +158,28 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  # ── 演示目标（合部署，profile "demo"）────────────────────────────────────
+  # Fault Lab 提供被监控目标与诊断快照。它和上面几个服务**放在同一个 compose 里
+  # 部署**，但进程、代码、数据库完全独立——三者只通过 HTTP 地址互相访问。
+  # AlertFlow 的受监控服务与 Agent 的诊断源都指向它（用 compose 服务名，不走宿主）。
+  fault-lab:
+    profiles: ["demo"]
+    build:
+      context: ${FAULT_LAB_CONTEXT:-../fault-lab}
+    image: fault-lab:local
+    environment:
+      SIMULATOR_ADDR: ":8090"
+      SIMULATOR_CONTROL_TOKEN: ${SIMULATOR_CONTROL_TOKEN:-dev-control-token}
+      SIMULATOR_DIAGNOSTICS_TOKEN: ${SIMULATOR_DIAGNOSTICS_TOKEN:-}
+      SIMULATOR_CONFIG_PATH: /data/simulator.json
+      SIMULATOR_LOG_LEVEL: ${SIMULATOR_LOG_LEVEL:-info}
+    ports:
+      - "127.0.0.1:8090:8090"   # 只绑回环：演示目标不对公网暴露
+    volumes:
+      - fault-lab-data:/data
+    restart: unless-stopped
+
 volumes:
   alertflow-pg:
   alertflow-config:
+  fault-lab-data:
