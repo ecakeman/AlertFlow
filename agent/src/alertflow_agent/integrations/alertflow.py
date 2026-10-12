@@ -26,6 +26,10 @@ class AlertFlowClient:
         response.raise_for_status()
         return response.json()
 
+    def runtime_config(self) -> dict:
+        """AlertFlow 侧的运行配置（模型端点/密钥/记忆开关）——UI 改完这里立刻生效。"""
+        return self._get("/internal/agent/v1/config")
+
     def incidents(self, service_id: str, limit: int = 10) -> dict:
         return self._get("/internal/agent/v1/incidents", {"serviceId": service_id, "limit": limit})
 
