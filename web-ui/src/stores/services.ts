@@ -28,7 +28,7 @@ export const useServicesStore = defineStore('services', () => {
   // that keeps blipping is up, but saying "all systems operational" would lie.
   const warningCount = computed(() => services.value.filter((s) => s.status === 'warning').length)
   const unknownCount = computed(() => services.value.filter((s) => s.status === 'unknown').length)
-  // Excluded ids are admin-configurable (dashboard "Avg uptime" tile pencil),
+  // Excluded ids are admin-configurable (dashboard "平均在线率" tile pencil),
   // so this store reaches into settings rather than duplicating the list.
   const settings = useSettingsStore()
   const avgUptime = computed(() => {

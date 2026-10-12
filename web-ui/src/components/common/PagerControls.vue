@@ -23,16 +23,12 @@ defineEmits<{ prev: []; next: [] }>()
 <template>
   <div class="flex items-center justify-between gap-3 border-t border-border/60 px-3 py-2">
     <Button variant="ghost" size="sm" :disabled="!hasPrev || loading" @click="$emit('prev')">
-      <ChevronLeft />
-      Previous
-    </Button>
+      <ChevronLeft />上一步</Button>
     <span class="text-xs tabular-nums text-muted-foreground">
       Page {{ page }}<template v-if="totalPages"> of {{ totalPages }}</template>
     </span>
     <Button variant="ghost" size="sm" :disabled="!hasNext || loading" @click="$emit('next')">
-      <LoaderCircle v-if="loading" class="animate-spin" />
-      Next
-      <ChevronRight />
+      <LoaderCircle v-if="loading" class="animate-spin" />下一步<ChevronRight />
     </Button>
   </div>
 </template>

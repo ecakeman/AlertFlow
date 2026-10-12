@@ -10,14 +10,14 @@ const ui = useUiStore()
 <template>
   <Tooltip>
     <TooltipTrigger as-child>
-      <Button variant="ghost" size="icon" aria-label="Toggle theme" @click="ui.toggleTheme()">
+      <Button variant="ghost" size="icon" aria-label="切换主题" @click="ui.toggleTheme()">
         <Transition name="theme-swap" mode="out-in">
           <Moon v-if="ui.isDark" key="moon" />
           <Sun v-else key="sun" />
         </Transition>
       </Button>
     </TooltipTrigger>
-    <TooltipContent>{{ ui.isDark ? 'Switch to light' : 'Switch to dark' }}</TooltipContent>
+    <TooltipContent>{{ ui.isDark ? '切换到浅色' : '切换到深色' }}</TooltipContent>
   </Tooltip>
 </template>
 

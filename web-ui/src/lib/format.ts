@@ -2,10 +2,10 @@ import type { ServiceStatus } from '@/types'
 
 /** Human label for a status. */
 export function statusLabel(status: ServiceStatus): string {
-  if (status === 'online') return 'Online'
-  if (status === 'offline') return 'Offline'
-  if (status === 'warning') return 'Warning'
-  return 'Unknown'
+  if (status === 'online') return '在线'
+  if (status === 'offline') return '离线'
+  if (status === 'warning') return '警告'
+  return '未知'
 }
 
 /** Format a latency in ms, e.g. `120ms` or `1.2s`. */
@@ -33,16 +33,16 @@ export function averageLatency(history: (number | null)[]): number | null {
 
 /** Compact relative time, e.g. `12s ago`, `4m ago`, `2h ago`. */
 export function timeAgo(iso: string | null): string {
-  if (!iso) return 'never'
+  if (!iso) return '从未'
   const diff = Date.now() - new Date(iso).getTime()
   const s = Math.max(0, Math.floor(diff / 1000))
-  if (s < 60) return `${s}s ago`
+  if (s < 60) return `${s} 秒前`
   const m = Math.floor(s / 60)
-  if (m < 60) return `${m}m ago`
+  if (m < 60) return `${m} 分钟前`
   const h = Math.floor(m / 60)
-  if (h < 24) return `${h}h ago`
+  if (h < 24) return `${h} 小时前`
   const d = Math.floor(h / 24)
-  return `${d}d ago`
+  return `${d} 天前`
 }
 
 /** Up-to-two-letter initials derived from a service name (fallback icon glyph). */

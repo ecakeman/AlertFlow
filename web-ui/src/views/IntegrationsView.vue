@@ -24,7 +24,7 @@ const store = useIntegrationsStore()
 const meta: Record<IntegrationType, { label: string; icon: typeof Send; class: string }> = {
   telegram: { label: 'Telegram', icon: Send, class: 'bg-sky-500/15 text-sky-500' },
   slack: { label: 'Slack', icon: MessageSquare, class: 'bg-fuchsia-500/15 text-fuchsia-500' },
-  email: { label: 'Email', icon: Mail, class: 'bg-amber-500/15 text-amber-500' },
+  email: { label: '邮件', icon: Mail, class: 'bg-amber-500/15 text-amber-500' },
   webhook: { label: 'Webhook', icon: Webhook, class: 'bg-emerald-500/15 text-emerald-500' },
 }
 
@@ -35,7 +35,7 @@ const deleting = ref<Integration | null>(null)
 const testingId = ref<number | null>(null)
 
 function errMsg(e: unknown) {
-  return e instanceof ApiError ? e.message : 'Something went wrong'
+  return e instanceof ApiError ? e.message : '出错了'
 }
 
 onMounted(() => store.fetchIntegrations().catch((e) => toast.error(errMsg(e))))
@@ -57,10 +57,10 @@ async function onSubmit(input: IntegrationInput) {
   try {
     if (editing.value) {
       await store.update(editing.value.id, input)
-      toast.success('Integration updated')
+      toast.success('集成已更新')
     } else {
       await store.create(input)
-      toast.success('Integration added')
+      toast.success('集成已添加')
     }
   } catch (e) {
     toast.error(errMsg(e))
@@ -85,7 +85,7 @@ async function onDelete() {
   if (!deleting.value) return
   try {
     await store.remove(deleting.value.id)
-    toast.success('Integration removed')
+    toast.success('集成已移除')
   } catch (e) {
     toast.error(errMsg(e))
   }
@@ -94,8 +94,8 @@ async function onTest(it: Integration) {
   testingId.value = it.id
   try {
     const res = await store.test(it.id)
-    if (res.ok) toast.success(`Test sent to ${it.name}`)
-    else toast.error(`Test failed: ${res.error ?? 'unknown error'}`)
+    if (res.ok) toast.success(`测试已发送到 ${it.name}`)
+    else toast.error(`测试失败：${res.error ?? '未知错误'}`)
   } catch (e) {
     toast.error(errMsg(e))
   } finally {
@@ -107,14 +107,12 @@ async function onTest(it: Integration) {
 <template>
   <div class="mx-auto max-w-[1000px] px-6 py-6 lg:px-8">
     <PageHeader
-      title="Integrations"
-      description="Send a notification to these channels when an incident starts or resolves."
+      title="集成"
+      description="当事件开始或恢复时向这些渠道发送通知。"
     >
       <template #actions>
         <Button @click="openAdd">
-          <Plus />
-          Add integration
-        </Button>
+          <Plus />添加集成</Button>
       </template>
     </PageHeader>
 
@@ -125,14 +123,12 @@ async function onTest(it: Integration) {
     <EmptyState
       v-else-if="store.integrations.length === 0"
       :icon="Plug"
-      title="No integrations yet"
-      description="Connect Telegram, Slack, email or a custom webhook to get notified about incidents."
+      title="暂无集成"
+      description="接入 Telegram、Slack、邮件或自定义 Webhook，以接收事件通知。"
       class="mt-10"
     >
       <Button @click="openAdd">
-        <Plus />
-        Add integration
-      </Button>
+        <Plus />添加集成</Button>
     </EmptyState>
 
     <div v-else class="mt-6 grid gap-3">
@@ -152,27 +148,21 @@ async function onTest(it: Integration) {
         </div>
         <Button variant="outline" size="sm" :disabled="testingId === it.id" @click="onTest(it)">
           <LoaderCircle v-if="testingId === it.id" class="animate-spin" />
-          <SendHorizontal v-else />
-          Send test
-        </Button>
+          <SendHorizontal v-else />发送测试</Button>
         <Switch :model-value="it.enabled" @update:model-value="(v: boolean) => onToggle(it, v)" />
         <DropdownMenu>
           <DropdownMenuTrigger
             class="flex size-8 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
-            aria-label="Integration actions"
+            aria-label="集成操作"
           >
             <MoreHorizontal class="size-4" />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" class="w-40">
             <DropdownMenuItem @select="openEdit(it)">
-              <Pencil />
-              Edit
-            </DropdownMenuItem>
+              <Pencil />编辑</DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem variant="destructive" @select="openDelete(it)">
-              <Trash2 />
-              Delete
-            </DropdownMenuItem>
+              <Trash2 />删除</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -181,9 +171,9 @@ async function onTest(it: Integration) {
     <IntegrationFormDialog v-model:open="formOpen" :integration="editing" @submit="onSubmit" />
     <ConfirmDialog
       v-model:open="confirmOpen"
-      :title="`Delete ${deleting?.name ?? 'integration'}?`"
-      description="This channel will no longer receive incident notifications."
-      confirm-label="Delete"
+      :title="`删除 ${deleting?.name ?? '集成'}？`"
+      description="该渠道将不再接收事件通知。"
+      confirm-label="删除"
       destructive
       @confirm="onDelete"
     />

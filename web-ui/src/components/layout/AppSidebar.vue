@@ -23,13 +23,13 @@ interface NavItem {
 // Incidents are visible to everyone (comments come from any user); admin-only
 // pages (Resources, Integrations, Settings) are gated.
 const nav = computed<NavItem[]>(() => {
-  const items: NavItem[] = [{ to: '/', label: 'Dashboard', icon: LayoutDashboard }]
-  if (auth.isAdmin) items.push({ to: '/resources', label: 'Resources', icon: Boxes })
-  items.push({ to: '/incidents', label: 'Incidents', icon: TriangleAlert })
+  const items: NavItem[] = [{ to: '/', label: '仪表盘', icon: LayoutDashboard }]
+  if (auth.isAdmin) items.push({ to: '/resources', label: '资源', icon: Boxes })
+  items.push({ to: '/incidents', label: '事件', icon: TriangleAlert })
   if (auth.isAdmin) {
     items.push(
-      { to: '/integrations', label: 'Integrations', icon: Plug },
-      { to: '/settings', label: 'Settings', icon: Settings },
+      { to: '/integrations', label: '集成', icon: Plug },
+      { to: '/settings', label: '设置', icon: Settings },
     )
   }
   return items
@@ -53,7 +53,7 @@ const collapsed = computed(() => ui.sidebarCollapsed)
         <BrandMark class="size-8 shrink-0" />
         <Transition name="brand">
           <span v-if="!collapsed" class="text-[15px] font-semibold tracking-tight whitespace-nowrap">
-            upmonitor
+            AlertFlow
           </span>
         </Transition>
       </RouterLink>
@@ -66,7 +66,7 @@ const collapsed = computed(() => ui.sidebarCollapsed)
                 collapsed && 'absolute -right-3 top-4 border border-border bg-card shadow-elevation-low hover:bg-card',
               )
             "
-            aria-label="Toggle sidebar"
+            aria-label="折叠侧边栏"
             @click="ui.toggleSidebar()"
           >
             <PanelLeft class="size-4 transition-transform" :class="collapsed && 'rotate-180'" />
@@ -81,9 +81,7 @@ const collapsed = computed(() => ui.sidebarCollapsed)
       <p
         v-if="!collapsed"
         class="px-2.5 pb-1.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/70"
-      >
-        Menu
-      </p>
+      >菜单</p>
       <SidebarNavItem
         v-for="item in nav"
         :key="item.to"
@@ -105,23 +103,23 @@ const collapsed = computed(() => ui.sidebarCollapsed)
           )
         "
       >
-        <span class="flex items-center gap-1.5" title="Online">
+        <span class="flex items-center gap-1.5" title="在线">
           <span class="size-2 rounded-full bg-online" />
           <span v-if="!collapsed" class="text-xs font-medium tabular-nums">{{ services.onlineCount }}</span>
         </span>
-        <span class="flex items-center gap-1.5" title="Offline">
+        <span class="flex items-center gap-1.5" title="离线">
           <span class="size-2 rounded-full bg-offline" />
           <span v-if="!collapsed" class="text-xs font-medium tabular-nums">{{ services.offlineCount }}</span>
         </span>
-        <span class="flex items-center gap-1.5" title="Warning (recovered on a retry)">
+        <span class="flex items-center gap-1.5" title="警告（重试后恢复）">
           <span class="size-2 rounded-full bg-warning" />
           <span v-if="!collapsed" class="text-xs font-medium tabular-nums">{{ services.warningCount }}</span>
         </span>
-        <span class="flex items-center gap-1.5" title="Unknown">
+        <span class="flex items-center gap-1.5" title="未知">
           <span class="size-2 rounded-full bg-unknown" />
           <span v-if="!collapsed" class="text-xs font-medium tabular-nums">{{ services.unknownCount }}</span>
         </span>
-        <span v-if="!collapsed" class="ml-auto text-[11px] text-muted-foreground">monitored</span>
+        <span v-if="!collapsed" class="ml-auto text-[11px] text-muted-foreground">监控中</span>
       </div>
     </div>
   </aside>

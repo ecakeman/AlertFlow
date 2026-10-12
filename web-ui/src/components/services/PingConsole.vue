@@ -163,7 +163,7 @@ async function nextPage() {
       noProgressHint.value =
         nextBefore.value != null
           ? 'Loaded more history — still one long run of successful checks. Click Next again to keep looking back.'
-          : 'Reached the end of the stored history.'
+          : '已到已存历史的最早处。'
     }
   }
   if (lines.value.length > page.value * LINES_PER_PAGE) page.value += 1
@@ -195,9 +195,7 @@ function detail(row: CheckRow): string {
     <div v-if="loading" class="flex items-center justify-center py-10 text-muted-foreground">
       <LoaderCircle class="size-4 animate-spin" />
     </div>
-    <p v-else-if="lines.length === 0" class="px-4 py-8 text-center text-sm text-muted-foreground">
-      No checks recorded yet.
-    </p>
+    <p v-else-if="lines.length === 0" class="px-4 py-8 text-center text-sm text-muted-foreground">暂无检查记录。</p>
     <ul v-else class="divide-y divide-border/60 font-mono text-xs">
       <li
         v-for="line in pageLines"

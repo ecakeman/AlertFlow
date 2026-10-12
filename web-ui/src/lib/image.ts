@@ -11,7 +11,7 @@ function canvasToWebP(canvas: HTMLCanvasElement, quality = QUALITY): Promise<Blo
   return new Promise((resolve, reject) => {
     canvas.toBlob(
       (blob) => {
-        if (!blob) return reject(new Error('Image encoding failed'))
+        if (!blob) return reject(new Error('图标编码失败'))
         if (blob.type !== 'image/webp') {
           return reject(new Error('This browser cannot encode WebP; please try a WebP file'))
         }
@@ -34,7 +34,7 @@ export async function optimizeToWebP(file: File): Promise<Blob> {
     canvas.width = w
     canvas.height = h
     const ctx = canvas.getContext('2d')
-    if (!ctx) throw new Error('Canvas not available')
+    if (!ctx) throw new Error('Canvas 不可用')
     ctx.drawImage(bitmap, 0, 0, w, h)
     return await canvasToWebP(canvas)
   } finally {
@@ -50,14 +50,14 @@ export async function svgToWebP(svg: string, size = 256): Promise<Blob> {
   img.height = size
   await new Promise<void>((resolve, reject) => {
     img.onload = () => resolve()
-    img.onerror = () => reject(new Error('Could not render icon'))
+    img.onerror = () => reject(new Error('无法渲染图标'))
     img.src = url
   })
   const canvas = document.createElement('canvas')
   canvas.width = size
   canvas.height = size
   const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('Canvas not available')
+  if (!ctx) throw new Error('Canvas 不可用')
   ctx.drawImage(img, 0, 0, size, size)
   return canvasToWebP(canvas)
 }

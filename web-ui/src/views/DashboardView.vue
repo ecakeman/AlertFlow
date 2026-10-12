@@ -38,7 +38,7 @@ const fileInput = ref<HTMLInputElement>()
 const imageTargetId = ref<string | null>(null)
 const hoveredServiceId = ref<string | null>(null)
 
-// The "Warning" tile's period-based count comes from a separate endpoint since
+// The "警告" tile's period-based count comes from a separate endpoint since
 // it depends on an admin-configurable look-back window rather than a service's
 // current live status (which services.warningCount still reflects, e.g. for
 // the sidebar badge).
@@ -54,27 +54,27 @@ let statsTimer: ReturnType<typeof setInterval> | undefined
 
 const showEmpty = computed(() => services.loaded && !services.hasServices)
 const stats = computed(() => [
-  { key: 'services', label: 'Services', value: String(services.services.length) },
-  { key: 'online', label: 'Online', value: String(services.onlineCount), dot: 'bg-online' },
-  { key: 'offline', label: 'Offline', value: String(services.offlineCount), dot: 'bg-offline' },
+  { key: 'services', label: '服务', value: String(services.services.length) },
+  { key: 'online', label: '在线', value: String(services.onlineCount), dot: 'bg-online' },
+  { key: 'offline', label: '离线', value: String(services.offlineCount), dot: 'bg-offline' },
   {
     key: 'warning',
-    label: 'Warning',
+    label: '警告',
     value: String(dashboardStats.value?.warningServiceCount ?? services.warningCount),
     dot: 'bg-warning',
   },
-  { key: 'avgUptime', label: 'Avg uptime', value: formatUptime(services.avgUptime) },
+  { key: 'avgUptime', label: '平均在线率', value: formatUptime(services.avgUptime) },
 ])
 
 function errMsg(e: unknown) {
-  return e instanceof ApiError ? e.message : 'Something went wrong'
+  return e instanceof ApiError ? e.message : '出错了'
 }
 
 async function onSaveWarningPeriod(hours: number) {
   try {
     await settings.update({ dashboard: { ...settings.settings.dashboard, warningPeriodHours: hours } })
     await loadDashboardStats()
-    toast.success('Warning period updated')
+    toast.success('警告回看期已更新')
   } catch (e) {
     toast.error(errMsg(e))
   }
@@ -84,7 +84,7 @@ async function onSaveUptimeServices(excludedIds: string[]) {
     await settings.update({
       dashboard: { ...settings.settings.dashboard, uptimeExcludedServices: excludedIds },
     })
-    toast.success('Avg uptime services updated')
+    toast.success('平均在线率服务已更新')
   } catch (e) {
     toast.error(errMsg(e))
   }
@@ -115,10 +115,10 @@ async function onSubmit(input: ServiceInput) {
   try {
     if (formService.value) {
       await services.updateService(formService.value.id, input)
-      toast.success('Service updated')
+      toast.success('服务已更新')
     } else {
       await services.addService(input)
-      toast.success('Service added')
+      toast.success('服务已添加')
     }
   } catch (e) {
     toast.error(errMsg(e))
@@ -129,7 +129,7 @@ async function onApplyIcon(svg: string) {
   try {
     const blob = await svgToWebP(svg)
     await services.uploadIcon(iconService.value.id, blob)
-    toast.success('Icon applied')
+    toast.success('图标已应用')
   } catch (e) {
     toast.error(errMsg(e))
   }
@@ -139,7 +139,7 @@ async function onConfirmDelete() {
   const name = confirmService.value.name
   try {
     await services.removeService(confirmService.value.id)
-    toast.success(`${name} removed`)
+    toast.success(`已移除 ${name}`)
   } catch (e) {
     toast.error(errMsg(e))
   }
@@ -148,7 +148,7 @@ async function uploadImageFor(id: string, file: File) {
   try {
     const blob = await optimizeToWebP(file)
     await services.uploadIcon(id, blob)
-    toast.success('Image updated')
+    toast.success('图标已更新')
   } catch (err) {
     toast.error(errMsg(err))
   }
@@ -211,15 +211,11 @@ onUnmounted(() => {
   <div class="mx-auto max-w-[1600px] px-6 py-6 lg:px-8">
     <header class="flex flex-wrap items-end justify-between gap-4">
       <div>
-        <h2 class="text-2xl font-semibold tracking-tight">Dashboard</h2>
-        <p class="mt-1 text-sm text-muted-foreground">
-          Live status of your services · drag to rearrange, resize from the corner.
-        </p>
+        <h2 class="text-2xl font-semibold tracking-tight">仪表盘</h2>
+        <p class="mt-1 text-sm text-muted-foreground">服务的实时状态 · 拖拽调整位置，从角落调整大小。</p>
       </div>
       <Button v-if="services.hasServices && auth.isAdmin" @click="openAdd">
-        <Plus />
-        Add service
-      </Button>
+        <Plus />添加服务</Button>
     </header>
 
     <!-- Initial loading -->
@@ -242,7 +238,7 @@ onUnmounted(() => {
           <button
             v-if="auth.isAdmin && settings.loaded && stat.key === 'warning'"
             class="absolute top-2.5 right-2.5 cursor-pointer text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
-            title="Configure the warning look-back period"
+            title="配置警告回看期"
             @click="warningPeriodOpen = true"
           >
             <Pencil class="size-3.5" />
@@ -250,7 +246,7 @@ onUnmounted(() => {
           <button
             v-if="auth.isAdmin && settings.loaded && stat.key === 'avgUptime'"
             class="absolute top-2.5 right-2.5 cursor-pointer text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
-            title="Configure which services are counted"
+            title="配置计入的服务"
             @click="uptimeServicesOpen = true"
           >
             <Pencil class="size-3.5" />
@@ -275,17 +271,15 @@ onUnmounted(() => {
         <EmptyState
           v-else-if="showEmpty"
           :icon="Boxes"
-          title="No services yet"
+          title="暂无服务"
           :description="
             auth.isAdmin
-              ? 'Add your first service to start monitoring its status, response time and uptime.'
-              : 'No services have been added yet.'
+              ? '添加第一个服务，开始监控其状态、响应时间与在线率。'
+              : '尚未添加任何服务。'
           "
         >
           <Button v-if="auth.isAdmin" @click="openAdd">
-            <Plus />
-            Add first service
-          </Button>
+            <Plus />添加第一个服务</Button>
         </EmptyState>
       </div>
     </template>
@@ -296,9 +290,9 @@ onUnmounted(() => {
     <IconGeneratorDialog v-model:open="iconOpen" :service="iconService" @apply="onApplyIcon" />
     <ConfirmDialog
       v-model:open="confirmOpen"
-      :title="`Delete ${confirmService?.name ?? 'service'}?`"
-      description="This removes the service and its history. This action cannot be undone."
-      confirm-label="Delete"
+      :title="`删除 ${confirmService?.name ?? '服务'}？`"
+      description="将移除该服务及其历史记录，且无法撤销。"
+      confirm-label="删除"
       destructive
       @confirm="onConfirmDelete"
     />

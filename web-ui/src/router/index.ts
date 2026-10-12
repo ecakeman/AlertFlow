@@ -11,43 +11,43 @@ const routes: RouteRecordRaw[] = [
     path: '/',
     name: 'dashboard',
     component: () => import('@/views/DashboardView.vue'),
-    meta: { title: 'Dashboard' },
+    meta: { title: '仪表盘' },
   },
   {
     path: '/services/:id',
     name: 'service-detail',
     component: () => import('@/views/ServiceDetailView.vue'),
-    meta: { title: 'Service' },
+    meta: { title: '服务' },
   },
   {
     path: '/resources',
     name: 'resources',
     component: () => import('@/views/ResourcesView.vue'),
-    meta: { title: 'Resources' },
+    meta: { title: '资源' },
   },
   {
     path: '/incidents',
     name: 'incidents',
     component: () => import('@/views/IncidentsView.vue'),
-    meta: { title: 'Incidents' },
+    meta: { title: '事件' },
   },
   {
     path: '/incidents/:id',
     name: 'incident-detail',
     component: () => import('@/views/IncidentDetailView.vue'),
-    meta: { title: 'Incident' },
+    meta: { title: '事件' },
   },
   {
     path: '/settings',
     name: 'settings',
     component: () => import('@/views/SettingsView.vue'),
-    meta: { title: 'Settings' },
+    meta: { title: '设置' },
   },
   {
     path: '/integrations',
     name: 'integrations',
     component: () => import('@/views/IntegrationsView.vue'),
-    meta: { title: 'Integrations' },
+    meta: { title: '集成' },
   },
   {
     path: '/setup',
@@ -59,13 +59,13 @@ const routes: RouteRecordRaw[] = [
     path: '/login',
     name: 'login',
     component: () => import('@/views/LoginView.vue'),
-    meta: { title: 'Sign in', bare: true },
+    meta: { title: '登录', bare: true },
   },
   {
     path: '/:pathMatch(.*)*',
     name: 'not-found',
     component: () => import('@/views/NotFoundView.vue'),
-    meta: { title: 'Not found', bare: true },
+    meta: { title: '未找到', bare: true },
   },
 ]
 
@@ -106,7 +106,7 @@ router.beforeEach(async (to) => {
 
 router.afterEach((to) => {
   const title = (to.meta.title as string) ?? ''
-  document.title = title ? `${title} · upmonitor` : 'upmonitor'
+  document.title = title ? `${title} · AlertFlow` : 'AlertFlow'
 })
 
 export default router

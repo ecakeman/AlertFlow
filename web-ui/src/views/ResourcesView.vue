@@ -23,7 +23,7 @@ onMounted(() => {
 })
 
 function errMsg(e: unknown) {
-  return e instanceof ApiError ? e.message : 'Something went wrong'
+  return e instanceof ApiError ? e.message : '出错了'
 }
 
 const formOpen = ref(false)
@@ -31,7 +31,7 @@ const formService = ref<Service | null>(null)
 const confirmOpen = ref(false)
 const confirmService = ref<Service | null>(null)
 
-const modeLabel: Record<string, string> = { icon: 'Icon', name: 'Name', dashboard: 'Dashboard' }
+const modeLabel: Record<string, string> = { icon: 'Icon', name: '名称', dashboard: '仪表盘' }
 
 function openAdd() {
   formService.value = null
@@ -49,10 +49,10 @@ async function onSubmit(input: ServiceInput) {
   try {
     if (formService.value) {
       await services.updateService(formService.value.id, input)
-      toast.success('Service updated')
+      toast.success('服务已更新')
     } else {
       await services.addService(input)
-      toast.success('Service added')
+      toast.success('服务已添加')
     }
   } catch (e) {
     toast.error(errMsg(e))
@@ -63,7 +63,7 @@ async function onConfirmDelete() {
   const name = confirmService.value.name
   try {
     await services.removeService(confirmService.value.id)
-    toast.success(`${name} removed`)
+    toast.success(`已移除 ${name}`)
   } catch (e) {
     toast.error(errMsg(e))
   }
@@ -72,12 +72,10 @@ async function onConfirmDelete() {
 
 <template>
   <div class="mx-auto max-w-5xl px-6 py-6 lg:px-8">
-    <PageHeader title="Resources" description="Manage the services you monitor. Saved to config.yaml.">
+    <PageHeader title="资源" description="管理你监控的服务。保存至 config.yaml。">
       <template #actions>
         <Button v-if="services.hasServices" @click="openAdd">
-          <Plus />
-          Add service
-        </Button>
+          <Plus />添加服务</Button>
       </template>
     </PageHeader>
 
@@ -85,11 +83,11 @@ async function onConfirmDelete() {
       <table class="w-full text-sm">
         <thead>
           <tr class="border-b border-border text-left text-xs text-muted-foreground">
-            <th class="px-4 py-3 font-medium">Service</th>
-            <th class="hidden px-4 py-3 font-medium sm:table-cell">Interval</th>
-            <th class="hidden px-4 py-3 font-medium md:table-cell">Mode</th>
-            <th class="px-4 py-3 font-medium">Status</th>
-            <th class="px-4 py-3 text-right font-medium">Actions</th>
+            <th class="px-4 py-3 font-medium">服务</th>
+            <th class="hidden px-4 py-3 font-medium sm:table-cell">间隔</th>
+            <th class="hidden px-4 py-3 font-medium md:table-cell">模式</th>
+            <th class="px-4 py-3 font-medium">状态</th>
+            <th class="px-4 py-3 text-right font-medium">操作</th>
           </tr>
         </thead>
         <tbody>
@@ -124,21 +122,21 @@ async function onConfirmDelete() {
                 <Tooltip>
                   <TooltipTrigger as-child>
                     <Button variant="ghost" size="icon-sm" as-child>
-                      <a :href="s.url" target="_blank" rel="noopener" aria-label="Open service">
+                      <a :href="s.url" target="_blank" rel="noopener" aria-label="打开服务">
                         <ArrowUpRight />
                       </a>
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent>Open</TooltipContent>
+                  <TooltipContent>打开</TooltipContent>
                 </Tooltip>
-                <Button variant="ghost" size="icon-sm" aria-label="Edit" @click="openEdit(s)">
+                <Button variant="ghost" size="icon-sm" aria-label="编辑" @click="openEdit(s)">
                   <Pencil />
                 </Button>
                 <Button
                   variant="ghost"
                   size="icon-sm"
                   class="text-muted-foreground hover:text-offline"
-                  aria-label="Delete"
+                  aria-label="删除"
                   @click="openDelete(s)"
                 >
                   <Trash2 />
@@ -153,22 +151,20 @@ async function onConfirmDelete() {
     <div v-else class="mt-6 rounded-xl border border-border bg-card">
       <EmptyState
         :icon="Boxes"
-        title="No services yet"
-        description="Add your first service to start monitoring it."
+        title="暂无服务"
+        description="添加第一个服务即可开始监控。"
       >
         <Button @click="openAdd">
-          <Plus />
-          Add first service
-        </Button>
+          <Plus />添加第一个服务</Button>
       </EmptyState>
     </div>
 
     <ServiceFormDialog v-model:open="formOpen" :service="formService" @submit="onSubmit" />
     <ConfirmDialog
       v-model:open="confirmOpen"
-      :title="`Delete ${confirmService?.name ?? 'service'}?`"
-      description="This removes the service and its history. This action cannot be undone."
-      confirm-label="Delete"
+      :title="`删除 ${confirmService?.name ?? '服务'}？`"
+      description="将移除该服务及其历史记录，且无法撤销。"
+      confirm-label="删除"
       destructive
       @confirm="onConfirmDelete"
     />

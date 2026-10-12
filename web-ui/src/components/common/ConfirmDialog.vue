@@ -35,7 +35,7 @@ function confirm() {
         <DialogDescription v-if="description">{{ description }}</DialogDescription>
       </DialogHeader>
       <DialogFooter>
-        <Button variant="ghost" @click="emit('update:open', false)">Cancel</Button>
+        <Button variant="ghost" @click="emit('update:open', false)">取消</Button>
         <Button :variant="destructive ? 'destructive' : 'default'" @click="confirm">
           {{ confirmLabel }}
         </Button>

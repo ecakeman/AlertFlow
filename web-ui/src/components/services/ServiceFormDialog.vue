@@ -75,15 +75,15 @@ function submit() {
   <Dialog :open="open" @update:open="emit('update:open', $event)">
     <DialogContent>
       <DialogHeader>
-        <DialogTitle>{{ isEdit ? 'Edit service' : 'Add service' }}</DialogTitle>
+        <DialogTitle>{{ isEdit ? '编辑服务' : '添加服务' }}</DialogTitle>
         <DialogDescription>
-          {{ isEdit ? 'Update how this service is monitored and displayed.' : 'Monitor a new web service. Changes are written to config.yaml.' }}
+          {{ isEdit ? '更新该服务的监控与展示方式。' : '监控一个新的 Web 服务。改动会写入 config.yaml。' }}
         </DialogDescription>
       </DialogHeader>
 
       <form class="grid gap-4" @submit.prevent="submit">
         <div class="grid gap-2">
-          <Label for="svc-name">Name</Label>
+          <Label for="svc-name">名称</Label>
           <Input id="svc-name" v-model="name" placeholder="Grafana" autocomplete="off" />
         </div>
         <div class="grid gap-2">
@@ -92,22 +92,22 @@ function submit() {
         </div>
         <div class="grid grid-cols-2 gap-4">
           <div class="grid gap-2">
-            <Label for="svc-interval">Check interval</Label>
+            <Label for="svc-interval">检查间隔</Label>
             <div class="relative">
               <Input id="svc-interval" v-model="interval" type="number" min="5" class="pr-8" />
               <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">s</span>
             </div>
           </div>
           <div class="grid gap-2">
-            <Label>Widget mode</Label>
+            <Label>小组件模式</Label>
             <Select v-model="mode">
               <SelectTrigger>
-                <SelectValue placeholder="Select mode" />
+                <SelectValue placeholder="选择模式" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="icon">Icon only</SelectItem>
-                <SelectItem value="name">Icon + name</SelectItem>
-                <SelectItem value="dashboard">Mini dashboard</SelectItem>
+                <SelectItem value="icon">仅图标</SelectItem>
+                <SelectItem value="name">图标 + 名称</SelectItem>
+                <SelectItem value="dashboard">迷你仪表盘</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -115,30 +115,27 @@ function submit() {
 
         <div class="grid gap-3 rounded-lg border border-border px-3 py-3">
           <div>
-            <p class="text-sm font-medium">Reliability</p>
-            <p class="mt-0.5 text-xs text-muted-foreground">
-              A failed check is retried before the service is called down. If a retry
-              succeeds it is recorded as a warning, not an outage.
-            </p>
+            <p class="text-sm font-medium">可靠性</p>
+            <p class="mt-0.5 text-xs text-muted-foreground">检查失败后会先重试，再判定服务下线。若重试成功，记为警告而非故障。</p>
           </div>
           <div class="grid grid-cols-2 gap-4">
             <div class="grid gap-2">
-              <Label for="svc-retries">Attempts</Label>
+              <Label for="svc-retries">尝试次数</Label>
               <Input id="svc-retries" v-model="retryAttempts" type="number" min="1" max="10" />
               <p class="text-xs text-muted-foreground">1 disables retries.</p>
             </div>
             <div class="grid gap-2">
-              <Label for="svc-delays">Retry delays</Label>
+              <Label for="svc-delays">重试延迟</Label>
               <Input id="svc-delays" v-model="retryDelays" placeholder="1, 5, 10" autocomplete="off" />
-              <p class="text-xs text-muted-foreground">Seconds between attempts.</p>
+              <p class="text-xs text-muted-foreground">每次尝试之间的秒数。</p>
             </div>
           </div>
         </div>
       </form>
 
       <DialogFooter>
-        <Button variant="ghost" @click="emit('update:open', false)">Cancel</Button>
-        <Button :disabled="!valid" @click="submit">{{ isEdit ? 'Save changes' : 'Add service' }}</Button>
+        <Button variant="ghost" @click="emit('update:open', false)">取消</Button>
+        <Button :disabled="!valid" @click="submit">{{ isEdit ? '保存修改' : '添加服务' }}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

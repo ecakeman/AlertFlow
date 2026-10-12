@@ -21,7 +21,7 @@ const style = ref<IconStyle>('gradient')
 const seeds = ref<string[]>([])
 const selected = ref(0)
 
-const name = computed(() => props.service?.name ?? 'Service')
+const name = computed(() => props.service?.name ?? '服务')
 const baseId = computed(() => props.service?.id ?? 'service')
 
 function randomSeed() {
@@ -61,9 +61,7 @@ function apply() {
     <DialogContent class="max-w-md">
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2">
-          <Sparkles class="size-4 text-primary" />
-          Generate icon
-        </DialogTitle>
+          <Sparkles class="size-4 text-primary" />生成图标</DialogTitle>
         <DialogDescription>
           A unique icon generated on-device from “{{ name }}”. No external services.
         </DialogDescription>
@@ -115,19 +113,17 @@ function apply() {
             "
             @click="selected = i"
           >
-            <img :src="t.url" alt="Icon variation" class="size-11 rounded-lg" />
+            <img :src="t.url" alt="图标样式" class="size-11 rounded-lg" />
           </button>
         </div>
       </div>
 
       <DialogFooter class="sm:justify-between">
         <Button variant="outline" @click="shuffle">
-          <RefreshCw />
-          Shuffle
-        </Button>
+          <RefreshCw />换一个</Button>
         <div class="flex gap-2">
-          <Button variant="ghost" @click="emit('update:open', false)">Cancel</Button>
-          <Button @click="apply">Apply icon</Button>
+          <Button variant="ghost" @click="emit('update:open', false)">取消</Button>
+          <Button @click="apply">应用图标</Button>
         </div>
       </DialogFooter>
     </DialogContent>

@@ -21,7 +21,7 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 
-const title = computed(() => (route.meta.title as string) ?? 'upmonitor')
+const title = computed(() => (route.meta.title as string) ?? 'AlertFlow')
 const user = computed(() => auth.currentUser)
 
 async function signOut() {
@@ -59,24 +59,18 @@ async function signOut() {
             <div class="flex flex-col gap-1">
               <span class="text-sm font-medium text-foreground">{{ user?.username }}</span>
               <Badge :variant="user?.role === 'admin' ? 'default' : 'secondary'" class="w-fit">
-                {{ user?.role === 'admin' ? 'Administrator' : 'Read only' }}
+                {{ user?.role === 'admin' ? 'Administrator' : '只读' }}
               </Badge>
             </div>
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
           <DropdownMenuItem @select="router.push('/settings')">
-            <UserRound />
-            Account
-          </DropdownMenuItem>
+            <UserRound />账户</DropdownMenuItem>
           <DropdownMenuItem @select="router.push('/settings')">
-            <Settings />
-            Settings
-          </DropdownMenuItem>
+            <Settings />设置</DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem variant="destructive" @select="signOut">
-            <LogOut />
-            Sign out
-          </DropdownMenuItem>
+            <LogOut />退出登录</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
     </div>

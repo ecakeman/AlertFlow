@@ -44,15 +44,15 @@ const s = computed(() => props.service)
 const router = useRouter()
 
 const widgetModes: { mode: WidgetMode; label: string }[] = [
-  { mode: 'icon', label: 'Icon only' },
-  { mode: 'name', label: 'Icon + name' },
-  { mode: 'dashboard', label: 'Mini dashboard' },
+  { mode: 'icon', label: '仅图标' },
+  { mode: 'name', label: '图标 + 名称' },
+  { mode: 'dashboard', label: '迷你仪表盘' },
 ]
 
 // Applies to this service's detail chart too, not just the card sparkline.
 const chartTypes: { type: ChartType; label: string }[] = [
-  { type: 'line', label: 'Line' },
-  { type: 'bars', label: 'Columns' },
+  { type: 'line', label: '折线' },
+  { type: 'bars', label: '柱状' },
 ]
 
 // Measure the sparkline container so the SVG's internal coordinate system matches
@@ -67,7 +67,7 @@ const avgLatency = computed(() => averageLatency(s.value.latencyHistory))
 // for an hour has plenty of data, all of it failures.
 const avgLabel = computed(() => {
   if (avgLatency.value != null) return `Avg response · ${formatLatency(avgLatency.value)}`
-  return s.value.latencyHistory.length ? 'No successful checks' : 'Awaiting data'
+  return s.value.latencyHistory.length ? '暂无成功检查' : '等待数据'
 })
 
 // Distinguish a real click from the tail of a drag-to-rearrange gesture.
@@ -156,8 +156,8 @@ const headerPad = computed(() => (props.readonly ? 'pr-8' : 'pr-16'))
     <div class="absolute right-1.5 top-1.5 z-10 flex items-center gap-0.5" @click.stop>
       <button
         :class="cn(actionBtn, 'group-hover/card:opacity-100')"
-        aria-label="Open website"
-        title="Open website"
+        aria-label="打开网站"
+        title="打开网站"
         @pointerdown.stop
         @click="openService"
       >
@@ -166,20 +166,16 @@ const headerPad = computed(() => (props.readonly ? 'pr-8' : 'pr-16'))
       <DropdownMenu v-if="!readonly">
         <DropdownMenuTrigger
           :class="cn(actionBtn, 'group-hover/card:opacity-100 data-[state=open]:bg-accent data-[state=open]:opacity-100')"
-          aria-label="Service actions"
+          aria-label="服务操作"
           @pointerdown.stop
         >
           <MoreHorizontal class="size-4" />
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" class="w-52">
           <DropdownMenuItem @select="openService">
-            <ArrowUpRight />
-            Open service
-          </DropdownMenuItem>
+            <ArrowUpRight />打开服务</DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuLabel class="text-[11px] uppercase tracking-wide text-muted-foreground/70">
-            Widget
-          </DropdownMenuLabel>
+          <DropdownMenuLabel class="text-[11px] uppercase tracking-wide text-muted-foreground/70">小组件</DropdownMenuLabel>
           <DropdownMenuItem
             v-for="m in widgetModes"
             :key="m.mode"
@@ -189,9 +185,7 @@ const headerPad = computed(() => (props.readonly ? 'pr-8' : 'pr-16'))
             {{ m.label }}
           </DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuLabel class="text-[11px] uppercase tracking-wide text-muted-foreground/70">
-            Chart
-          </DropdownMenuLabel>
+          <DropdownMenuLabel class="text-[11px] uppercase tracking-wide text-muted-foreground/70">图表</DropdownMenuLabel>
           <DropdownMenuItem
             v-for="t in chartTypes"
             :key="t.type"
@@ -202,22 +196,14 @@ const headerPad = computed(() => (props.readonly ? 'pr-8' : 'pr-16'))
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem @select="emit('edit')">
-            <Pencil />
-            Edit
-          </DropdownMenuItem>
+            <Pencil />编辑</DropdownMenuItem>
           <DropdownMenuItem @select="emit('replaceImage')">
-            <ImageUp />
-            Replace image
-          </DropdownMenuItem>
+            <ImageUp />替换图标</DropdownMenuItem>
           <DropdownMenuItem @select="emit('generateIcon')">
-            <Sparkles />
-            Generate icon
-          </DropdownMenuItem>
+            <Sparkles />生成图标</DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem variant="destructive" @select="emit('remove')">
-            <Trash2 />
-            Delete
-          </DropdownMenuItem>
+            <Trash2 />删除</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
     </div>
@@ -286,11 +272,11 @@ const headerPad = computed(() => (props.readonly ? 'pr-8' : 'pr-16'))
 
       <div class="mt-3.5 grid grid-cols-2 gap-x-4 gap-y-3">
         <div>
-          <p class="text-[11px] uppercase tracking-wide text-muted-foreground/70">Response</p>
+          <p class="text-[11px] uppercase tracking-wide text-muted-foreground/70">响应</p>
           <p class="mt-0.5 text-sm font-semibold tabular-nums">{{ formatLatency(s.latencyMs) }}</p>
         </div>
         <div>
-          <p class="text-[11px] uppercase tracking-wide text-muted-foreground/70">Uptime</p>
+          <p class="text-[11px] uppercase tracking-wide text-muted-foreground/70">在线率</p>
           <p class="mt-0.5 text-sm font-semibold tabular-nums">
             {{ s.status === 'unknown' ? '—' : formatUptime(s.uptime) }}
           </p>

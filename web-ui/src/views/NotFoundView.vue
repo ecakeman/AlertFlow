@@ -10,13 +10,11 @@ import { Button } from '@/components/ui/button'
     <BrandMark class="size-11" />
     <div>
       <p class="text-5xl font-semibold tracking-tight tabular-nums">404</p>
-      <p class="mt-2 text-sm text-muted-foreground">This page could not be found.</p>
+      <p class="mt-2 text-sm text-muted-foreground">页面未找到。</p>
     </div>
     <Button as-child variant="outline">
       <RouterLink to="/">
-        <ArrowLeft />
-        Back to dashboard
-      </RouterLink>
+        <ArrowLeft />返回仪表盘</RouterLink>
     </Button>
   </div>
 </template>

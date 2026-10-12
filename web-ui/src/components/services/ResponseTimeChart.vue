@@ -267,9 +267,7 @@ const tipStyle = computed(() => {
     <div
       v-if="series.length === 0"
       class="flex h-40 items-center justify-center text-sm text-muted-foreground"
-    >
-      No response-time data in this range yet.
-    </div>
+    >该时间范围内暂无响应时间数据。</div>
 
     <template v-else>
       <svg :viewBox="`0 0 ${w} ${h}`" :width="w" :height="h" class="text-primary">
@@ -406,7 +404,7 @@ const tipStyle = computed(() => {
         <p v-if="hover.latency != null" class="mt-0.5 font-medium tabular-nums">
           {{ formatLatency(hover.latency) }}
         </p>
-        <p v-else class="mt-0.5 font-medium text-offline">No successful check</p>
+        <p v-else class="mt-0.5 font-medium text-offline">暂无成功检查</p>
         <p v-if="hover.errors > 0" class="mt-0.5 tabular-nums text-offline">
           {{ hover.errors }} failed {{ hover.errors === 1 ? 'check' : 'checks' }}
         </p>

@@ -44,7 +44,7 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits)
         class="absolute right-4 top-4 flex size-7 items-center justify-center rounded-md text-muted-foreground opacity-70 transition-all hover:bg-accent hover:opacity-100 focus-visible:ring-[3px] focus-visible:ring-ring/40 outline-none"
       >
         <X class="size-4" />
-        <span class="sr-only">Close</span>
+        <span class="sr-only">关闭</span>
       </DialogClose>
     </DialogContent>
   </DialogPortal>

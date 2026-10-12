@@ -45,10 +45,8 @@ function submit() {
   <Dialog :open="open" @update:open="emit('update:open', $event)">
     <DialogContent class="max-w-sm">
       <DialogHeader>
-        <DialogTitle>Services counted in Avg uptime</DialogTitle>
-        <DialogDescription>
-          Choose which services count toward the dashboard's "Avg uptime" tile.
-        </DialogDescription>
+        <DialogTitle>计入平均在线率的服务</DialogTitle>
+        <DialogDescription>选择哪些服务计入仪表盘的“平均在线率”。</DialogDescription>
       </DialogHeader>
       <ul class="max-h-72 space-y-1 overflow-y-auto">
         <li
@@ -62,13 +60,11 @@ function submit() {
             @update:model-value="(v: boolean) => toggle(svc.id, v)"
           />
         </li>
-        <li v-if="services.length === 0" class="px-1.5 py-1.5 text-sm text-muted-foreground">
-          No services yet.
-        </li>
+        <li v-if="services.length === 0" class="px-1.5 py-1.5 text-sm text-muted-foreground">暂无服务。</li>
       </ul>
       <DialogFooter>
-        <Button variant="ghost" @click="emit('update:open', false)">Cancel</Button>
-        <Button @click="submit">Save</Button>
+        <Button variant="ghost" @click="emit('update:open', false)">取消</Button>
+        <Button @click="submit">保存</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

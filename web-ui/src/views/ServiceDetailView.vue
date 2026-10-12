@@ -61,10 +61,10 @@ const avgResponse = computed(() =>
 const uptimeStats = computed(() => {
   const w = metrics.value?.uptimeWindows
   return [
-    { label: 'Uptime · 7 days', value: w ? formatUptime(w.days7) : '—' },
-    { label: 'Uptime · 30 days', value: w ? formatUptime(w.days30) : '—' },
-    { label: 'Uptime · 365 days', value: w ? formatUptime(w.days365) : '—' },
-    { label: 'Avg response', value: formatLatency(avgResponse.value) },
+    { label: '在线率 · 7 天', value: w ? formatUptime(w.days7) : '—' },
+    { label: '在线率 · 30 天', value: w ? formatUptime(w.days30) : '—' },
+    { label: '在线率 · 365 天', value: w ? formatUptime(w.days365) : '—' },
+    { label: '平均响应', value: formatLatency(avgResponse.value) },
   ]
 })
 
@@ -79,8 +79,8 @@ const ranges: { value: MetricsRange; label: string }[] = [
 // ChartColumn, not ChartBar: ChartBar is horizontal bars, this draws vertical
 // columns. Both type-check, so the compiler can't catch the mix-up.
 const chartTypes: { value: ChartType; label: string; icon: Component }[] = [
-  { value: 'line', label: 'Line chart', icon: ChartLine },
-  { value: 'bars', label: 'Column chart', icon: ChartColumn },
+  { value: 'line', label: '折线图', icon: ChartLine },
+  { value: 'bars', label: '柱状图', icon: ChartColumn },
 ]
 
 const chartType = computed<ChartType>(() => svc.value?.chart.type ?? 'line')
@@ -96,7 +96,7 @@ async function onChartType(value: string | number | null) {
 }
 
 function errMsg(e: unknown) {
-  return e instanceof ApiError ? e.message : 'Something went wrong'
+  return e instanceof ApiError ? e.message : '出错了'
 }
 
 async function loadMetrics() {
@@ -109,7 +109,7 @@ async function loadMetrics() {
     loading.value = false
   }
 }
-// "Recent incidents" (mixed severity) and the chart's outage bands (outages
+// "最近事件" (mixed severity) and the chart's outage bands (outages
 // only) are fetched separately, each with its own limit — sharing one fetch
 // would let a chatty service's warning events crowd real outages out of the
 // (necessarily bounded) page before the chart ever sees them.
@@ -167,7 +167,7 @@ function openService() {
 async function onEdit(input: ServiceInput) {
   try {
     await services.updateService(id.value, input)
-    toast.success('Service updated')
+    toast.success('服务已更新')
     loadMetrics()
   } catch (e) {
     toast.error(errMsg(e))
@@ -176,7 +176,7 @@ async function onEdit(input: ServiceInput) {
 async function onDelete() {
   try {
     await services.removeService(id.value)
-    toast.success('Service removed')
+    toast.success('服务已移除')
     router.push('/')
   } catch (e) {
     toast.error(errMsg(e))
@@ -209,17 +209,13 @@ function fmtDateTime(iso: string): string {
       class="mb-4 inline-flex cursor-pointer items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
       @click="router.push('/')"
     >
-      <ArrowLeft class="size-4" />
-      Dashboard
-    </button>
+      <ArrowLeft class="size-4" />仪表盘</button>
 
     <div v-if="loading" class="flex items-center justify-center py-24 text-muted-foreground">
       <LoaderCircle class="size-5 animate-spin" />
     </div>
 
-    <div v-else-if="notFound || !svc" class="py-24 text-center text-muted-foreground">
-      This service no longer exists.
-    </div>
+    <div v-else-if="notFound || !svc" class="py-24 text-center text-muted-foreground">该服务已不存在。</div>
 
     <template v-else>
       <!-- Header -->
@@ -244,18 +240,12 @@ function fmtDateTime(iso: string): string {
         </div>
         <div class="flex items-center gap-2">
           <Button variant="outline" size="sm" @click="openService">
-            <ArrowUpRight />
-            Open
-          </Button>
+            <ArrowUpRight />打开</Button>
           <template v-if="auth.isAdmin">
             <Button variant="outline" size="sm" @click="editOpen = true">
-              <Pencil />
-              Edit
-            </Button>
+              <Pencil />编辑</Button>
             <Button variant="outline" size="sm" @click="confirmOpen = true">
-              <Trash2 />
-              Delete
-            </Button>
+              <Trash2 />删除</Button>
           </template>
         </div>
       </header>
@@ -271,18 +261,16 @@ function fmtDateTime(iso: string): string {
           <p class="mt-1 text-xl font-semibold tabular-nums">{{ stat.value }}</p>
         </div>
       </div>
-      <p class="mt-2 text-xs text-muted-foreground">
-        Uptime windows are based on stored history (limited by the retention setting).
-      </p>
+      <p class="mt-2 text-xs text-muted-foreground">在线率窗口基于已存储的历史（受保留设置限制）。</p>
 
       <!-- Chart -->
       <Card class="mt-6">
         <CardHeader class="flex-row flex-wrap items-center justify-between gap-3 space-y-0">
           <div class="flex items-center gap-2">
-            <CardTitle class="text-sm">Response time</CardTitle>
+            <CardTitle class="text-sm">响应时间</CardTitle>
             <button
               class="cursor-pointer text-muted-foreground transition-colors hover:text-foreground"
-              title="Refresh"
+              title="刷新"
               @click="loadMetrics"
             >
               <RefreshCw class="size-3.5" />
@@ -334,15 +322,11 @@ function fmtDateTime(iso: string): string {
         <!-- Recent incidents -->
         <Card>
           <CardHeader class="flex-row items-center justify-between gap-2 space-y-0">
-            <CardTitle class="text-sm">Recent incidents</CardTitle>
-            <RouterLink to="/incidents" class="text-xs text-primary hover:underline">
-              View all
-            </RouterLink>
+            <CardTitle class="text-sm">最近事件</CardTitle>
+            <RouterLink to="/incidents" class="text-xs text-primary hover:underline">查看全部</RouterLink>
           </CardHeader>
           <CardContent>
-            <p v-if="recentIncidents.length === 0" class="text-sm text-muted-foreground">
-              No incidents recorded for this service.
-            </p>
+            <p v-if="recentIncidents.length === 0" class="text-sm text-muted-foreground">该服务暂无事件记录。</p>
             <ul v-else class="divide-y divide-border">
               <li v-for="inc in recentIncidents" :key="inc.id">
                 <RouterLink
@@ -358,10 +342,10 @@ function fmtDateTime(iso: string): string {
                       {{
                         inc.title ||
                         (inc.severity === 'warning'
-                          ? 'Recovered on retry'
+                          ? '重试后恢复'
                           : inc.status === 'ongoing'
-                            ? 'Ongoing outage'
-                            : 'Outage')
+                            ? '进行中故障'
+                            : '故障')
                       }}
                     </p>
                     <p class="text-xs text-muted-foreground">{{ fmtDateTime(inc.startedAt) }}</p>
@@ -379,10 +363,8 @@ function fmtDateTime(iso: string): string {
       <!-- Ping console -->
       <Card class="mt-6">
         <CardHeader class="flex-row items-center justify-between gap-2 space-y-0">
-          <CardTitle class="text-sm">Ping console</CardTitle>
-          <span class="text-xs text-muted-foreground">
-            Runs of successful checks are collapsed
-          </span>
+          <CardTitle class="text-sm">Ping 控制台</CardTitle>
+          <span class="text-xs text-muted-foreground">连续成功检查已折叠</span>
         </CardHeader>
         <CardContent>
           <PingConsole ref="console_" :service-id="id" />
@@ -398,9 +380,9 @@ function fmtDateTime(iso: string): string {
     />
     <ConfirmDialog
       v-model:open="confirmOpen"
-      :title="`Delete ${svc?.name ?? 'service'}?`"
-      description="This removes the service and its history. This action cannot be undone."
-      confirm-label="Delete"
+      :title="`删除 ${svc?.name ?? '服务'}？`"
+      description="将移除该服务及其历史记录，且无法撤销。"
+      confirm-label="删除"
       destructive
       @confirm="onDelete"
     />

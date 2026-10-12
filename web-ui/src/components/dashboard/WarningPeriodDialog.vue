@@ -35,19 +35,16 @@ function submit() {
   <Dialog :open="open" @update:open="emit('update:open', $event)">
     <DialogContent class="max-w-sm">
       <DialogHeader>
-        <DialogTitle>Warning look-back period</DialogTitle>
-        <DialogDescription>
-          How far back the dashboard's "Warning" tile looks when counting services that
-          had a check recover on a retry.
-        </DialogDescription>
+        <DialogTitle>警告回看期</DialogTitle>
+        <DialogDescription>仪表盘“警告”卡片统计重试恢复服务时的回看范围。</DialogDescription>
       </DialogHeader>
       <div class="space-y-1.5">
-        <Label for="warning-period-hours">Hours</Label>
+        <Label for="warning-period-hours">小时</Label>
         <Input id="warning-period-hours" v-model.number="hours" type="number" min="1" step="1" />
       </div>
       <DialogFooter>
-        <Button variant="ghost" @click="emit('update:open', false)">Cancel</Button>
-        <Button @click="submit">Save</Button>
+        <Button variant="ghost" @click="emit('update:open', false)">取消</Button>
+        <Button @click="submit">保存</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

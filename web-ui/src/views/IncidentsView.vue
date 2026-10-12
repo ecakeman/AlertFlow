@@ -25,7 +25,7 @@ const filter = ref<'all' | 'ongoing' | 'resolved'>('all')
 const createOpen = ref(false)
 
 function errMsg(e: unknown) {
-  return e instanceof ApiError ? e.message : 'Something went wrong'
+  return e instanceof ApiError ? e.message : '出错了'
 }
 
 function load(page = 1) {
@@ -50,7 +50,7 @@ const totalPages = computed(() => Math.max(1, Math.ceil(store.total / INCIDENTS_
 async function onCreate(input: IncidentInput) {
   try {
     await store.create(input)
-    toast.success('Incident created')
+    toast.success('事件已创建')
     load()
   } catch (e) {
     toast.error(errMsg(e))
@@ -74,28 +74,26 @@ function duration(startedAt: string, resolvedAt: string | null): string {
 }
 function rowTitle(inc: Incident): string {
   if (inc.title) return inc.title
-  if (inc.severity === 'warning') return 'Recovered on retry'
-  return inc.status === 'ongoing' ? 'Ongoing outage' : 'Outage'
+  if (inc.severity === 'warning') return '重试后恢复'
+  return inc.status === 'ongoing' ? '进行中故障' : '故障'
 }
 </script>
 
 <template>
   <div class="mx-auto max-w-[1200px] px-6 py-6 lg:px-8">
-    <PageHeader title="Incidents" description="Outages detected automatically or logged manually.">
+    <PageHeader title="事件" description="自动检测或手动记录的故障。">
       <template #actions>
         <Button v-if="auth.isAdmin" @click="createOpen = true">
-          <Plus />
-          New incident
-        </Button>
+          <Plus />新建事件</Button>
       </template>
     </PageHeader>
 
     <div class="mt-6 flex items-center justify-between gap-3">
       <Tabs v-model="filter">
         <TabsList>
-          <TabsTrigger value="all">All</TabsTrigger>
-          <TabsTrigger value="ongoing">Ongoing</TabsTrigger>
-          <TabsTrigger value="resolved">Resolved</TabsTrigger>
+          <TabsTrigger value="all">全部</TabsTrigger>
+          <TabsTrigger value="ongoing">进行中</TabsTrigger>
+          <TabsTrigger value="resolved">已恢复</TabsTrigger>
         </TabsList>
       </Tabs>
     </div>
@@ -104,17 +102,15 @@ function rowTitle(inc: Incident): string {
       <div v-if="store.loading && !store.loaded" class="flex justify-center py-16 text-muted-foreground">
         <LoaderCircle class="size-5 animate-spin" />
       </div>
-      <div v-else-if="rows.length === 0" class="py-16 text-center text-sm text-muted-foreground">
-        No incidents to show.
-      </div>
+      <div v-else-if="rows.length === 0" class="py-16 text-center text-sm text-muted-foreground">暂无事件。</div>
       <Table v-else>
         <TableHeader>
           <TableRow>
-            <TableHead>Service</TableHead>
-            <TableHead>Incident</TableHead>
-            <TableHead>Started</TableHead>
-            <TableHead>Duration</TableHead>
-            <TableHead>Status</TableHead>
+            <TableHead>服务</TableHead>
+            <TableHead>事件</TableHead>
+            <TableHead>开始</TableHead>
+            <TableHead>时长</TableHead>
+            <TableHead>状态</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -128,11 +124,9 @@ function rowTitle(inc: Incident): string {
             <TableCell class="text-muted-foreground">
               {{ rowTitle(inc) }}
               <span
-                v-if="inc.source === 'manual'"
+                v-if="inc.source === '手动'"
                 class="ml-1.5 rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground"
-              >
-                manual
-              </span>
+              >手动</span>
             </TableCell>
             <TableCell class="tabular-nums text-muted-foreground">{{ fmtDateTime(inc.startedAt) }}</TableCell>
             <TableCell class="tabular-nums">
@@ -141,7 +135,7 @@ function rowTitle(inc: Incident): string {
             <TableCell>
               <span v-if="inc.severity === 'warning'" class="inline-flex items-center gap-1.5">
                 <StatusDot status="warning" :pulse="false" />
-                <span class="text-xs">Warning</span>
+                <span class="text-xs">警告</span>
               </span>
               <span v-else class="inline-flex items-center gap-1.5">
                 <StatusDot

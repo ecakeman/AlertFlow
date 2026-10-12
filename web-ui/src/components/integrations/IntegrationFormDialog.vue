@@ -52,7 +52,7 @@ const f = reactive({
 
 const secrets = computed(() => props.integration?.secrets ?? {})
 function secretPlaceholder(field: string, fallback: string) {
-  return secrets.value[field] ? 'Leave blank to keep current' : fallback
+  return secrets.value[field] ? '留空则保持当前值' : fallback
 }
 
 function str(v: unknown): string {
@@ -160,17 +160,14 @@ function submit() {
   <Dialog :open="open" @update:open="emit('update:open', $event)">
     <DialogContent>
       <DialogHeader>
-        <DialogTitle>{{ isEdit ? 'Edit integration' : 'Add integration' }}</DialogTitle>
-        <DialogDescription>
-          Notify a channel when an incident starts or resolves — and, if you opt in,
-          when a check recovers on a retry.
-        </DialogDescription>
+        <DialogTitle>{{ isEdit ? '编辑集成' : '添加集成' }}</DialogTitle>
+        <DialogDescription>当事件开始或恢复时通知渠道——若启用，也在检查重试恢复时通知。</DialogDescription>
       </DialogHeader>
 
       <form class="grid gap-4" @submit.prevent="submit">
         <div class="grid grid-cols-2 gap-4">
           <div class="grid gap-2">
-            <Label>Type</Label>
+            <Label>类型</Label>
             <Select v-model="type" :disabled="isEdit">
               <SelectTrigger>
                 <SelectValue />
@@ -178,21 +175,21 @@ function submit() {
               <SelectContent>
                 <SelectItem value="telegram">Telegram</SelectItem>
                 <SelectItem value="slack">Slack</SelectItem>
-                <SelectItem value="email">Email (SMTP)</SelectItem>
-                <SelectItem value="webhook">Custom webhook</SelectItem>
+                <SelectItem value="email">邮件 (SMTP)</SelectItem>
+                <SelectItem value="webhook">自定义 Webhook</SelectItem>
               </SelectContent>
             </Select>
           </div>
           <div class="grid gap-2">
-            <Label for="int-name">Name</Label>
-            <Input id="int-name" v-model="name" placeholder="Ops channel" autocomplete="off" />
+            <Label for="int-name">名称</Label>
+            <Input id="int-name" v-model="name" placeholder="运维渠道" autocomplete="off" />
           </div>
         </div>
 
         <!-- Telegram -->
         <template v-if="type === 'telegram'">
           <div class="grid gap-2">
-            <Label for="tg-token">Bot token</Label>
+            <Label for="tg-token">机器人 Token</Label>
             <Input
               id="tg-token"
               v-model="f.botToken"
@@ -202,7 +199,7 @@ function submit() {
             />
           </div>
           <div class="grid gap-2">
-            <Label for="tg-chat">Chat ID</Label>
+            <Label for="tg-chat">聊天 ID</Label>
             <Input id="tg-chat" v-model="f.chatId" placeholder="-1001234567890" autocomplete="off" />
           </div>
         </template>
@@ -225,21 +222,21 @@ function submit() {
         <template v-else-if="type === 'email'">
           <div class="grid grid-cols-[1fr_auto] gap-4">
             <div class="grid gap-2">
-              <Label for="em-host">SMTP host</Label>
+              <Label for="em-host">SMTP 主机</Label>
               <Input id="em-host" v-model="f.host" placeholder="smtp.gmail.com" autocomplete="off" />
             </div>
             <div class="grid w-24 gap-2">
-              <Label for="em-port">Port</Label>
+              <Label for="em-port">端口</Label>
               <Input id="em-port" v-model="f.port" type="number" placeholder="587" />
             </div>
           </div>
           <div class="grid grid-cols-2 gap-4">
             <div class="grid gap-2">
-              <Label for="em-user">Username</Label>
+              <Label for="em-user">用户名</Label>
               <Input id="em-user" v-model="f.username" autocomplete="off" />
             </div>
             <div class="grid gap-2">
-              <Label for="em-pass">Password</Label>
+              <Label for="em-pass">密码</Label>
               <Input
                 id="em-pass"
                 v-model="f.password"
@@ -251,7 +248,7 @@ function submit() {
           </div>
           <div class="grid grid-cols-2 gap-4">
             <div class="grid gap-2">
-              <Label for="em-from">From</Label>
+              <Label for="em-from">发件人</Label>
               <Input id="em-from" v-model="f.from" placeholder="alerts@x.com" autocomplete="off" />
             </div>
             <div class="grid gap-2">
@@ -259,9 +256,7 @@ function submit() {
               <Input id="em-to" v-model="f.to" placeholder="ops@x.com" autocomplete="off" />
             </div>
           </div>
-          <p class="text-xs text-muted-foreground">
-            Uses STARTTLS on the given port (587 recommended). Comma-separate multiple recipients.
-          </p>
+          <p class="text-xs text-muted-foreground">在指定端口使用 STARTTLS（推荐 587）。多个收件人用逗号分隔。</p>
         </template>
 
         <!-- Webhook -->
@@ -272,7 +267,7 @@ function submit() {
               <Input id="wh-url" v-model="f.url" placeholder="https://example.com/hook" autocomplete="off" />
             </div>
             <div class="grid w-28 gap-2">
-              <Label>Method</Label>
+              <Label>方法</Label>
               <Select v-model="f.method">
                 <SelectTrigger>
                   <SelectValue />
@@ -287,41 +282,38 @@ function submit() {
             </div>
           </div>
           <div class="grid gap-2">
-            <Label for="wh-headers">Headers</Label>
+            <Label for="wh-headers">请求头</Label>
             <Textarea
               id="wh-headers"
               v-model="f.headers"
               class="min-h-16 font-mono text-xs"
-              placeholder="Authorization: Bearer token&#10;X-Source: upmonitor"
+              placeholder="Authorization: Bearer token&#10;X-Source: AlertFlow"
             />
           </div>
           <div class="grid gap-2">
-            <Label for="wh-body">Body template</Label>
+            <Label for="wh-body">请求体模板</Label>
             <Textarea
               id="wh-body"
               v-model="f.bodyTemplate"
               class="min-h-16 font-mono text-xs"
-              placeholder="Leave blank for a default JSON payload. Supports {{.ServiceName}}, {{.Event}}."
+              placeholder="留空则使用默认 JSON 负载。支持 {{.ServiceName}}、{{.Event}}。"
             />
           </div>
         </template>
 
         <div class="flex items-start justify-between gap-4 rounded-lg border border-border px-3 py-2.5">
           <div class="min-w-0">
-            <Label for="notify-warnings" class="cursor-pointer">Notify on warnings</Label>
-            <p class="mt-0.5 text-xs text-muted-foreground">
-              A warning is a check that failed and then recovered on a retry. Off by
-              default — only outages are sent.
-            </p>
+            <Label for="notify-warnings" class="cursor-pointer">警告时通知</Label>
+            <p class="mt-0.5 text-xs text-muted-foreground">警告指检查失败后重试恢复。默认关闭——只发送故障。</p>
           </div>
           <Switch id="notify-warnings" v-model="notifyWarnings" class="mt-0.5 shrink-0" />
         </div>
       </form>
 
       <DialogFooter>
-        <Button variant="ghost" @click="emit('update:open', false)">Cancel</Button>
+        <Button variant="ghost" @click="emit('update:open', false)">取消</Button>
         <Button :disabled="!valid" @click="submit">
-          {{ isEdit ? 'Save changes' : 'Add integration' }}
+          {{ isEdit ? '保存修改' : '添加集成' }}
         </Button>
       </DialogFooter>
     </DialogContent>

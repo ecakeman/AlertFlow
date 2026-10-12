@@ -72,11 +72,11 @@ function submit() {
   <Dialog :open="open" @update:open="emit('update:open', $event)">
     <DialogContent>
       <DialogHeader>
-        <DialogTitle>{{ isEdit ? 'Edit incident' : 'Create incident' }}</DialogTitle>
+        <DialogTitle>{{ isEdit ? '编辑事件' : '新建事件' }}</DialogTitle>
         <DialogDescription>
           {{
             isEdit
-              ? 'Adjust this incident’s details or log when it ended.'
+              ? '调整该事件的详情，或记录其结束时间。'
               : 'Manually record an incident (e.g. a planned outage the monitor can’t detect).'
           }}
         </DialogDescription>
@@ -84,10 +84,10 @@ function submit() {
 
       <form class="grid gap-4" @submit.prevent="submit">
         <div v-if="!isEdit" class="grid gap-2">
-          <Label>Service</Label>
+          <Label>服务</Label>
           <Select v-model="serviceId">
             <SelectTrigger>
-              <SelectValue placeholder="Select a service" />
+              <SelectValue placeholder="选择服务" />
             </SelectTrigger>
             <SelectContent>
               <SelectItem v-for="s in services.services" :key="s.id" :value="s.id">
@@ -97,29 +97,26 @@ function submit() {
           </Select>
         </div>
         <div class="grid gap-2">
-          <Label for="inc-title">Title</Label>
-          <Input id="inc-title" v-model="title" placeholder="Planned maintenance" autocomplete="off" />
+          <Label for="inc-title">标题</Label>
+          <Input id="inc-title" v-model="title" placeholder="计划维护" autocomplete="off" />
         </div>
         <div class="grid grid-cols-2 gap-4">
           <div class="grid gap-2">
-            <Label for="inc-started">Started at</Label>
+            <Label for="inc-started">开始时间</Label>
             <Input id="inc-started" v-model="startedAt" type="datetime-local" />
           </div>
           <div class="grid gap-2">
-            <Label for="inc-resolved">Resolved at</Label>
+            <Label for="inc-resolved">恢复时间</Label>
             <Input id="inc-resolved" v-model="resolvedAt" type="datetime-local" />
           </div>
         </div>
-        <p class="text-xs text-muted-foreground">
-          Leave “Started at” empty to use the current time. Setting “Resolved at” marks the incident
-          resolved.
-        </p>
+        <p class="text-xs text-muted-foreground">留空“开始时间”则使用当前时间。设置“恢复时间”即标记事件为已恢复。</p>
       </form>
 
       <DialogFooter>
-        <Button variant="ghost" @click="emit('update:open', false)">Cancel</Button>
+        <Button variant="ghost" @click="emit('update:open', false)">取消</Button>
         <Button :disabled="!valid" @click="submit">
-          {{ isEdit ? 'Save changes' : 'Create incident' }}
+          {{ isEdit ? '保存修改' : '新建事件' }}
         </Button>
       </DialogFooter>
     </DialogContent>
