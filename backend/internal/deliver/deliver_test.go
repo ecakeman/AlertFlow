@@ -383,11 +383,17 @@ func TestFinishNearSendTimeoutStillRecordsStatus(t *testing.T) {
 	assertStatus(t, database, mustEventID(t, database), "retry_wait", 1)
 
 	mustOffline(t, database, "stale")
-	stale, err := database.ClaimDeliveries("old", base, base+LeaseSeconds, 1, MaxAttempts)
+	// Claim with a FRESH now: this delivery was inserted after base was captured,
+	// so its next_attempt_at is base or later. Reusing base makes the claim flaky
+	// the moment a second ticks between the capture and the insert (the row is
+	// then "not due yet" and the claim comes back empty).
+	now := time.Now().Unix()
+	stale, err := database.ClaimDeliveries("old", now, now+LeaseSeconds, 1, MaxAttempts)
 	if err != nil || len(stale) != 1 {
 		t.Fatalf("stale claim = %+v, %v", stale, err)
 	}
-	if err := database.SucceedDelivery(stale[0].ID, "old", base+LeaseSeconds, base+LeaseSeconds); !errors.Is(err, db.ErrLeaseLost) {
+	// Writing exactly at the lease boundary must lose the lease.
+	if err := database.SucceedDelivery(stale[0].ID, "old", now+LeaseSeconds, now+LeaseSeconds); !errors.Is(err, db.ErrLeaseLost) {
 		t.Fatalf("expired owner wrote status: %v", err)
 	}
 	var sent int
