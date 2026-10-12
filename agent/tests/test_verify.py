@@ -1,44 +1,84 @@
-from alertflow_agent.runtime.verify import verify
+from alertflow_agent.runtime.verify import build_catalog, fact_id, verify
 
 
-def test_fact_must_match_evidence():
-    evidence = {"ana:status@0": {"source_type": "analysis", "data": {"offline": {"n": 2}}, "summary": "2"}}
-    draft = {
+def _evidence():
+    return {"ana:status@0": {"kind": "analysis", "source_type": "analysis", "data": {"offline": {"n": 2}}, "summary": "2"}}
+
+
+def _draft(catalog, **hyp):
+    return {
         "summary": "two offline checks",
-        "observations": [{"id": "o1", "text": "offline count", "evidence_ids": ["ana:status@0"], "facts": [{"evidence_id": "ana:status@0", "path": "offline.n", "value": 2}]}],
-        "hypotheses": [{
-            "id": "h1", "text": "probe", "layer": "probe", "status": "possible", "confidence": "low", "rationale": "probe",
-            "supporting_evidence_ids": ["ana:status@0"], "weakening_evidence_ids": [],
+        "observations": [{
+            "id": "o1",
+            "text": "offline count",
+            "evidence_ids": ["ana:status@0"],
+            "fact_ids": [fact_id(catalog, "ana:status@0", "offline.n")],
+            "facts": [{"evidence_id": "ana:status@0", "path": "invented", "value": 9}],
         }],
-    }
-    assert verify(draft, evidence, [])["passed"]
-    draft["observations"][0]["facts"][0]["value"] = 9
-    result = verify(draft, evidence, [])
-    assert not result["passed"]
-    assert result["findings"][0]["rule"] == "V3"
-    draft["observations"][0]["facts"][0]["path"] = "missing.path"
-    assert any(item["rule"] == "V3" for item in verify(draft, evidence, [])["findings"])
-    tls = {
-        "h1": {
-            "id": "h1", "text": "tls", "layer": "tls", "status": "supported", "confidence": "low",
-            "rationale": "errors", "supporting_evidence_ids": ["ana:errors@2"], "weakening_evidence_ids": [],
-        }
-    }
-    evidence["ana:errors@0"] = {"source_type": "analysis", "data": {"classes": {"tls": 0}}}
-    evidence["ana:errors@2"] = {"source_type": "analysis", "data": {"classes": {"tls": 3}}}
-    later = dict(draft)
-    later["observations"][0]["facts"][0]["path"] = "offline.n"
-    later["observations"][0]["facts"][0]["value"] = 2
-    later["hypotheses"] = [tls["h1"]]
-    assert verify(later, evidence, [])["passed"]
-    number_only = {
-        "summary": "latency 20",
-        "observations": [{"id": "o1", "text": "see hypothesis", "evidence_ids": [], "facts": []}],
         "hypotheses": [{
-            "id": "h1", "text": "value 20", "layer": "probe", "status": "possible", "confidence": "low",
-            "rationale": "metric", "supporting_evidence_ids": ["met:24h"], "weakening_evidence_ids": [],
+            "id": "h1", "text": "probe", "layer": "probe", "status": "possible", "evidence_ids": ["ana:status@0"],
+            **hyp,
         }],
+        "unknowns": [],
+        "recommended_next_steps": [],
     }
-    metric = {"met:24h": {"source_type": "alertflow_metric", "summary": "20", "data": {"stats": {"last_avg_latency": 20}}}}
-    warned = verify(number_only, metric, [])
-    assert not any(item["detail"] == "20" for item in warned["warnings"])
+
+
+def test_catalog_facts_pass_and_ignore_model_values():
+    evidence = _evidence()
+    catalog = build_catalog(evidence)
+    result = verify(_draft(catalog), evidence, [], catalog=catalog)
+    assert result["passed"]
+    fact = result["draft"]["observations"][0]["facts"][0]
+    assert fact == {"evidence_id": "ana:status@0", "path": "offline.n", "value": 2}
+    assert result["draft"]["hypotheses"][0]["supporting_evidence_ids"] == ["ana:status@0"]
+
+
+def test_missing_fact_or_evidence_fails():
+    evidence = _evidence()
+    catalog = build_catalog(evidence)
+    draft = _draft(catalog)
+    draft["observations"][0]["fact_ids"] = ["no-such"]
+    draft["observations"][0]["evidence_ids"] = ["missing-ev"]
+    result = verify(draft, evidence, [], catalog=catalog)
+    rules = {item["rule"] for item in result["findings"]}
+    assert "fact_ref" in rules
+    assert "evidence_ref" in rules
+    assert result["draft"]["observations"][0]["facts"] == []
+
+
+def test_possible_and_undetermined_do_not_need_evidence():
+    evidence = _evidence()
+    catalog = build_catalog(evidence)
+    for status in ("possible", "undetermined"):
+        draft = _draft(catalog)
+        draft["hypotheses"][0]["status"] = status
+        draft["hypotheses"][0]["evidence_ids"] = []
+        assert verify(draft, evidence, [], catalog=catalog)["passed"]
+
+
+def test_supported_and_ruled_out_need_evidence():
+    evidence = _evidence()
+    catalog = build_catalog(evidence)
+    for status in ("supported", "ruled_out"):
+        draft = _draft(catalog)
+        draft["hypotheses"][0]["status"] = status
+        draft["hypotheses"][0]["evidence_ids"] = []
+        result = verify(draft, evidence, [], catalog=catalog)
+        assert any(item["rule"] == "conclusion" for item in result["findings"])
+    cited = _draft(catalog)
+    cited["hypotheses"][0]["status"] = "ruled_out"
+    passed = verify(cited, evidence, [], catalog=catalog)
+    assert passed["passed"]
+    assert passed["draft"]["hypotheses"][0]["weakening_evidence_ids"] == ["ana:status@0"]
+
+
+def test_redaction_is_applied_without_a_finding():
+    evidence = _evidence()
+    catalog = build_catalog(evidence)
+    draft = _draft(catalog)
+    draft["summary"] = "token secret-value stays out"
+    result = verify(draft, evidence, ["secret-value"], catalog=catalog)
+    assert result["passed"]
+    assert "secret-value" not in result["draft"]["summary"]
+    assert "[REDACTED]" in result["draft"]["summary"]

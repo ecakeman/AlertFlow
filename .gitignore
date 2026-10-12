@@ -6,6 +6,9 @@
 /config/images/
 /config/backups/
 
+# Image archives from make package-images. Do not commit them.
+/dist/*.tar
+
 # --- Compiled binaries ---
 /upmonitor
 /alertflow

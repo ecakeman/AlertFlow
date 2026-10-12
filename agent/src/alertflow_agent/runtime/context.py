@@ -25,6 +25,13 @@ def build_context(node: str, state: dict) -> str:
         parts.append("Plan:\n" + _clip(str(state["plan"]), 2000))
     if node == "write_report" and state.get("prior_report"):
         parts.append("Previous report, read only:\n" + _clip(str(state["prior_report"].get("summary")), 500))
+    if node == "write_report":
+        parts.append(_catalog_block(state.get("fact_catalog") or []))
+        findings = ((state.get("verification") or {}).get("findings")) or []
+        if findings and state.get("llm_report"):
+            parts.append("Previous structured report:\n" + _clip(json.dumps(state["llm_report"], ensure_ascii=False), 4000))
+            parts.append("Verification failures:\n" + json.dumps(findings, ensure_ascii=False))
+            parts.append("Fix only these failures. Keep unknowns that are still true. Cite fact_ids from the catalog and evidence ids from the registry.")
     parts.append(_evidence_block(state.get("evidence") or {}))
     for name in state.get("skills_loaded") or []:
         text = (state.get("skill_texts") or {}).get(name) or ""
@@ -55,6 +62,13 @@ def _event_block(event: dict) -> str:
         if event.get(key):
             lines.append(f"Untrusted event.{key}: " + json.dumps(event[key], ensure_ascii=False))
     return "\n".join(lines)
+
+
+def _catalog_block(catalog: list[dict]) -> str:
+    lines = []
+    for row in catalog:
+        lines.append(f"{row['fact_id']} {row['evidence_id']} {row['path']} {json.dumps(row['value'], ensure_ascii=False)}")
+    return "Fact catalog:\n" + "\n".join(lines)
 
 
 def _evidence_block(evidence: dict) -> str:

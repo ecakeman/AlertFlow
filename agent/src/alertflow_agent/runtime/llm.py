@@ -1,4 +1,5 @@
 from alertflow_agent.runtime.schemas import SCHEMAS
+from alertflow_agent.runtime.verify import fact_id
 
 
 class ScriptedModel:
@@ -55,24 +56,22 @@ def _lead(state: dict) -> dict:
 
 
 def draft_from_state(state: dict) -> dict:
-    status = (state["evidence"].get("ana:status@0") or {}).get("data") or {}
-    offline = (status.get("offline") or {}).get("n", 0)
+    catalog = state.get("fact_catalog") or []
+    offline = fact_id(catalog, "ana:status@0", "offline.n")
     observations = [{
         "id": "o1",
         "text": "The status analysis counts the checks in the window.",
         "evidence_ids": ["ana:status@0"],
-        "facts": [{"evidence_id": "ana:status@0", "path": "offline.n", "value": offline}],
+        "fact_ids": [offline] if offline else [],
     }]
-    resolved = (state["evidence"].get("evt:resolve") or {}).get("data") or {}
-    if resolved:
+    if state["evidence"].get("evt:resolve"):
+        resolved_at = fact_id(catalog, "evt:resolve", "resolved_at")
+        duration = fact_id(catalog, "evt:resolve", "duration_s")
         observations.append({
             "id": "o2",
             "text": "The incident recovered after the recorded outage.",
             "evidence_ids": ["evt:resolve"],
-            "facts": [
-                {"evidence_id": "evt:resolve", "path": "resolved_at", "value": resolved.get("resolved_at")},
-                {"evidence_id": "evt:resolve", "path": "duration_s", "value": resolved.get("duration_s")},
-            ],
+            "fact_ids": [item for item in (resolved_at, duration) if item],
         })
     return {
         "summary": "Collected checks were analyzed without claiming an internal root cause.",
@@ -82,11 +81,7 @@ def draft_from_state(state: dict) -> dict:
             "text": "The external probe recorded the status mix in the analysis.",
             "layer": "probe",
             "status": "possible",
-            "confidence": "low",
-            "supporting_evidence_ids": ["ana:status@0"],
-            "weakening_evidence_ids": [],
-            "rationale": "Only probe evidence is available.",
-            "missing_info": [],
+            "evidence_ids": ["ana:status@0"],
         }],
         "unknowns": [],
         "recommended_next_steps": [{"text": "Read the service logs for the same window.", "rationale": "The probe cannot see inside the process."}],

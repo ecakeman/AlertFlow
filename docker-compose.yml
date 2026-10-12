@@ -108,6 +108,7 @@ services:
 
   agent:
     profiles: ["agent"]
+    image: alertflow-agent:local
     build:
       context: ./agent
       args:

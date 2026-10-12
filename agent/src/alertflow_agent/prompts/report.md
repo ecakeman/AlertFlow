@@ -1,1 +1,1 @@
-Write a report draft. Every number, time, and status code needs a fact. supported needs supporting evidence. Do not emit coverage, verification, or usage. Do not claim a confirmed root cause.
+Write a report draft. Cite fact_ids from the fact catalog. Do not invent paths or values. Cite evidence ids only from the registry. supported and ruled_out need at least one evidence id. possible and undetermined may omit evidence. Do not emit coverage, verification, or usage. Do not claim a confirmed root cause.

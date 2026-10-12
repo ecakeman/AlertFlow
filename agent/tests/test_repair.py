@@ -390,6 +390,67 @@ def test_resume_does_not_overwrite_a_completed_v1_or_a_v2():
     assert store.get(other["id"])["failure_reason"] == "report_conflict"
 
 
+def test_revision_receives_findings_and_can_then_pass():
+    class _Revise:
+        def __init__(self):
+            self.prompts = []
+
+        def complete(self, node, state, prompt=""):
+            self.prompts.append((node, prompt))
+            scripted = ScriptedModel()
+            if node != "write_report":
+                return scripted.complete(node, state, prompt)
+            writes = [item for item in self.prompts if item[0] == "write_report"]
+            if len(writes) == 1:
+                return {
+                    "summary": "bad ref",
+                    "observations": [{"id": "o1", "text": "missing", "fact_ids": ["no-such"], "evidence_ids": []}],
+                    "hypotheses": [],
+                    "unknowns": [{"text": "still unknown", "code": "KEEP", "evidence_ids": []}],
+                    "recommended_next_steps": [],
+                }, {"estimated": 1, "source": "estimated"}
+            return scripted.complete(node, state, prompt)
+
+    store = MemoryStore()
+    row = event_row("baseline")
+    store.insert_run(row)
+    model = _Revise()
+    Runner(Settings(max_revisions=1), store, FakeAlertFlow(), model).execute(row["id"])
+    assert store.get(row["id"])["status"] == "completed"
+    writes = [prompt for node, prompt in model.prompts if node == "write_report"]
+    assert "Verification failures" in writes[1]
+    assert "no-such" in writes[1]
+    assert "Fix only these failures" in writes[1]
+    fact = store.latest_report(row["id"])["report"]["observations"][0]["facts"][0]
+    assert fact["path"] == "offline.n"
+    assert fact["value"] != "no-such"
+
+
+def test_exhausted_revision_stays_partial_with_findings():
+    class _AlwaysBad:
+        def complete(self, node, state, prompt=""):
+            if node != "write_report":
+                return ScriptedModel().complete(node, state, prompt)
+            return {
+                "summary": "bad ref",
+                "observations": [{"id": "o1", "text": "missing", "fact_ids": ["no-such"], "evidence_ids": []}],
+                "hypotheses": [{"id": "h1", "text": "sure", "layer": "probe", "status": "supported", "evidence_ids": []}],
+                "unknowns": [],
+                "recommended_next_steps": [],
+            }, {"estimated": 1, "source": "estimated"}
+
+    store = MemoryStore()
+    row = event_row("baseline")
+    store.insert_run(row)
+    Runner(Settings(max_revisions=1), store, FakeAlertFlow(), _AlwaysBad()).execute(row["id"])
+    saved = store.latest_report(row["id"])["report"]
+    assert store.get(row["id"])["status"] == "partial"
+    assert saved["verification"]["passed"] is False
+    rules = {item["rule"] for item in saved["verification"]["findings"]}
+    assert "fact_ref" in rules
+    assert "conclusion" in rules
+
+
 def test_resume_api_rejects_running_and_completed():
     from fastapi.testclient import TestClient
 

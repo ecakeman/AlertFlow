@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 # Official tags are the defaults. Override NODE_IMAGE, GO_IMAGE, or
 # RUNTIME_IMAGE when a registry is unreachable. NPM_REGISTRY and GOPROXY
 # are optional and stay empty unless a package download itself fails.

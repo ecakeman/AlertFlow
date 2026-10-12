@@ -1,177 +1,66 @@
 import json
-import math
-import re
-from datetime import datetime
 
-from alertflow_agent.runtime.schemas import ReportDraft
+from alertflow_agent.runtime.schemas import LLMReport
 
-
-def lookup(data, path: str):
-    cur = data
-    for part in path.split("."):
-        if isinstance(cur, list):
-            cur = cur[int(part)]
-        elif isinstance(cur, dict):
-            cur = cur[part]
-        else:
-            raise KeyError(path)
-    return cur
+_MAX_FACTS = 60
+_MAX_DEPTH = 4
+_MAX_LIST = 8
+_MAX_TEXT = 200
 
 
-def _same(left, right) -> bool:
-    if isinstance(left, float) and not math.isfinite(left):
-        return False
-    if isinstance(right, float) and not math.isfinite(right):
-        return False
-    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
-        return abs(float(left) - float(right)) <= max(0.5, abs(float(right)) * 0.001)
-    if isinstance(left, str) and isinstance(right, str):
-        try:
-            a = datetime.fromisoformat(left.replace("Z", "+00:00"))
-            b = datetime.fromisoformat(right.replace("Z", "+00:00"))
-            return a == b
-        except ValueError:
-            return left == right
-    return left == right
+def build_catalog(evidence: dict) -> list[dict]:
+    """Scalar facts the model may cite. The model does not choose path or value."""
+    rows = []
+    for ident, item in evidence.items():
+        payload = _catalog_payload(ident, item or {})
+        if payload is None:
+            continue
+        for path, value in _scalars(payload):
+            rows.append({"evidence_id": ident, "path": path, "value": value})
+    rows.sort(key=lambda row: (_priority(row["evidence_id"], evidence), row["evidence_id"], row["path"]))
+    catalog = []
+    for index, row in enumerate(rows[:_MAX_FACTS], start=1):
+        catalog.append({"fact_id": f"f{index}", **row})
+    return catalog
 
 
-def verify(draft: dict, evidence: dict, tokens: list[str], gaps: list[str] | None = None) -> dict:
+def _priority(ident: str, evidence: dict) -> int:
+    kind = (evidence.get(ident) or {}).get("kind")
+    if ident == "evt:resolve" or kind == "resolve":
+        return 0
+    if kind == "analysis":
+        return 1
+    if kind == "tls":
+        return 2
+    if kind == "metric_series":
+        return 3
+    return 4
+
+
+def fact_id(catalog: list[dict], evidence_id: str, path: str) -> str | None:
+    for row in catalog:
+        if row["evidence_id"] == evidence_id and row["path"] == path:
+            return row["fact_id"]
+    return None
+
+
+def verify(draft: dict, evidence: dict, tokens: list[str], gaps: list[str] | None = None, catalog: list[dict] | None = None) -> dict:
     findings = []
-    warnings = []
+    catalog = catalog if catalog is not None else build_catalog(evidence)
+    by_id = {row["fact_id"]: row for row in catalog}
     try:
-        parsed = ReportDraft.model_validate(draft).model_dump()
+        parsed = LLMReport.model_validate(draft).model_dump()
     except Exception:
-        findings.append({"rule": "V1", "detail": "schema"})
+        findings.append({"rule": "schema", "detail": "schema"})
         parsed = draft if isinstance(draft, dict) else {}
-    for obs in parsed.get("observations") or []:
-        _ids(obs.get("evidence_ids") or [], evidence, findings, "V2")
-        for fact in obs.get("facts") or []:
-            _fact(fact, evidence, findings)
-    for hyp in parsed.get("hypotheses") or []:
-        _ids(hyp.get("supporting_evidence_ids") or [], evidence, findings, "V2")
-        _ids(hyp.get("weakening_evidence_ids") or [], evidence, findings, "V2")
-        status = hyp.get("status")
-        if status == "supported" and not hyp.get("supporting_evidence_ids"):
-            findings.append({"rule": "V4", "detail": hyp.get("id")})
-        if status in {"weakened", "ruled_out"} and not hyp.get("weakening_evidence_ids"):
-            findings.append({"rule": "V4", "detail": hyp.get("id")})
-        if status != "undetermined" and not hyp.get("rationale"):
-            findings.append({"rule": "V4", "detail": "rationale"})
-        _layer(hyp, evidence, findings)
-        _confidence(hyp, evidence, findings)
-    for unknown in parsed.get("unknowns") or []:
-        _ids(unknown.get("evidence_ids") or [], evidence, findings, "V2")
-    _numbers(parsed, evidence, warnings)
-    present = {item.get("code") for item in parsed.get("unknowns") or []}
-    parsed.setdefault("unknowns", [])
-    for gap in gaps or []:
-        if gap not in present:
-            parsed["unknowns"].append({"text": f"Coverage gap {gap}.", "code": gap, "evidence_ids": []})
-    redacted = _redact(parsed, tokens)
-    return {"passed": not findings, "findings": findings, "warnings": warnings, "draft": redacted}
-
-
-def _ids(ids, evidence, findings, rule) -> None:
-    for ident in ids:
-        if ident not in evidence:
-            findings.append({"rule": rule, "detail": ident})
-
-
-def _fact(fact, evidence, findings) -> None:
-    ident = fact.get("evidence_id")
-    item = evidence.get(ident)
-    if not item:
-        findings.append({"rule": "V3", "detail": ident})
-        return
-    try:
-        got = lookup(item.get("data") or {}, fact["path"])
-    except (KeyError, IndexError, ValueError, TypeError):
-        findings.append({"rule": "V3", "detail": fact.get("path")})
-        return
-    if not _same(got, fact.get("value")):
-        findings.append({"rule": "V3", "detail": f"{ident}.{fact.get('path')}"})
-
-
-def _source(ident, evidence) -> str:
-    return (evidence.get(ident) or {}).get("source_type", "")
-
-
-def _layer(hyp, evidence, findings) -> None:
-    layer = hyp.get("layer")
-    status = hyp.get("status")
-    support = hyp.get("supporting_evidence_ids") or []
-    if status != "supported":
-        return
-    if layer in {"app_internal", "dependency"}:
-        kinds = {_source(i, evidence) for i in support}
-        if "project_diagnostic" not in kinds and "alertflow_external_alert" not in kinds:
-            findings.append({"rule": "V5", "detail": layer})
-    if layer == "tls":
-        kinds = {_source(i, evidence) for i in support}
-        if "alertflow_tls" not in kinds and not _cited_class(evidence, support, "tls"):
-            findings.append({"rule": "V5", "detail": "tls"})
-    if layer == "network_dns":
-        if not _cited_class(evidence, support, "dns"):
-            findings.append({"rule": "V5", "detail": "dns"})
-
-
-def _confidence(hyp, evidence, findings) -> None:
-    support = hyp.get("supporting_evidence_ids") or []
-    if hyp.get("status") == "supported":
-        kinds = {_source(i, evidence) for i in support}
-        if kinds and kinds <= {"alertflow_comment", "subagent_review"}:
-            findings.append({"rule": "V6", "detail": "comment-only"})
-    if hyp.get("confidence") == "high":
-        kinds = {_source(i, evidence) for i in support if _source(i, evidence) not in {"alertflow_comment", "subagent_review"}}
-        if len(kinds) < 2:
-            findings.append({"rule": "V6", "detail": "high"})
-
-
-def _cited_class(evidence, support, name) -> int:
-    total = 0
-    for ident in support:
-        if not str(ident).startswith("ana:errors@"):
-            continue
-        classes = ((evidence.get(ident) or {}).get("data") or {}).get("classes") or {}
-        try:
-            total += int(classes.get(name) or 0)
-        except (TypeError, ValueError):
-            continue
-    return total
-
-
-def _numbers(draft, evidence, warnings) -> None:
-    cited = set()
-    for obs in draft.get("observations") or []:
-        cited.update(obs.get("evidence_ids") or [])
-        for fact in obs.get("facts") or []:
-            if fact.get("evidence_id"):
-                cited.add(fact["evidence_id"])
-    for hyp in draft.get("hypotheses") or []:
-        cited.update(hyp.get("supporting_evidence_ids") or [])
-        cited.update(hyp.get("weakening_evidence_ids") or [])
-    for unknown in draft.get("unknowns") or []:
-        cited.update(unknown.get("evidence_ids") or [])
-    blob = json.dumps({
-        "summary": draft.get("summary"),
-        "observations": draft.get("observations"),
-        "hypotheses": draft.get("hypotheses"),
-    })
-    present = set()
-    for ident in cited:
-        item = evidence.get(ident) or {}
-        present.update(re.findall(r"\d+", json.dumps(item.get("data")) + " " + item.get("summary", "")))
-    for number in re.findall(r"\d+", blob):
-        if number not in present and number not in {"0", "1"}:
-            warnings.append({"rule": "V8", "detail": number})
-
-
-def _redact(draft: dict, tokens: list[str]) -> dict:
-    text = json.dumps(draft)
-    for token in tokens:
-        if token:
-            text = text.replace(token, "[REDACTED]")
-    return json.loads(text)
+        assembled = parsed
+    else:
+        assembled = _assemble(parsed, by_id, evidence, findings)
+        present = {item.get("code") for item in assembled.get("unknowns") or []}
+        for gap in gaps or []:
+            if gap not in present:
+                assembled.setdefault("unknowns", []).append({"text": f"Coverage gap {gap}.", "code": gap, "evidence_ids": []})
+    return {"passed": not findings, "findings": findings, "warnings": [], "draft": _redact(assembled, tokens)}
 
 
 def cited(report: dict) -> set[str]:
@@ -183,7 +72,120 @@ def cited(report: dict) -> set[str]:
     for hyp in report.get("hypotheses") or []:
         ids.update(hyp.get("supporting_evidence_ids") or [])
         ids.update(hyp.get("weakening_evidence_ids") or [])
+        ids.update(hyp.get("evidence_ids") or [])
     for unk in report.get("unknowns") or []:
         ids.update(unk.get("evidence_ids") or [])
     ids.discard(None)
     return ids
+
+
+def _catalog_payload(ident: str, item: dict):
+    kind = item.get("kind")
+    data = item.get("data") or {}
+    if ident == "evt:resolve" or kind == "resolve":
+        return data
+    if kind in {"http_check", "analysis", "tls"}:
+        return data
+    if kind == "metric_series":
+        return data.get("stats") or {}
+    return None
+
+
+def _scalars(data, prefix: str = "", depth: int = 0) -> list[tuple[str, object]]:
+    if depth > _MAX_DEPTH:
+        return []
+    if isinstance(data, dict):
+        found = []
+        for key, value in data.items():
+            if key in {"series", "preview"}:
+                continue
+            path = f"{prefix}.{key}" if prefix else str(key)
+            found.extend(_scalars(value, path, depth + 1))
+        return found
+    if isinstance(data, list):
+        if len(data) > _MAX_LIST:
+            return []
+        found = []
+        for index, value in enumerate(data):
+            path = f"{prefix}.{index}" if prefix else str(index)
+            found.extend(_scalars(value, path, depth + 1))
+        return found
+    if isinstance(data, bool) or isinstance(data, (int, float, str)):
+        if isinstance(data, float) and data != data:
+            return []
+        if isinstance(data, str) and len(data) > _MAX_TEXT:
+            return []
+        if prefix:
+            return [(prefix, data)]
+    return []
+
+
+def _assemble(parsed: dict, by_id: dict, evidence: dict, findings: list) -> dict:
+    observations = []
+    for obs in parsed.get("observations") or []:
+        facts = []
+        for fact_id_value in obs.get("fact_ids") or []:
+            row = by_id.get(fact_id_value)
+            if not row:
+                findings.append({"rule": "fact_ref", "detail": fact_id_value})
+                continue
+            facts.append({"evidence_id": row["evidence_id"], "path": row["path"], "value": row["value"]})
+        observations.append({
+            "id": obs.get("id"),
+            "text": obs.get("text"),
+            "evidence_ids": _known_ids(obs.get("evidence_ids") or [], evidence, findings),
+            "facts": facts,
+        })
+    hypotheses = []
+    for hyp in parsed.get("hypotheses") or []:
+        ids = _known_ids(hyp.get("evidence_ids") or [], evidence, findings)
+        status = hyp.get("status")
+        if status in {"supported", "ruled_out"} and not ids:
+            findings.append({"rule": "conclusion", "detail": hyp.get("id")})
+        supporting = ids if status in {"supported", "possible", "undetermined"} else []
+        weakening = ids if status in {"weakened", "ruled_out"} else []
+        hypotheses.append({
+            "id": hyp.get("id"),
+            "text": hyp.get("text"),
+            "layer": hyp.get("layer"),
+            "status": status,
+            "confidence": None,
+            "supporting_evidence_ids": supporting,
+            "weakening_evidence_ids": weakening,
+            "rationale": "",
+            "missing_info": [],
+        })
+    unknowns = []
+    for unknown in parsed.get("unknowns") or []:
+        unknowns.append({
+            "text": unknown.get("text"),
+            "code": unknown.get("code"),
+            "evidence_ids": _known_ids(unknown.get("evidence_ids") or [], evidence, findings),
+        })
+    return {
+        "summary": parsed.get("summary"),
+        "observations": observations,
+        "hypotheses": hypotheses,
+        "unknowns": unknowns,
+        "recommended_next_steps": parsed.get("recommended_next_steps") or [],
+    }
+
+
+def _known_ids(ids, evidence, findings) -> list[str]:
+    kept = []
+    for ident in ids:
+        if ident not in evidence:
+            findings.append({"rule": "evidence_ref", "detail": ident})
+            continue
+        kept.append(ident)
+    return kept
+
+
+def _redact(draft: dict, tokens: list[str]) -> dict:
+    if not isinstance(draft, dict):
+        return {}
+    text = json.dumps(draft)
+    for token in tokens:
+        if token:
+            text = text.replace(token, "[REDACTED]")
+    return json.loads(text)

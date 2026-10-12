@@ -14,7 +14,7 @@ from alertflow_agent.runtime.guards import before_lead, fresh_guard, note_tool
 from alertflow_agent.runtime.model import call_model
 from alertflow_agent.runtime.planner import validate_plan_diff
 from alertflow_agent.runtime.tools import clip, run_tool
-from alertflow_agent.runtime.verify import cited, verify
+from alertflow_agent.runtime.verify import build_catalog, cited, verify
 
 log = logging.getLogger("alertflow_agent")
 
@@ -50,6 +50,8 @@ class GraphState(TypedDict, total=False):
     skill_texts: dict
     diagnostic_calls: int
     prior_report: dict
+    fact_catalog: list
+    llm_report: dict
     replan_bad: bool
     cancelled: bool
     script_args: dict
@@ -490,11 +492,13 @@ class Runner:
         if now - state["started"] > self.settings.run_timeout_seconds + self.settings.report_grace_seconds:
             state["failure_reason"] = "report_timeout"
             return state
+        state["fact_catalog"] = build_catalog(state.get("evidence") or {})
         draft = call_model(self.model, "write_report", state, self.settings, self.store)
         if not draft:
             if not state.get("failure_reason"):
                 state["failure_reason"] = "llm_error"
             return state
+        state["llm_report"] = draft
         state["report"] = draft
         return state
 
@@ -502,7 +506,10 @@ class Runner:
         if state.get("failure_reason") or state.get("cancelled") or not state.get("report"):
             return state
         tokens = [self.settings.agent_webhook_token, self.settings.agent_api_token, self.settings.alertflow_agent_token, self.settings.llm_base_url, self.settings.llm_api_key]
-        result = verify(state["report"], state["evidence"], tokens, state["coverage"].get("gaps") or [])
+        result = verify(
+            state["report"], state["evidence"], tokens, state["coverage"].get("gaps") or [],
+            state.get("fact_catalog") or build_catalog(state.get("evidence") or {}),
+        )
         state["report"] = result["draft"]
         state["verification"] = {"passed": result["passed"], "findings": result["findings"], "warnings": result["warnings"]}
         if not result["passed"]:

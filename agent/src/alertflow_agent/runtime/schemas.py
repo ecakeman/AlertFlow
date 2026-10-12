@@ -66,11 +66,28 @@ class NextStep(BaseModel):
     rationale: str | None = None
 
 
-class ReportDraft(BaseModel):
+class LLMObservation(BaseModel):
+    id: str
+    text: str
+    fact_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class LLMHypothesis(BaseModel):
+    id: str
+    text: str
+    layer: Layer
+    status: Literal["supported", "possible", "weakened", "ruled_out", "undetermined"]
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class LLMReport(BaseModel):
+    """What the model returns. Paths and values stay in the fact catalog."""
+
     model_config = ConfigDict(extra="ignore")
     summary: str
-    observations: list[Observation]
-    hypotheses: list[ReportHypothesis]
+    observations: list[LLMObservation]
+    hypotheses: list[LLMHypothesis]
     unknowns: list[UnknownItem] = Field(default_factory=list)
     recommended_next_steps: list[NextStep] = Field(default_factory=list)
 
@@ -78,6 +95,17 @@ class ReportDraft(BaseModel):
     @classmethod
     def clip_summary(cls, value: str) -> str:
         return value[:300]
+
+
+class ReportDraft(BaseModel):
+    """Persisted report. Facts are filled from the catalog, not from the model."""
+
+    model_config = ConfigDict(extra="ignore")
+    summary: str
+    observations: list[Observation]
+    hypotheses: list[ReportHypothesis]
+    unknowns: list[UnknownItem] = Field(default_factory=list)
+    recommended_next_steps: list[NextStep] = Field(default_factory=list)
 
 
 class SubagentResult(BaseModel):
@@ -96,6 +124,6 @@ SCHEMAS = {
     "initial_plan": PlanDraft,
     "replan": PlanDraft,
     "lead": LeadDecision,
-    "write_report": ReportDraft,
+    "write_report": LLMReport,
     "subagent": SubagentResult,
 }
