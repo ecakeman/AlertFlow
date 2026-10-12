@@ -4,6 +4,8 @@ import threading
 from alertflow_agent.config import Settings
 from alertflow_agent.db import MemoryStore, PostgresStore, ensure_database
 from alertflow_agent.integrations.alertflow import AlertFlowClient
+from alertflow_agent.integrations.embeddings import EmbedClient, RerankClient
+from alertflow_agent.memory_store import InMemoryMemoryRepo, MemoryRepo
 from alertflow_agent.runtime.graph import Runner
 from alertflow_agent.runtime.llm import OpenAIModel, ScriptedModel
 
@@ -23,7 +25,13 @@ def build(settings: Settings | None = None):
         store = MemoryStore()
     model = OpenAIModel(settings) if settings.llm_api_key else ScriptedModel()
     client = AlertFlowClient(settings.alertflow_base_url, settings.alertflow_agent_token)
-    runner = Runner(settings, store, client, model, checkpointer=checkpoint[0] if checkpoint else None)
+    memory = None
+    if settings.memory_enabled:
+        memory = MemoryRepo(settings.agent_database_url) if settings.agent_database_url else InMemoryMemoryRepo()
+    embed = EmbedClient(settings.embed_base_url, settings.embed_api_key, settings.embed_model, settings.embed_dim)
+    rerank = RerankClient(settings.rerank_base_url, settings.rerank_api_key, settings.rerank_model, settings.rerank_style)
+    runner = Runner(settings, store, client, model, checkpointer=checkpoint[0] if checkpoint else None,
+                    memory=memory, embed=embed, rerank=rerank)
     return settings, store, runner, checkpoint
 
 

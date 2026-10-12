@@ -2,6 +2,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+# 结论用**同一份** schema：报告里模型产出的 conclusion 与写进长期记忆的 conclusion
+# 是同一个模型，避免"两处各写一份、慢慢跑偏"。
+from alertflow_agent.schemas.memory import Conclusion
+
 
 Layer = Literal["probe", "network_dns", "tls", "app_internal", "dependency", "unknown"]
 
@@ -87,6 +91,7 @@ class LLMReport(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
     summary: str
+    conclusion: Conclusion | None = None
     observations: list[LLMObservation]
     hypotheses: list[LLMHypothesis]
     unknowns: list[UnknownItem] = Field(default_factory=list)
@@ -103,6 +108,7 @@ class ReportDraft(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
     summary: str
+    conclusion: Conclusion | None = None
     observations: list[Observation]
     hypotheses: list[ReportHypothesis]
     unknowns: list[UnknownItem] = Field(default_factory=list)

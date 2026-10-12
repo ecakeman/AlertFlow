@@ -48,6 +48,9 @@ class GraphState(TypedDict, total=False):
     source_error: str
     source_status: dict
     skill_texts: dict
+    prior: dict          # 检索到的既往上下文（结构化）
+    prior_block: str     # 渲染给模型的既往上下文文本
+    memory: dict         # remember 的写入结果
     diagnostic_calls: int
     prior_report: dict
     fact_catalog: list
@@ -77,17 +80,75 @@ def _evidence(state, ident, source, kind, summary, data, limitations=None):
 
 
 class Runner:
-    def __init__(self, settings, store, alertflow, model, checkpointer=None) -> None:
+    def __init__(self, settings, store, alertflow, model, checkpointer=None, memory=None, embed=None, rerank=None) -> None:
         self.settings = settings
         self.store = store
         self.alertflow = alertflow
         self.model = model
+        self.memory = memory      # 长期记忆仓储（None → 记忆关闭）
+        self.embed = embed        # 嵌入客户端（None / 未配置 → 不做向量召回）
+        self.rerank = rerank      # 重排客户端（None / 未配置 → 退回向量序）
         self.graph = self._graph(checkpointer)
+
+    def _refresh_runtime_config(self) -> None:
+        """每 run 拉一次 AlertFlow 侧配置（模型端点/密钥/记忆开关）。
+
+        这样在 UI 里改配置立刻生效，不用重建容器。拉不到就沿用本地 env——
+        **配置来源是"增强"，不是"依赖"**。
+        """
+        try:
+            cfg = self.alertflow.runtime_config()
+        except Exception:
+            return
+        if not isinstance(cfg, dict) or not cfg:
+            return
+        from alertflow_agent.integrations.embeddings import EmbedClient, RerankClient
+        from alertflow_agent.runtime.llm import OpenAIModel
+
+        s = self.settings
+        llm = cfg.get("llm") or {}
+        if llm.get("base_url"):
+            s.llm_base_url = llm["base_url"]
+        if llm.get("api_key"):
+            s.llm_api_key = llm["api_key"]
+        if llm.get("model"):
+            s.llm_model = llm["model"]
+        embed = cfg.get("embed") or {}
+        if embed.get("base_url"):
+            s.embed_base_url = embed["base_url"]
+        if embed.get("api_key"):
+            s.embed_api_key = embed["api_key"]
+        if embed.get("model"):
+            s.embed_model = embed["model"]
+        if embed.get("dim"):
+            s.embed_dim = int(embed["dim"])
+        rerank = cfg.get("rerank") or {}
+        if rerank.get("base_url"):
+            s.rerank_base_url = rerank["base_url"]
+        if rerank.get("api_key"):
+            s.rerank_api_key = rerank["api_key"]
+        if rerank.get("model"):
+            s.rerank_model = rerank["model"]
+        if rerank.get("style"):
+            s.rerank_style = rerank["style"]
+        if "memory_enabled" in cfg:
+            s.memory_enabled = bool(cfg["memory_enabled"])
+        if cfg.get("context_budget_tokens"):
+            s.context_budget_tokens = int(cfg["context_budget_tokens"])
+
+        self.embed = EmbedClient(s.embed_base_url, s.embed_api_key, s.embed_model, s.embed_dim)
+        self.rerank = RerankClient(s.rerank_base_url, s.rerank_api_key, s.rerank_model, s.rerank_style)
+        if s.llm_api_key:
+            try:
+                self.model = OpenAIModel(s)
+            except Exception:  # noqa: BLE001 - keep the existing model on failure
+                pass
 
     def execute(self, run_id: str, resume: bool = False) -> dict:
         row = self.store.get(run_id)
         if not row or row.get("status") == "cancelled":
             return row or {}
+        self._refresh_runtime_config()
         try:
             if resume:
                 self._resume(row)
@@ -194,6 +255,7 @@ class Runner:
         graph.add_node("collect_alertflow", self.collect_alertflow)
         graph.add_node("collect_diagnostics", self.collect_diagnostics)
         graph.add_node("analyze", self.analyze)
+        graph.add_node("recall", self.recall)
         graph.add_node("select_skills", self.select_skills)
         graph.add_node("initial_plan", self.initial_plan)
         graph.add_node("lead_model", self.lead_model)
@@ -202,11 +264,13 @@ class Runner:
         graph.add_node("write_report", self.write_report)
         graph.add_node("verify", self.verify_node)
         graph.add_node("persist", self.persist)
+        graph.add_node("remember", self.remember)
         graph.set_entry_point("bootstrap")
         graph.add_edge("bootstrap", "collect_alertflow")
         graph.add_edge("collect_alertflow", "collect_diagnostics")
         graph.add_edge("collect_diagnostics", "analyze")
-        graph.add_edge("analyze", "select_skills")
+        graph.add_edge("analyze", "recall")
+        graph.add_edge("recall", "select_skills")
         graph.add_conditional_edges("select_skills", self.after_skills, {"plan": "initial_plan", "report": "write_report", "persist": "persist"})
         graph.add_conditional_edges("initial_plan", self.after_plan, {"lead": "lead_model", "persist": "persist"})
         graph.add_conditional_edges("lead_model", self.after_lead, {"tools": "lead_tools", "report": "write_report", "persist": "persist", "lead": "lead_model"})
@@ -214,7 +278,8 @@ class Runner:
         graph.add_conditional_edges("replan", self.after_replan, {"lead": "lead_model", "report": "write_report", "persist": "persist"})
         graph.add_edge("write_report", "verify")
         graph.add_conditional_edges("verify", self.after_verify, {"revise": "write_report", "persist": "persist"})
-        graph.add_edge("persist", END)
+        graph.add_edge("persist", "remember")
+        graph.add_edge("remember", END)
         if checkpointer is None:
             from langgraph.checkpoint.memory import MemorySaver
 
@@ -432,6 +497,7 @@ class Runner:
         else:
             result = clip(run_tool(name, args, state, self.settings, {
                 "alertflow": self.alertflow, "model": self.model, "store": self.store,
+                "memory": getattr(self, "memory", None),
             }))
             cache[signature] = result
         stop = note_tool(state["guard"], signature)
@@ -579,6 +645,55 @@ class Runner:
             replace_partial=fresh.get("stage") == "resume" and version == 1,
         )
         state["report"] = report
+        return state
+
+    def recall(self, state):
+        """在 analyze 之后、规划之前注入「既往上下文」。
+
+        放在这里的理由：此时本次症状与内部证据签名都已经抽出来了，才谈得上「像不像」。
+        检索失败不影响诊断——只记日志，state 里不放 prior_block。
+        """
+        if not getattr(self, "memory", None) or not self.settings.memory_enabled:
+            return state
+        try:
+            from alertflow_agent.runtime.recall import recall_prior, render_block
+
+            prior = recall_prior(state, self.memory, self.embed, getattr(self, "rerank", None), self.settings)
+            if prior:
+                state["prior"] = prior
+                block = render_block(prior)
+                if block:
+                    state["prior_block"] = block
+                # 落事件，供测试与排查看"这次到底命中了几条历史"。
+                self.store.append_event(state["run_id"], "memory.recalled", {
+                    "hits": len(prior.get("hits") or []),
+                    "same_key_hits": len(prior.get("same_key_hits") or []),
+                    "signature_key": prior.get("signature_key"),
+                    "has_profile": bool(prior.get("profile")),
+                    "embedded": bool(getattr(self.embed, "ready", False)),
+                })
+            else:
+                self.store.append_event(state["run_id"], "memory.recalled", {"hits": 0, "has_profile": False})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("recall failed: %s", type(exc).__name__)
+        return state
+
+    def remember(self, state):
+        """写在报告之后的**独立一步**：把这次诊断写进长期记忆。
+
+        刻意放在推理图之外、persist 之后：它失败绝不能影响报告，所以整段包在 try
+        里，出错只记日志。事件卡是确定性抽取（不额外调模型），只有向量化需要外部 API。
+        """
+        if not getattr(self, "memory", None) or not self.settings.memory_enabled:
+            return state
+        try:
+            from alertflow_agent.runtime.memory import remember as _remember
+
+            state["memory"] = _remember(state, state.get("report") or {}, self.memory, self.embed, self.settings)
+            self.store.append_event(state["run_id"], "memory.written", state["memory"])
+        except Exception as exc:  # noqa: BLE001 - 记忆失败不得影响诊断
+            log.warning("remember failed: %s", type(exc).__name__)
+            self.store.append_event(state["run_id"], "memory.failed", {"error": type(exc).__name__})
         return state
 
     def _prior_report(self, row: dict):

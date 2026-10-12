@@ -2,7 +2,7 @@ import json
 
 from alertflow_agent.runtime.schemas import LLMReport
 
-_MAX_FACTS = 60
+_MAX_FACTS = 100
 _MAX_DEPTH = 4
 _MAX_LIST = 8
 _MAX_TEXT = 200
@@ -25,12 +25,13 @@ def build_catalog(evidence: dict) -> list[dict]:
 
 
 def _priority(ident: str, evidence: dict) -> int:
-    kind = (evidence.get(ident) or {}).get("kind")
+    item = evidence.get(ident) or {}
+    kind = item.get("kind")
     if ident == "evt:resolve" or kind == "resolve":
         return 0
     if kind == "analysis":
         return 1
-    if kind == "tls":
+    if kind == "tls" or item.get("source_type") == "project_diagnostic":
         return 2
     if kind == "metric_series":
         return 3
@@ -84,8 +85,16 @@ def _catalog_payload(ident: str, item: dict):
     data = item.get("data") or {}
     if ident == "evt:resolve" or kind == "resolve":
         return data
-    if kind in {"http_check", "analysis", "tls"}:
+    if kind in {"http_check", "analysis", "tls", "service_info"}:
         return data
+    if item.get("source_type") == "project_diagnostic":
+        # Internal evidence (v2): identity and state plus the structured detail,
+        # so pool depths, dependency latencies, error counts, etc. become citable.
+        payload = {"name": data.get("name"), "status": data.get("status")}
+        detail = data.get("detail")
+        if isinstance(detail, dict):
+            payload.update(detail)
+        return payload
     return None
 
 
@@ -161,8 +170,23 @@ def _assemble(parsed: dict, by_id: dict, evidence: dict, findings: list) -> dict
             "code": unknown.get("code"),
             "evidence_ids": _known_ids(unknown.get("evidence_ids") or [], evidence, findings),
         })
+    conclusion = parsed.get("conclusion") or {}
+    if not isinstance(conclusion, dict) or not conclusion.get("text"):
+        # 兜底：模型没给结论时，取最强的一条 supported / possible 假设，
+        # 这样"结论"永远存在，且来源可解释。
+        best = next((h for h in hypotheses if h.get("status") == "supported"), None) or \
+            next((h for h in hypotheses if h.get("status") == "possible"), None)
+        conclusion = {
+            "text": (best or {}).get("text") or "证据不足以形成结论",
+            "layer": (best or {}).get("layer") or "unknown",
+            "confidence": "medium" if best and best.get("status") == "supported" else "low",
+            "evidence_ids": (best or {}).get("supporting_evidence_ids") or [],
+            "recurrence_of": None,
+        }
+    conclusion["evidence_ids"] = _known_ids(conclusion.get("evidence_ids") or [], evidence, findings)
     return {
         "summary": parsed.get("summary"),
+        "conclusion": conclusion,
         "observations": observations,
         "hypotheses": hypotheses,
         "unknowns": unknowns,

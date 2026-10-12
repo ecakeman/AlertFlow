@@ -38,6 +38,10 @@ class ScriptedModel:
             data = draft_from_state(state)
         return data, {"estimated": max(1, len(prompt) // 4), "source": "estimated"}
 
+    def answer(self, prompt: str = "") -> str:  # noqa: ARG002 - 打通链路用，不是真实分析
+        """脚本模型的会话回答：只用于无 LLM 时把链路走通。"""
+        return "（脚本模型）本次对话未接入真实模型；结论与假设请以诊断报告为准，此回答不构成新证据。"
+
 
 def _lead(state: dict) -> dict:
     script = state.get("script") or ["finish"]
@@ -106,6 +110,16 @@ class OpenAIModel:
             temperature=0,
             **extra,
         )
+
+    def answer(self, prompt: str = "") -> str:
+        """自由文本回答（不走结构化输出）——用于与人的排查对话。"""
+        message = self.chat.invoke(prompt)
+        content = getattr(message, "content", "")
+        if isinstance(content, list):
+            content = "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part) for part in content
+            )
+        return content if isinstance(content, str) else str(content)
 
     def complete(self, node: str, state: dict, prompt: str = "") -> tuple[dict, dict]:
         schema = SCHEMAS[node]

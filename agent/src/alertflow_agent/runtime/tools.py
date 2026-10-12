@@ -32,6 +32,8 @@ def run_tool(name: str, args: dict, state: dict, settings, clients: dict) -> dic
             return _incident(args, state, clients)
         if name == "get_project_diagnostics":
             return _diagnostics(args, state, settings)
+        if name == "recall_episode":
+            return _recall_episode(args, state, clients)
         if name == "load_skill":
             return _skill(args, state)
         if name == "delegate_history_review":
@@ -160,6 +162,13 @@ def _diagnostics(args, state, settings) -> dict:
         ident = f"diag:{item['kind']}:{item['name']}"
         if _add(state, ident, "project_diagnostic", ident, item["kind"], item.get("summary") or "", item, item.get("limitations") or [], replace=True):
             ids.append(ident)
+    service = result.get("service")
+    if service:
+        # v2: the target's own metadata (version, env, instance, uptime) is evidence too.
+        label = " ".join(str(service.get(key)) for key in ("name", "version") if service.get(key))
+        if _add(state, "diag:service", "project_diagnostic", "diag:service", "service_info",
+                label or "service", service, [], replace=True):
+            ids.append("diag:service")
     status = {"ok": "success", "empty": "empty", "partial": "partial", "stale": "partial"}.get(result["coverage"], "unavailable")
     if result["coverage"] == "invalid":
         status = "error"
@@ -217,6 +226,29 @@ def _delegate(args, state, settings, clients) -> dict:
     ident = f"rev:{n}"
     _add(state, ident, "subagent_review", ident, "history_review", review.get("suggestion") or "review", review, ["LLM summary, cite the underlying evidence"])
     return {"status": "success", "evidence_ids": [ident], "data": {"status": review.get("status")}}
+
+
+def _recall_episode(args, state, clients) -> dict:
+    """展开一条**已在既往上下文里出现过**的历史事件。
+
+    只允许展开被展示过的（在 state['prior']['hits'] 里）——边界清晰：模型不能凭一个
+    id 去翻任意历史，只能就"眼前这个问题"放大看当时那份判断。
+    """
+    raw = str(args.get("episode_id") or "").strip()
+    ident = raw if raw.startswith("ep:") else f"ep:{raw}"
+    prior = state.get("prior") or {}
+    allowed = {f"ep:{hit.get('id')}" for hit in (prior.get("hits") or [])}
+    if ident not in allowed:
+        return {"status": "invalid_request", "note": "episode not in prior context", "evidence_ids": []}
+    repo = clients.get("memory")
+    if repo is None:
+        return {"status": "unavailable", "note": "memory is not configured", "evidence_ids": []}
+    episode = repo.get_episode(ident[3:])
+    if not episode:
+        return {"status": "empty", "note": "episode not found", "evidence_ids": []}
+    _add(state, ident, "episodic_memory", ident, "episode", episode.get("card") or "", episode,
+         ["historical conclusion — verify against current evidence"])
+    return {"status": "success", "evidence_ids": [ident], "data": {"episode_id": ident}}
 
 
 def _add_checks(state, rows) -> list[str]:

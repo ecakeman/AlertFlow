@@ -132,6 +132,29 @@ def create_app(settings, store, runner) -> FastAPI:
             return JSONResponse({"error": "run cannot be cancelled"}, status_code=409)
         return {"run_id": run_id, "action": "cancelled"}
 
+    @app.post("/api/v1/incidents/{incident_id}/chat")
+    async def incident_chat(incident_id: int, request: Request):
+        """就某次事件与 Agent 对话：只读证据 + 报告 + 长期记忆，无工具、无写操作。"""
+        if not _api(request, settings):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid body"}, status_code=400)
+        question = str((body or {}).get("message") or "").strip()
+        if not question:
+            return JSONResponse({"error": "message is required"}, status_code=400)
+        history = (body or {}).get("history")
+        if not isinstance(history, list):
+            history = []
+
+        from alertflow_agent.runtime.chat import answer as chat_answer
+
+        return chat_answer(
+            settings, store, getattr(runner, "memory", None), getattr(runner, "model", None),
+            incident_id, history[-8:], question[:2000],
+        )
+
     return app
 
 

@@ -1,6 +1,7 @@
 import logging
 
-from alertflow_agent.runtime.context import build_context
+from alertflow_agent.runtime.context import build_context_report
+from alertflow_agent.runtime.context_window import estimate_tokens
 from alertflow_agent.runtime.llm import draft_from_state
 from alertflow_agent.runtime.schemas import SCHEMAS
 
@@ -18,13 +19,16 @@ def call_model(model, node: str, state: dict, settings, store):
         state["stop_reason"] = "budget_llm_calls" if guard["llm_calls"] >= settings.max_llm_calls else "budget_tokens"
         state["finished"] = True
         return None
-    prompt = build_context(node, state)
+    fit = build_context_report(node, state, settings.context_budget_tokens)
+    prompt = fit.text
+    # 上下文装配是可观测的：哪块被降级/丢弃、各占多少 token，都落成事件。
+    store.append_event(state["run_id"], "context.built", {"node": node, **fit.summary()})
     last = None
     for _ in range(2):
         try:
             data, usage = model.complete(node, state, prompt)
             parsed = SCHEMAS[node].model_validate(data).model_dump()
-            tokens = int(usage.get("total_tokens") or usage.get("estimated") or max(1, len(prompt) // 4))
+            tokens = int(usage.get("total_tokens") or usage.get("estimated") or estimate_tokens(prompt))
             guard["llm_calls"] += 1
             guard["tokens"] += tokens
             if usage.get("source") != "provider":
@@ -41,6 +45,12 @@ def call_model(model, node: str, state: dict, settings, store):
         except Exception as exc:
             last = exc
             log.warning("llm call failed", extra={"node": node})
+    # lead / subagent 的产出只决定"下一步做什么"，不该因为一次不合规输出就让整次运行失败：
+    # 退化为"结束调查"，报告照常产出（少的是额外取证，不是结论）。
+    if node in ("lead", "subagent"):
+        store.append_event(state["run_id"], "llm.degraded", {"node": node,
+                          "reason": type(last).__name__ if last else "error"})
+        return {"tool": "finish_investigation", "args": {"note": "model output invalid; finishing"}, "text": ""}
     state["failure_reason"] = "llm_error"
     detail = str(last) if last else "error"
     for secret in (settings.llm_api_key, settings.agent_api_token, settings.agent_webhook_token, settings.alertflow_agent_token):

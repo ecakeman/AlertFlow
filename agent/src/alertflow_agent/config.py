@@ -25,6 +25,24 @@ class Settings(BaseSettings):
     max_subagent_runs: int = 2
     subagent_max_rounds: int = 4
     max_total_tokens: int = 150_000
+    # 单次 prompt 的上下文预算（与 run 级累计预算 max_total_tokens 是两件事）
+    context_budget_tokens: int = 24_000
     run_timeout_seconds: int = 300
     report_grace_seconds: int = 90
     max_concurrent_runs: int = 2
+
+    # --- 长期记忆（事件簿 / 服务档案）---
+    memory_enabled: bool = True
+    memory_lookback_days: int = 30          # 预筛窗口
+    memory_recall_k: int = 20               # 向量召回条数
+    memory_rerank_k: int = 5                # rerank 后保留条数
+    # 嵌入（OpenAI 兼容）：POST {base}/embeddings
+    embed_base_url: str = ""
+    embed_api_key: str = ""
+    embed_model: str = ""
+    embed_dim: int = 1024                   # 必须与 schema.sql 的 vector(N) 一致
+    # 重排：style=dashscope 走阿里云原生 text-rerank；style=openai 走 {base}/rerank
+    rerank_base_url: str = ""
+    rerank_api_key: str = ""
+    rerank_model: str = ""
+    rerank_style: str = "dashscope"

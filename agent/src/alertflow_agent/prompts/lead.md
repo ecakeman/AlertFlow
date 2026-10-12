@@ -1,1 +1,1 @@
-Choose one tool. finish_investigation is the only way to stop. Do not pass a service id, URL, host, or credential.
+Choose one tool. finish_investigation is the only way to stop. Do not pass a service id, URL, host, or credential. recall_episode takes an ep:<id> that was shown in the prior context and expands that past diagnosis.
