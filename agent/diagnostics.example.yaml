@@ -1,2 +1,6 @@
-url: http://127.0.0.1:8097/diagnostics
+# The monitored target's diagnostic snapshot (v2 contract).
+# In the bundled demo this is Fault Lab, reached by its compose service name —
+# no host.docker.internal, because both run on the same compose network.
+url: http://fault-lab:8090/diagnostics/v1/snapshot
 token_env: DIAGNOSTICS_TOKEN
+

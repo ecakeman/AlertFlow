@@ -1,3 +1,9 @@
+-- Agent 运行库：一次诊断的运行为主体（runs / run_events / run_evidence / reports）
+-- 加长期记忆（episodes / service_profile / episode_corrections）。
+-- 全部 IF NOT EXISTS，可重复执行。向量扩展由 pgvector 镜像提供。
+
+CREATE EXTENSION IF NOT EXISTS vector;
+
 CREATE TABLE IF NOT EXISTS runs (
     id uuid PRIMARY KEY,
     dedupe_key text UNIQUE NOT NULL,
@@ -41,4 +47,62 @@ CREATE TABLE IF NOT EXISTS reports (
     report jsonb NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (run_id, version)
+);
+
+-- ============================================================================
+-- 长期记忆
+-- ============================================================================
+
+-- 事件簿：每次诊断落一条。symptom/signature/conclusion 是结构化的（写入前由
+-- 模型校验）；card 是规范化文本，专供嵌入与人工阅读；embedding 供向量召回。
+-- 去重键用 (service_id, target_endpoint, profile_key, incident_id) 三元组 + incident。
+CREATE TABLE IF NOT EXISTS episodes (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    service_id text NOT NULL,
+    target_endpoint text NOT NULL DEFAULT '',
+    profile_key text NOT NULL DEFAULT '',
+    incident_id bigint,
+    run_id uuid REFERENCES runs(id) ON DELETE SET NULL,
+    started_at timestamptz,
+    resolved_at timestamptz,
+    duration_s int,
+    severity text,
+    outcome text NOT NULL DEFAULT 'unknown',
+    symptom jsonb NOT NULL DEFAULT '{}'::jsonb,
+    signature jsonb NOT NULL DEFAULT '{}'::jsonb,
+    conclusion jsonb NOT NULL DEFAULT '{}'::jsonb,
+    evidence_ids text[] NOT NULL DEFAULT '{}',
+    card text NOT NULL DEFAULT '',
+    card_hash text NOT NULL DEFAULT '',
+    embedding vector(1024),
+    embed_model text NOT NULL DEFAULT '',
+    version int NOT NULL DEFAULT 1,
+    superseded_by uuid REFERENCES episodes(id) ON DELETE SET NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (service_id, target_endpoint, profile_key, incident_id)
+);
+
+-- 主检索轴是服务；hnsw 支持余弦近邻。
+CREATE INDEX IF NOT EXISTS episodes_service_started ON episodes (service_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS episodes_embedding ON episodes USING hnsw (embedding vector_cosine_ops);
+
+-- 服务档案：每服务一份，从事件簿派生。baseline 由原始数据统计，known_* 由事件聚合。
+CREATE TABLE IF NOT EXISTS service_profile (
+    service_id text PRIMARY KEY,
+    baseline jsonb NOT NULL DEFAULT '{}'::jsonb,
+    known_causes jsonb NOT NULL DEFAULT '[]'::jsonb,
+    known_patterns jsonb NOT NULL DEFAULT '[]'::jsonb,
+    episode_count int NOT NULL DEFAULT 0,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- 修正链：记忆会错，错的记忆必须能被改。每次改判留一条。
+CREATE TABLE IF NOT EXISTS episode_corrections (
+    id bigserial PRIMARY KEY,
+    episode_id uuid NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+    field text NOT NULL,
+    from_value jsonb,
+    to_value jsonb,
+    reason text,
+    created_at timestamptz NOT NULL DEFAULT now()
 );
