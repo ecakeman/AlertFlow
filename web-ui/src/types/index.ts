@@ -130,7 +130,7 @@ export interface ServiceMetrics extends Service {
 }
 
 export type IncidentStatus = 'ongoing' | 'resolved'
-export type IncidentSource = 'auto' | 'manual'
+export type IncidentSource = 'auto' | '手动'
 /**
  * `outage` is a real, trackable incident (subject to the one-ongoing-per-service
  * rule). `warning` is a momentary retry-recovery event — always already
@@ -227,12 +227,36 @@ export interface AppSettings {
     retryDelays: number[]
   }
   dashboard: {
-    /** Look-back window (hours) for the dashboard's "Warning" tile. */
+    /** Look-back window (hours) for the dashboard's "警告" tile. */
     warningPeriodHours: number
-    /** Service ids left out of the "Avg uptime" tile's average. */
+    /** Service ids left out of the "平均在线率" tile's average. */
     uptimeExcludedServices: string[]
   }
+  /** 诊断 Agent 与检索模型（密钥在读取时被打码；留空＝保持不变）。 */
+  agent: AgentSettings
   configDir: string
+}
+
+/** 一个模型端点（OpenAI 兼容；rerank 另有 style）。 */
+export interface ModelEndpointSettings {
+  baseUrl: string
+  /** 密钥：读取时是打码串，提交时留空/打码＝沿用已存的值。 */
+  apiKey: string
+  model: string
+  style?: string
+  dim?: number
+}
+
+export interface AgentSettings {
+  baseUrl: string
+  apiToken: string
+  llm: ModelEndpointSettings
+  embed: ModelEndpointSettings
+  rerank: ModelEndpointSettings
+  /** 长期记忆开关（事件簿 + 向量召回）。 */
+  memoryEnabled: boolean
+  /** 单次 prompt 的上下文预算（token）；0 表示用 Agent 默认值。 */
+  contextBudgetTokens: number
 }
 
 /** Runtime aggregates the dashboard's stat tiles need beyond GET /api/services. */
@@ -240,3 +264,62 @@ export interface DashboardStats {
   /** Distinct services that logged a warning within `settings.dashboard.warningPeriodHours`. */
   warningServiceCount: number
 }
+
+/** 结论：一句话定性 + 归属层 + 置信度 + 依据；recurrenceOf 指向历史事件（ep:<id>）。 */
+export interface AgentConclusion {
+  text: string
+  layer?: string
+  confidence?: 'low' | 'medium' | 'high'
+  evidence_ids?: string[]
+  recurrence_of?: string | null
+}
+
+/** 分层假设：layer 表示原因归属（dependency/app_internal/probe/…），status 表示证据强度。 */
+export interface AgentHypothesis {
+  id: string
+  text: string
+  layer?: string
+  status: string
+  confidence?: string | null
+  supporting_evidence_ids?: string[]
+  weakening_evidence_ids?: string[]
+  rationale?: string
+}
+
+/** The diagnostic agent's report for an incident, proxied by AlertFlow from the
+ *  agent service (GET /api/incidents/:id/agent-report). */
+export interface AgentReport {
+  available: boolean
+  /** Why there is no report: 'no agent run for this incident' | 'agent not configured' | 'agent unreachable'. */
+  reason?: string
+  runId?: string
+  status?: string
+  eventType?: string
+  createdAt?: string
+  usage?: { mode?: string; tokens?: number; llm_calls?: number; tool_calls?: number }
+  report?: {
+    version?: number
+    summary?: string
+    conclusion?: AgentConclusion
+    hypotheses?: AgentHypothesis[]
+    coverage?: {
+      check_samples?: number
+      diagnostic_source?: string
+      gaps?: string[]
+      from?: number
+      to?: number
+    }
+    unknowns?: { code: string; text: string; evidence_ids?: string[] }[]
+    recommended_next_steps?: { text: string; rationale?: string }[]
+  }
+  evidence?: Record<string, unknown>
+}
+
+/** 与 Agent 的排查会话：一轮问答。 */
+export interface AgentChatMessage {
+  role: 'user' | 'agent'
+  text: string
+  at?: string
+  evidence_ids?: string[]
+}
+

@@ -192,7 +192,69 @@ type settingsDTO struct {
 	Theme             string               `json:"theme"`
 	Check             checkSettingsDTO     `json:"check"`
 	Dashboard         dashboardSettingsDTO `json:"dashboard"`
+	Agent             agentSettingsDTO     `json:"agent"`
 	ConfigDir         string               `json:"configDir"`
+}
+
+// agentSettingsDTO configures the diagnostic Agent and its retrieval models.
+// Secret fields are masked on read; on write an empty (or masked) value keeps
+// the stored one — same convention as integrations.
+type agentSettingsDTO struct {
+	BaseURL       string           `json:"baseUrl"`
+	APIToken      string           `json:"apiToken"`
+	LLM           modelEndpointDTO `json:"llm"`
+	Embed         modelEndpointDTO `json:"embed"`
+	Rerank        modelEndpointDTO `json:"rerank"`
+	MemoryEnabled bool             `json:"memoryEnabled"`
+	// ContextBudgetTokens caps a single prompt's context.
+	ContextBudgetTokens int `json:"contextBudgetTokens"`
+}
+
+type modelEndpointDTO struct {
+	BaseURL string `json:"baseUrl"`
+	APIKey  string `json:"apiKey"`
+	Model   string `json:"model"`
+	Style   string `json:"style,omitempty"`
+	Dim     int    `json:"dim,omitempty"`
+}
+
+// secretMask marks a stored secret in responses without echoing it.
+const secretMask = "********"
+
+func maskSecret(value string) string {
+	if value == "" {
+		return ""
+	}
+	return secretMask
+}
+
+func keepSecret(next, current string) string {
+	if next == "" || next == secretMask {
+		return current
+	}
+	return next
+}
+
+func toAgentSettingsDTO(a config.AgentSettings) agentSettingsDTO {
+	memory := true
+	if a.MemoryEnabled != nil {
+		memory = *a.MemoryEnabled
+	}
+	return agentSettingsDTO{
+		BaseURL:  a.BaseURL,
+		APIToken: maskSecret(a.APIToken),
+		LLM: modelEndpointDTO{
+			BaseURL: a.LLM.BaseURL, APIKey: maskSecret(a.LLM.APIKey), Model: a.LLM.Model,
+		},
+		Embed: modelEndpointDTO{
+			BaseURL: a.Embed.BaseURL, APIKey: maskSecret(a.Embed.APIKey), Model: a.Embed.Model, Dim: a.Embed.Dim,
+		},
+		Rerank: modelEndpointDTO{
+			BaseURL: a.Rerank.BaseURL, APIKey: maskSecret(a.Rerank.APIKey), Model: a.Rerank.Model, Style: a.Rerank.Style,
+		},
+		MemoryEnabled: memory,
+		ContextBudgetTokens: a.ContextBudgetTokens,
+	}
 }
 
 type checkSettingsDTO struct {
@@ -234,8 +296,28 @@ func toSettingsDTO(c *config.Config, dir string) settingsDTO {
 			WarningPeriodHours:     c.Settings.Dashboard.WarningPeriodHours,
 			UptimeExcludedServices: excluded,
 		},
+		Agent:     toAgentSettingsDTO(c.Settings.Agent),
 		ConfigDir: dir,
 	}
+}
+
+// mergeEndpoint applies a partial update: empty fields keep their stored value.
+func mergeEndpoint(next modelEndpointDTO, current config.ModelEndpoint) config.ModelEndpoint {
+	out := current
+	if next.BaseURL != "" {
+		out.BaseURL = next.BaseURL
+	}
+	out.APIKey = keepSecret(next.APIKey, current.APIKey)
+	if next.Model != "" {
+		out.Model = next.Model
+	}
+	if next.Style != "" {
+		out.Style = next.Style
+	}
+	if next.Dim > 0 {
+		out.Dim = next.Dim
+	}
+	return out
 }
 
 type userDTO struct {

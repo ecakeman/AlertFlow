@@ -43,6 +43,10 @@ type Server struct {
 	webhookToken string
 	// agentToken is ALERTFLOW_AGENT_TOKEN. Empty means the internal agent routes reject every request.
 	agentToken string
+	// agentBaseURL/agentAPIToken point at the diagnostic agent's API (AGENT_BASE_URL /
+	// AGENT_API_TOKEN) so the UI can read its reports; empty disables that.
+	agentBaseURL  string
+	agentAPIToken string
 	webhooks   *loginLimiter
 	stop         chan struct{}
 }
@@ -75,6 +79,8 @@ func New(configDir string) (*Server, error) {
 		logins:       newLoginLimiter(),
 		webhookToken: os.Getenv("ALERTFLOW_WEBHOOK_TOKEN"),
 		agentToken:   os.Getenv("ALERTFLOW_AGENT_TOKEN"),
+		agentBaseURL:  os.Getenv("AGENT_BASE_URL"),
+		agentAPIToken: os.Getenv("AGENT_API_TOKEN"),
 		webhooks:     newWebhookLimiter(),
 		stop:         make(chan struct{}),
 	}
@@ -128,6 +134,8 @@ func (s *Server) routes() {
 	app.Get("/api/incidents/:id", auth, s.handleGetIncident)
 	app.Post("/api/incidents/:id/comments", auth, s.handleAddIncidentComment)
 	app.Get("/api/incidents/:id/deliveries", auth, s.handleListDeliveries)
+	app.Get("/api/incidents/:id/agent-report", auth, s.handleIncidentAgentReport)
+	app.Post("/api/incidents/:id/agent-chat", auth, s.handleIncidentAgentChat)
 
 	// Admin only.
 	app.Post("/api/services", auth, admin, s.handleCreateService)
@@ -158,6 +166,7 @@ func (s *Server) routes() {
 	app.Post("/api/deliveries/:id/retry", auth, admin, s.handleRetryDelivery)
 
 	agent := s.agentAuth
+	app.Get("/internal/agent/v1/config", agent, s.handleAgentRuntimeConfig)
 	app.Get("/internal/agent/v1/incidents", agent, s.handleListIncidents)
 	app.Get("/internal/agent/v1/incidents/:id", agent, s.handleGetIncident)
 	app.Get("/internal/agent/v1/services/:id/metrics", agent, s.handleServiceMetrics)

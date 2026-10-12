@@ -52,6 +52,21 @@ func (s *Server) handleUpdateSettings(c fiber.Ctx) error {
 		if in.Dashboard.UptimeExcludedServices != nil {
 			cfg.Settings.Dashboard.UptimeExcludedServices = append([]string(nil), in.Dashboard.UptimeExcludedServices...)
 		}
+		// Agent config. Secrets keep their stored value when omitted or masked,
+		// so the UI can round-trip a masked form without wiping keys.
+		agent := &cfg.Settings.Agent
+		if in.Agent.BaseURL != "" {
+			agent.BaseURL = in.Agent.BaseURL
+		}
+		agent.APIToken = keepSecret(in.Agent.APIToken, agent.APIToken)
+		agent.LLM = mergeEndpoint(in.Agent.LLM, agent.LLM)
+		agent.Embed = mergeEndpoint(in.Agent.Embed, agent.Embed)
+		agent.Rerank = mergeEndpoint(in.Agent.Rerank, agent.Rerank)
+		memoryEnabled := in.Agent.MemoryEnabled
+		agent.MemoryEnabled = &memoryEnabled
+		if in.Agent.ContextBudgetTokens > 0 {
+			agent.ContextBudgetTokens = in.Agent.ContextBudgetTokens
+		}
 		return nil
 	})
 	if err != nil {

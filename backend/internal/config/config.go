@@ -73,6 +73,36 @@ type Settings struct {
 	Theme             string            `yaml:"theme"`
 	Check             CheckDefaults     `yaml:"check"`
 	Dashboard         DashboardSettings `yaml:"dashboard"`
+	Agent             AgentSettings     `yaml:"agent,omitempty"`
+}
+
+// AgentSettings configures the diagnostic Agent and the retrieval models it uses.
+//
+// These live in config.yaml (inside the config volume) so they are editable from
+// the UI rather than hand-edited in .env. AlertFlow never calls these endpoints
+// itself — it only hands the config to the Agent, which fetches it once per run.
+type AgentSettings struct {
+	BaseURL  string         `yaml:"base_url,omitempty"`  // Agent API base, e.g. http://agent:8000
+	APIToken string         `yaml:"api_token,omitempty"` // Agent API bearer (AGENT_API_TOKEN)
+	LLM      ModelEndpoint  `yaml:"llm,omitempty"`
+	Embed    ModelEndpoint  `yaml:"embed,omitempty"`
+	Rerank   ModelEndpoint  `yaml:"rerank,omitempty"`
+	// MemoryEnabled toggles the Agent's long-term memory (episodic recall).
+	MemoryEnabled *bool `yaml:"memory_enabled,omitempty"`
+	// ContextBudgetTokens caps a single prompt's context (separate from the
+	// run-level token budget). 0 leaves the Agent's own default.
+	ContextBudgetTokens int `yaml:"context_budget_tokens,omitempty"`
+}
+
+// ModelEndpoint is one OpenAI-compatible (or DashScope) model endpoint.
+type ModelEndpoint struct {
+	BaseURL string `yaml:"base_url,omitempty"`
+	APIKey  string `yaml:"api_key,omitempty"`
+	Model   string `yaml:"model,omitempty"`
+	// Style selects the request shape for rerank ("dashscope" or "openai").
+	Style string `yaml:"style,omitempty"`
+	// Dim is the embedding dimension; it must match the vector column.
+	Dim int `yaml:"dim,omitempty"`
 }
 
 // DashboardSettings controls the two configurable stat tiles on the main

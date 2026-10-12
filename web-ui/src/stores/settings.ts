@@ -8,6 +8,15 @@ const defaults: AppSettings = {
   theme: 'dark',
   check: { defaultInterval: 30, timeout: 10, retentionDays: 7, retryAttempts: 3, retryDelays: [1, 5, 10] },
   dashboard: { warningPeriodHours: 24, uptimeExcludedServices: [] },
+  agent: {
+    baseUrl: '',
+    apiToken: '',
+    llm: { baseUrl: '', apiKey: '', model: '' },
+    embed: { baseUrl: '', apiKey: '', model: '', dim: 1024 },
+    rerank: { baseUrl: '', apiKey: '', model: '', style: 'dashscope' },
+    memoryEnabled: true,
+    contextBudgetTokens: 0,
+  },
   configDir: '',
 }
 

@@ -9,11 +9,13 @@ import type {
   IncidentComment,
   Delivery,
   IncidentDetail,
+  AgentReport,
   Integration,
   IntegrationType,
   User,
   UserRole,
   AppSettings,
+  AgentSettings,
   DashboardStats,
   WidgetMode,
   ChartType,
@@ -97,6 +99,9 @@ export const api = {
   dashboardStats: () => request<DashboardStats>('GET', '/api/dashboard/stats'),
   getSettings: () => request<AppSettings>('GET', '/api/settings'),
   updateSettings: (settings: AppSettings) => request<AppSettings>('PUT', '/api/settings', settings),
+  /** 只提交 agent 段（后端按字段合并；密钥留空＝保持不变）。 */
+  updateAgentSettings: (agent: AgentSettings) =>
+    request<AppSettings>('PUT', '/api/settings', { agent }),
   setConfigPath: (path: string) =>
     request<AppSettings>('PUT', '/api/settings/config-path', { path }),
   listUsers: () => request<User[]>('GET', '/api/users'),
@@ -132,6 +137,14 @@ export const api = {
     request<IncidentComment>('POST', `/api/incidents/${id}/comments`, { body }),
   listDeliveries: (incidentId: number) =>
     request<Delivery[]>('GET', `/api/incidents/${incidentId}/deliveries`),
+  agentReport: (id: number) =>
+    request<AgentReport>('GET', `/api/incidents/${id}/agent-report`),
+  /** 与诊断 Agent 就本次事件对话（只读工具 + 记忆，服务端代理）。 */
+  agentChat: (id: number, message: string, history: { role: string; text: string }[] = []) =>
+    request<{ reply: string; evidence_ids?: string[] }>('POST', `/api/incidents/${id}/agent-chat`, {
+      message,
+      history,
+    }),
   retryDelivery: (id: number) => request<{ ok: boolean }>('POST', `/api/deliveries/${id}/retry`),
 
   // Integrations.
