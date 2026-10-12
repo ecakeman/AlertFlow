@@ -27,8 +27,9 @@ def test_tool_params_and_new_evidence():
     assert state["evidence"]["met:24h"]["data"]["series"][0]["avgLatency"] == 20
     from alertflow_agent.runtime.context import build_context
     prompt = build_context("lead", {"event": state["event"], "evidence": state["evidence"], "guard": state["guard"], "messages": []})
-    assert "20" in prompt
-    assert "min_avg_latency" in prompt
+    assert "points from" in prompt
+    assert "ana:latency" in prompt
+    assert "min_avg_latency" not in prompt
     history = run_tool("get_check_history", {"from": 2, "to": 1, "limit": 10}, state, Settings(), clients)
     assert history["status"] == "invalid_request"
     limited = run_tool("get_check_history", {"limit": 501}, state, Settings(), clients)

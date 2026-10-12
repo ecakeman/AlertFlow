@@ -86,8 +86,6 @@ def _catalog_payload(ident: str, item: dict):
         return data
     if kind in {"http_check", "analysis", "tls"}:
         return data
-    if kind == "metric_series":
-        return data.get("stats") or {}
     return None
 
 
@@ -138,12 +136,13 @@ def _assemble(parsed: dict, by_id: dict, evidence: dict, findings: list) -> dict
         })
     hypotheses = []
     for hyp in parsed.get("hypotheses") or []:
-        ids = _known_ids(hyp.get("evidence_ids") or [], evidence, findings)
+        supporting = _known_ids(hyp.get("supporting_evidence_ids") or [], evidence, findings)
+        weakening = _known_ids(hyp.get("weakening_evidence_ids") or [], evidence, findings)
         status = hyp.get("status")
-        if status in {"supported", "ruled_out"} and not ids:
+        if status == "supported" and not supporting:
             findings.append({"rule": "conclusion", "detail": hyp.get("id")})
-        supporting = ids if status in {"supported", "possible", "undetermined"} else []
-        weakening = ids if status in {"weakened", "ruled_out"} else []
+        if status in {"weakened", "ruled_out"} and not weakening:
+            findings.append({"rule": "conclusion", "detail": hyp.get("id")})
         hypotheses.append({
             "id": hyp.get("id"),
             "text": hyp.get("text"),

@@ -236,7 +236,8 @@ summary(≤300 字)                               schema_version="v1", run_id, i
 observations[]  {id,text,fact_ids[],           observations[].facts[{evidence_id,path,value}]
                  evidence_ids[]}                    path 与 value 只来自 FactCatalog
 hypotheses[]    {id,text,layer,status,         supporting_evidence_ids / weakening_evidence_ids
-                 evidence_ids[]}                    status: completed / partial
+                 supporting_evidence_ids[],             status: completed / partial
+                 weakening_evidence_ids[]}
 unknowns[]      {text,code?,evidence_ids[]}    unknowns 里补上未覆盖的 gap
 recommended_next_steps[] {text,rationale?}     verification{passed,findings[]}
                                                coverage、usage、completed_at
@@ -245,7 +246,7 @@ recommended_next_steps[] {text,rationale?}     verification{passed,findings[]}
 - `layer` ∈ `probe`（外部探测看到了什么）/ `network_dns` / `tls` / `app_internal` / `dependency` / `unknown`。
 - `status` ∈ `supported / possible / weakened / ruled_out / undetermined`；**没有 `confirmed`**，V1 不输出"已确认根因"。
 - `confidence` ∈ `low / medium / high / null`，不输出百分比。
-- 落库 `facts` 仍是 `{evidence_id,path,value}`。模型只引用 `fact_id`。`supported`、`possible`、`undetermined` 的证据写入 supporting；`weakened`、`ruled_out` 写入 weakening。
+- 落库 `facts` 仍是 `{evidence_id,path,value}`。模型只引用 `fact_id`。支持与削弱引用由模型分列，系统不按 status 改写方向。
 - `report.status`：`completed` = 正常走完且校验通过；`partial` = 被护栏 / 预算终止，或修订用尽后仍未通过校验。**"根因无法确定"是正常结果，用假设状态表达，不算 partial。**
 
 ### 4.7 校验器
@@ -257,9 +258,9 @@ recommended_next_steps[] {text,rationale?}     verification{passed,findings[]}
 | schema | 输出能解析为 LLMReport | 修订 |
 | fact_ref | `fact_id` 在本轮 FactCatalog 中；组装后的 path 与 value 与目录一致 | 修订 |
 | evidence_ref | `evidence_id` 在本轮 Registry 中 | 修订 |
-| conclusion | `supported` 与 `ruled_out` 至少有一条证据；`possible` 与 `undetermined` 可以没有 | 修订 |
+| conclusion | `supported` 至少一条支持引用；`weakened` 与 `ruled_out` 至少一条削弱引用；`possible` 与 `undetermined` 可以没有 | 修订 |
 
-FactCatalog 只收标量：检查、分析结果、指标 `stats`、TLS、`evt:resolve`。跳过长列表和时间序列点。按恢复、分析、TLS、指标、检查的顺序，再按 `(evidence_id, path)` 排序，最多 60 条，`fact_id` 形如 `f3`。覆盖缺口仍补进 `unknowns`，不因此判失败。Token 在落库前替换成 `[REDACTED]`，不记为校验失败。
+FactCatalog 只收标量：检查、分析结果、TLS、`evt:resolve`。延迟统计来自 `ana:latency`，不展开 `met:*` 的序列。跳过长列表和时间序列点。按恢复、分析、TLS、检查的顺序，再按 `(evidence_id, path)` 排序，最多 60 条，`fact_id` 形如 `f3`。覆盖缺口仍补进 `unknowns`，不因此判失败。Token 在落库前替换成 `[REDACTED]`，不记为校验失败。
 
 校验失败后再次进入 `write_report` 时，上下文包含上一版 LLM 报告、findings、事实目录，以及只改这些失败项的要求。次数仍是 `MAX_REVISIONS`。用尽后保存报告和 findings，Run 为 `partial`。
 
@@ -379,7 +380,7 @@ guard{lead_rounds,llm_calls,tool_calls,replans,subagent_runs,tokens,plain_text_s
 8. 不要为了凑步骤而调用工具或委派 Subagent。
 9. 不输出百分比置信度；用 low / medium / high 并说明依据。
 
-报告 prompt 另含：只引用事实目录里的 `fact_id`，不要填写 path 或 value；`supported` 和 `ruled_out` 至少有一条证据；不要输出 `coverage / verification / usage`。
+报告 prompt 另含：只引用事实目录里的 `fact_id`，不要填写 path 或 value；支持与削弱引用分列；`supported` 至少一条支持引用，`weakened` 和 `ruled_out` 至少一条削弱引用；不要输出 `coverage / verification / usage`。
 
 ### 4.13 Agent 库表与 API
 

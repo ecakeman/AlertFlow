@@ -1,3 +1,4 @@
+from alertflow_agent.runtime.context import build_context
 from alertflow_agent.runtime.verify import build_catalog, fact_id, verify
 
 
@@ -16,7 +17,8 @@ def _draft(catalog, **hyp):
             "facts": [{"evidence_id": "ana:status@0", "path": "invented", "value": 9}],
         }],
         "hypotheses": [{
-            "id": "h1", "text": "probe", "layer": "probe", "status": "possible", "evidence_ids": ["ana:status@0"],
+            "id": "h1", "text": "probe", "layer": "probe", "status": "possible",
+            "supporting_evidence_ids": ["ana:status@0"], "weakening_evidence_ids": [],
             **hyp,
         }],
         "unknowns": [],
@@ -53,24 +55,58 @@ def test_possible_and_undetermined_do_not_need_evidence():
     for status in ("possible", "undetermined"):
         draft = _draft(catalog)
         draft["hypotheses"][0]["status"] = status
-        draft["hypotheses"][0]["evidence_ids"] = []
+        draft["hypotheses"][0]["supporting_evidence_ids"] = []
+        draft["hypotheses"][0]["weakening_evidence_ids"] = []
         assert verify(draft, evidence, [], catalog=catalog)["passed"]
 
 
-def test_supported_and_ruled_out_need_evidence():
+def test_strong_conclusions_need_the_matching_direction():
     evidence = _evidence()
     catalog = build_catalog(evidence)
-    for status in ("supported", "ruled_out"):
+    for status, field in (
+        ("supported", "supporting_evidence_ids"),
+        ("weakened", "weakening_evidence_ids"),
+        ("ruled_out", "weakening_evidence_ids"),
+    ):
         draft = _draft(catalog)
         draft["hypotheses"][0]["status"] = status
-        draft["hypotheses"][0]["evidence_ids"] = []
+        draft["hypotheses"][0]["supporting_evidence_ids"] = []
+        draft["hypotheses"][0]["weakening_evidence_ids"] = []
         result = verify(draft, evidence, [], catalog=catalog)
         assert any(item["rule"] == "conclusion" for item in result["findings"])
-    cited = _draft(catalog)
-    cited["hypotheses"][0]["status"] = "ruled_out"
-    passed = verify(cited, evidence, [], catalog=catalog)
-    assert passed["passed"]
-    assert passed["draft"]["hypotheses"][0]["weakening_evidence_ids"] == ["ana:status@0"]
+        draft["hypotheses"][0][field] = ["ana:status@0"]
+        assert verify(draft, evidence, [], catalog=catalog)["passed"]
+
+
+def test_one_hypothesis_keeps_both_directions():
+    evidence = {
+        "ana:status@0": {"kind": "analysis", "data": {"offline": {"n": 2}}},
+        "evt:resolve": {"kind": "resolve", "data": {"duration_s": 30}},
+    }
+    catalog = build_catalog(evidence)
+    draft = _draft(catalog)
+    draft["hypotheses"][0]["status"] = "weakened"
+    draft["hypotheses"][0]["supporting_evidence_ids"] = ["ana:status@0"]
+    draft["hypotheses"][0]["weakening_evidence_ids"] = ["evt:resolve"]
+    result = verify(draft, evidence, [], catalog=catalog)
+    hyp = result["draft"]["hypotheses"][0]
+    assert result["passed"]
+    assert hyp["supporting_evidence_ids"] == ["ana:status@0"]
+    assert hyp["weakening_evidence_ids"] == ["evt:resolve"]
+
+
+def test_metric_series_is_not_a_fact_source():
+    evidence = {
+        "met:24h": {"kind": "metric_series", "data": {"series": [{"ts": 1, "avg_latency": 9}, {"ts": 2, "avg_latency": 11}]}},
+        "ana:latency@0": {"kind": "analysis", "data": {"recent": {"median_ms": 40}, "median_ratio": 1.5}},
+    }
+    catalog = build_catalog(evidence)
+    assert fact_id(catalog, "met:24h", "series.0.avg_latency") is None
+    assert fact_id(catalog, "ana:latency@0", "recent.median_ms")
+    prompt = build_context("write_report", {"event": {}, "evidence": evidence, "fact_catalog": catalog, "messages": []})
+    assert "2 points from 1 to 2" in prompt
+    assert "Latency statistics are in ana:latency" in prompt
+    assert "{}" not in prompt.split("met:24h", 1)[1][:80]
 
 
 def test_redaction_is_applied_without_a_finding():

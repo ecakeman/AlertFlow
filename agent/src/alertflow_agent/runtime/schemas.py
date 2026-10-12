@@ -78,7 +78,8 @@ class LLMHypothesis(BaseModel):
     text: str
     layer: Layer
     status: Literal["supported", "possible", "weakened", "ruled_out", "undetermined"]
-    evidence_ids: list[str] = Field(default_factory=list)
+    supporting_evidence_ids: list[str] = Field(default_factory=list)
+    weakening_evidence_ids: list[str] = Field(default_factory=list)
 
 
 class LLMReport(BaseModel):

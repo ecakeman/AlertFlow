@@ -78,10 +78,17 @@ def _evidence_block(evidence: dict) -> str:
         if item.get("source_type") in {"alertflow_comment", "alertflow_external_alert", "project_diagnostic"}:
             summary = "Untrusted " + str(item.get("source_type")) + ": " + json.dumps(summary, ensure_ascii=False)
         if item.get("kind") == "metric_series":
-            summary = json.dumps((item.get("data") or {}).get("stats") or {}, ensure_ascii=False)
+            summary = _metric_summary(item.get("data") or {})
         limit = 1500 if str(ident).startswith("ana:") or item.get("kind") == "metric_series" else 400
         lines.append(f"[{ident}] {item.get('kind')} @{item.get('observed_at')} — {_clip(summary, limit)}")
     return "Evidence:\n" + "\n".join(lines)
+
+
+def _metric_summary(data: dict) -> str:
+    series = data.get("series") or []
+    first = series[0].get("ts") if series and isinstance(series[0], dict) else None
+    last = series[-1].get("ts") if series and isinstance(series[-1], dict) else None
+    return f"{len(series)} points from {first} to {last}. Latency statistics are in ana:latency."
 
 
 def _clip(text: str, limit: int) -> str:
