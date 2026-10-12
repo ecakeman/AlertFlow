@@ -6,6 +6,23 @@ import yaml
 
 _STATUSES = {"healthy", "degraded", "unhealthy", "unknown"}
 _ORDER = ("not_configured", "unavailable", "invalid", "partial", "stale", "empty", "ok")
+# v1 and v2 are both accepted; v2 adds internal-state kinds and structured detail.
+_SCHEMA_VERSIONS = {"v1", "v2"}
+_KINDS = {
+    "component_health",
+    "dependency_health",
+    "recent_error",
+    # v2 — internal state
+    "resource",
+    "saturation",
+    "recent_change",
+    "slow_operation",
+}
+_STATUS_KINDS = {"component_health", "dependency_health", "resource"}
+_SUMMARY_KINDS = {"recent_error", "recent_change", "slow_operation"}
+_MAX_DETAIL_KEYS = 24
+_MAX_DETAIL_DEPTH = 3
+_MAX_DETAIL_TEXT = 400
 
 
 def load_config(path: str) -> dict | None:
@@ -27,11 +44,11 @@ def _http_url(value) -> bool:
 
 def fetch(cfg: dict | None, since: str, until: str, event_time: datetime | None = None) -> dict:
     if not cfg:
-        return {"coverage": "not_configured", "items": [], "dropped": 0}
+        return {"coverage": "not_configured", "items": [], "dropped": 0, "service": None}
     if cfg.get("_invalid"):
-        return {"coverage": "invalid", "items": [], "dropped": 0}
+        return {"coverage": "invalid", "items": [], "dropped": 0, "service": None}
     if since == until:
-        return {"coverage": "invalid", "items": [], "dropped": 0}
+        return {"coverage": "invalid", "items": [], "dropped": 0, "service": None}
     headers = {}
     token_env = cfg.get("token_env")
     if token_env and os.environ.get(token_env):
@@ -45,23 +62,27 @@ def fetch(cfg: dict | None, since: str, until: str, event_time: datetime | None 
             follow_redirects=False,
         )
     except Exception:
-        return {"coverage": "unavailable", "items": [], "dropped": 0}
+        return {"coverage": "unavailable", "items": [], "dropped": 0, "service": None}
     if 300 <= response.status_code < 400:
-        return {"coverage": "invalid", "items": [], "dropped": 0}
+        return {"coverage": "invalid", "items": [], "dropped": 0, "service": None}
     if response.status_code < 200 or response.status_code >= 300:
-        return {"coverage": "unavailable", "items": [], "dropped": 0}
+        return {"coverage": "unavailable", "items": [], "dropped": 0, "service": None}
     if len(response.content) > 512 * 1024:
-        return {"coverage": "invalid", "items": [], "dropped": 0}
+        return {"coverage": "invalid", "items": [], "dropped": 0, "service": None}
     try:
         body = response.json()
     except Exception:
-        return {"coverage": "invalid", "items": [], "dropped": 0}
+        return {"coverage": "invalid", "items": [], "dropped": 0, "service": None}
     return validate(body, event_time)
 
 
 def validate(body, event_time: datetime | None = None) -> dict:
-    if not isinstance(body, dict) or body.get("schema_version") != "v1" or not isinstance(body.get("items"), list):
-        return {"coverage": "invalid", "items": [], "dropped": 0}
+    if (
+        not isinstance(body, dict)
+        or body.get("schema_version") not in _SCHEMA_VERSIONS
+        or not isinstance(body.get("items"), list)
+    ):
+        return {"coverage": "invalid", "items": [], "dropped": 0, "service": None}
     items = body["items"]
     kept = []
     dropped = max(0, len(items) - 100)
@@ -85,11 +106,52 @@ def validate(body, event_time: datetime | None = None) -> dict:
         coverage = "empty"
     else:
         coverage = "ok"
-    return {"coverage": _pick(coverage), "items": kept, "dropped": dropped}
+    return {"coverage": _pick(coverage), "items": kept, "dropped": dropped, "service": _service(body.get("service"))}
+
+
+def _service(raw) -> dict | None:
+    if not isinstance(raw, dict) or not raw.get("name"):
+        return None
+    allowed = ("name", "version", "env", "instance", "region", "uptime_s", "build")
+    clean = {k: raw[k] for k in allowed if k in raw and isinstance(raw[k], (str, int, dict))}
+    return clean or None
 
 
 def _pick(coverage: str) -> str:
     return coverage if coverage in _ORDER else "invalid"
+
+
+def _clean_detail(value, depth: int = 0):
+    """Bound a kind-specific ``detail`` object; returns None when unusable."""
+    if depth > _MAX_DETAIL_DEPTH:
+        return None
+    if isinstance(value, dict):
+        if len(value) > _MAX_DETAIL_KEYS:
+            return None
+        out = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or len(key) > 64:
+                return None
+            cleaned = _clean_detail(item, depth + 1)
+            if cleaned is None:
+                return None
+            out[key] = cleaned
+        return out
+    if isinstance(value, list):
+        if len(value) > _MAX_DETAIL_KEYS:
+            return None
+        out = []
+        for item in value:
+            cleaned = _clean_detail(item, depth + 1)
+            if cleaned is None:
+                return None
+            out.append(cleaned)
+        return out
+    if isinstance(value, str):
+        return value if len(value) <= _MAX_DETAIL_TEXT else value[:_MAX_DETAIL_TEXT]
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    return None
 
 
 def _item(item) -> dict | None:
@@ -97,18 +159,22 @@ def _item(item) -> dict | None:
         return None
     kind = item.get("kind")
     observed = _aware(item.get("observed_at"))
-    if observed is None or kind not in {"component_health", "dependency_health", "recent_error"}:
+    if observed is None or kind not in _KINDS or not item.get("name"):
         return None
-    if kind == "recent_error":
-        if not item.get("name") or not item.get("summary"):
-            return None
-    else:
-        if not item.get("name") or item.get("status") not in _STATUSES:
-            return None
+    if kind in _STATUS_KINDS and item.get("status") not in _STATUSES:
+        return None
+    if kind in _SUMMARY_KINDS and not item.get("summary"):
+        return None
     attributes = item.get("attributes") or {}
     if not isinstance(attributes, dict) or len(attributes) > 20:
         return None
     if any(len(str(value)) > 200 for value in attributes.values()):
+        return None
+    detail = item.get("detail") or {}
+    if not isinstance(detail, dict):
+        return None
+    detail = _clean_detail(detail)
+    if detail is None:
         return None
     cleaned = {
         "kind": kind,
@@ -116,6 +182,7 @@ def _item(item) -> dict | None:
         "observed_at": observed.isoformat(),
         "summary": str(item.get("summary") or item.get("status") or ""),
         "status": item.get("status"),
+        "detail": detail,
         "attributes": {str(key): str(value)[:200] for key, value in attributes.items()},
     }
     return cleaned
