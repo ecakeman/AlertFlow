@@ -122,6 +122,11 @@ services:
     environment:
       ALERTFLOW_ROLE: delivery
       ALERTFLOW_DATABASE_URL: postgres://alertflow:${POSTGRES_PASSWORD:-alertflow}@postgres:5432/alertflow?sslmode=disable
+      # 诊断上下文要用当前的服务定义组装，所以 delivery 必须读得到 config.yaml。
+      # 只读挂载：配置只由 server 写。
+      ALERTFLOW_CONFIG_DIR: /config
+    volumes:
+      - alertflow-config:/config:ro
     depends_on:
       postgres:
         condition: service_healthy

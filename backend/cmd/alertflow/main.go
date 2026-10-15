@@ -8,17 +8,21 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
 
 	"github.com/ecakeman/alertflow/internal/api"
+	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/consume"
 	"github.com/ecakeman/alertflow/internal/db"
 	"github.com/ecakeman/alertflow/internal/deliver"
 	"github.com/ecakeman/alertflow/internal/logger"
+	"github.com/ecakeman/alertflow/internal/notify"
 	"github.com/ecakeman/alertflow/internal/publish"
+	"github.com/ecakeman/alertflow/internal/query"
 	"github.com/ecakeman/alertflow/internal/state"
 )
 
@@ -117,6 +121,7 @@ func runConsumer() {
 func runDelivery() {
 	database := openRoleDB()
 	defer database.Close()
+	registerAgentSender(database, resolveConfigDir(""))
 	worker := deliver.New(database, "")
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -125,6 +130,50 @@ func runDelivery() {
 		slog.Error("delivery worker stopped", "error", err)
 		os.Exit(1)
 	}
+}
+
+// registerAgentSender installs the Agent-only channel for this process.
+//
+// The diagnostic context must describe the services as they are configured
+// now, so the sender reloads config.yaml on every delivery instead of freezing
+// whatever was on disk at startup. A reload that fails (the file is being
+// replaced atomically mid-read) falls back to the last good snapshot, which is
+// stale by at most one config edit rather than for the life of the process.
+func registerAgentSender(database *db.DB, dir string) {
+	if err := config.EnsureDir(dir); err != nil {
+		slog.Error("agent delivery: config directory unusable", "dir", dir, "error", err)
+		return
+	}
+	current, err := config.Load(dir)
+	if err != nil {
+		slog.Warn("agent delivery: config not readable yet; context will be sparse", "dir", dir, "error", err)
+		current = &config.Config{}
+	}
+	live := &liveConfig{dir: dir, current: current}
+	notify.Register(notify.AgentWebhookType, notify.AgentSender{
+		Q: query.New(database, live.get),
+	})
+	slog.Info("agent delivery: registered", "type", notify.AgentWebhookType, "config_dir", dir)
+}
+
+// liveConfig serves the newest readable config snapshot.
+type liveConfig struct {
+	dir string
+
+	mu      sync.RWMutex
+	current *config.Config
+}
+
+func (c *liveConfig) get() *config.Config {
+	if loaded, err := config.Load(c.dir); err == nil {
+		c.mu.Lock()
+		c.current = loaded
+		c.mu.Unlock()
+		return loaded
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.current
 }
 
 func openRoleDB() *db.DB {

@@ -350,7 +350,7 @@ func TestDisabledIntegrationIsLeftUntilEnabled(t *testing.T) {
 	database := db.OpenTest(t)
 	channel := mustChannel(t, database, "hook", "http://example.invalid", false)
 	mustOffline(t, database, "svc")
-	if _, err := database.UpdateIntegration(channel.ID, channel.Name, false, false, channel.Config); err != nil {
+	if _, err := database.UpdateIntegration(channel.ID, channel.Type, channel.Name, false, false, channel.Config); err != nil {
 		t.Fatal(err)
 	}
 	base := time.Now().Unix()
@@ -358,7 +358,7 @@ func TestDisabledIntegrationIsLeftUntilEnabled(t *testing.T) {
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("disabled claim = %+v, %v", rows, err)
 	}
-	if _, err := database.UpdateIntegration(channel.ID, channel.Name, true, false, channel.Config); err != nil {
+	if _, err := database.UpdateIntegration(channel.ID, channel.Type, channel.Name, true, false, channel.Config); err != nil {
 		t.Fatal(err)
 	}
 	rows, err = database.ClaimDeliveries("worker", base, base+15, 1, MaxAttempts)
@@ -589,7 +589,7 @@ func TestDeliveryErrorHidesSecrets(t *testing.T) {
 	if !strings.Contains(storedError(t, database, ev), "dial") && !strings.Contains(storedError(t, database, ev), "connect") {
 		t.Fatalf("refused error lost its cause: %s", storedError(t, database, ev))
 	}
-	if _, err := database.UpdateIntegration(refusedChannel.ID, refusedChannel.Name, false, false, refusedChannel.Config); err != nil {
+	if _, err := database.UpdateIntegration(refusedChannel.ID, refusedChannel.Type, refusedChannel.Name, false, false, refusedChannel.Config); err != nil {
 		t.Fatal(err)
 	}
 

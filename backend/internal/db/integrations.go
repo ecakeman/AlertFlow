@@ -50,11 +50,16 @@ func (db *DB) CreateIntegration(kind, name string, enabled, notifyWarnings bool,
 	return db.GetIntegration(id)
 }
 
-// UpdateIntegration replaces a channel's name, flags and config.
-func (db *DB) UpdateIntegration(id int64, name string, enabled, notifyWarnings bool, config json.RawMessage) (*Integration, error) {
+// UpdateIntegration replaces a channel's type, name, flags and config.
+//
+// The type is part of the update because a channel can be promoted in place —
+// a generic webhook becoming the Agent's dedicated agent_webhook. Doing it in
+// one statement keeps the channel's id, its delivery history and its pending
+// tasks, which a delete-and-recreate would throw away.
+func (db *DB) UpdateIntegration(id int64, kind, name string, enabled, notifyWarnings bool, config json.RawMessage) (*Integration, error) {
 	if _, err := db.Exec(
-		`UPDATE integrations SET name = $1, enabled = $2, notify_warnings = $3, config = $4, updated_at = $5 WHERE id = $6`,
-		name, enabled, notifyWarnings, jsonText(config), time.Now().Unix(), id); err != nil {
+		`UPDATE integrations SET type = $1, name = $2, enabled = $3, notify_warnings = $4, config = $5, updated_at = $6 WHERE id = $7`,
+		kind, name, enabled, notifyWarnings, jsonText(config), time.Now().Unix(), id); err != nil {
 		return nil, err
 	}
 	return db.GetIntegration(id)

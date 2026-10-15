@@ -109,6 +109,10 @@ func New(configDir string) (*Server, error) {
 	s.queries.Cache = redisCache
 	s.redis = redisCache
 	s.sched.OnCheckStored = s.invalidateCachedReads
+	// The Agent-only channel needs the read layer, so it cannot be built by
+	// notify.init(). Registering it here also makes the "send test" button work
+	// for an agent_webhook integration.
+	notify.Register(notify.AgentWebhookType, notify.AgentSender{Q: s.queries})
 	if redisCache.Enabled() {
 		if err := redisCache.Ping(context.Background()); err != nil {
 			slog.Warn("redis: not reachable, serving without a read cache", "error", err)

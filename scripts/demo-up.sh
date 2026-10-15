@@ -60,14 +60,28 @@ else
   echo "    服务 target → $SERVICE_URL（已创建）"
 fi
 
-# Webhook 集成：指向 Agent（Bearer 用 AGENT_WEBHOOK_TOKEN）
+# Agent 诊断集成：类型必须是 agent_webhook。
+# 诊断上下文只会发给这个专用类型；通用 webhook/slack/email 的载荷保持原样。
+# 已存在的（旧版是普通 webhook）会被原地改类型，URL 与认证头一律保留 —— 改类型
+# 走 PUT，不重建，所以连接的 id 与投递历史都留着。
 INTEGRATIONS="$(curl -s -b "$COOKIE_JAR" "$AF/api/integrations")"
-if echo "$INTEGRATIONS" | grep -q '"name":"agent"'; then
-  echo "    集成 agent 已存在（如需改令牌请在设置页更新）"
-else
+agent_seg="$(printf '%s' "$INTEGRATIONS" | tr '{' '\n' | grep '"name":"agent"' | head -1 || true)"
+agent_id="$(printf '%s' "$agent_seg" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)"
+agent_type="$(printf '%s' "$agent_seg" | grep -o '"type":"[a-z_]*"' | head -1 | cut -d'"' -f4)"
+
+if [ -z "$agent_id" ]; then
   curl -s -o /dev/null -b "$COOKIE_JAR" -X POST "$AF/api/integrations" -H 'Content-Type: application/json' \
-    -d "{\"type\":\"webhook\",\"name\":\"agent\",\"enabled\":true,\"notifyWarnings\":false,\"config\":{\"url\":\"$WEBHOOK_URL\",\"method\":\"POST\",\"headers\":{\"Authorization\":\"Bearer ${AGENT_WEBHOOK_TOKEN:-}\"},\"bodyTemplate\":\"\"}}"
-  echo "    集成 agent → $WEBHOOK_URL（已创建）"
+    -d "{\"type\":\"agent_webhook\",\"name\":\"agent\",\"enabled\":true,\"notifyWarnings\":false,\"config\":{\"url\":\"$WEBHOOK_URL\",\"method\":\"POST\",\"headers\":{\"Authorization\":\"Bearer ${AGENT_WEBHOOK_TOKEN:-}\"}}}"
+  echo "    集成 agent → $WEBHOOK_URL（已创建，类型 agent_webhook）"
+else
+  # config 留空 = 一个字段都不动；接口会按 agent_webhook 的要求重新校验。
+  curl -s -o /dev/null -b "$COOKIE_JAR" -X PUT "$AF/api/integrations/$agent_id" -H 'Content-Type: application/json' \
+    -d '{"type":"agent_webhook","name":"agent","enabled":true,"notifyWarnings":false,"config":{}}'
+  if [ "$agent_type" = "agent_webhook" ]; then
+    echo "    集成 agent（#$agent_id）已是 agent_webhook（已置为启用）"
+  else
+    echo "    集成 agent（#$agent_id）已从 $agent_type 迁移为 agent_webhook（URL 与认证头保留）"
+  fi
 fi
 
 echo "==> 4/4 完成"

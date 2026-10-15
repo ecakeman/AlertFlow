@@ -16,18 +16,20 @@ import (
 // secretFields lists the sensitive keys per integration type. These are never
 // echoed back in responses and are preserved on update when omitted.
 var secretFields = map[string][]string{
-	"telegram": {"botToken"},
-	"slack":    {"webhookUrl"},
-	"email":    {"password"},
-	"webhook":  {},
+	"telegram":              {"botToken"},
+	"slack":                 {"webhookUrl"},
+	"email":                 {"password"},
+	"webhook":               {},
+	notify.AgentWebhookType: {},
 }
 
 // requiredFields lists keys that must be present and non-empty per type.
 var requiredFields = map[string][]string{
-	"telegram": {"botToken", "chatId"},
-	"slack":    {"webhookUrl"},
-	"email":    {"host", "from", "to"},
-	"webhook":  {"url"},
+	"telegram":              {"botToken", "chatId"},
+	"slack":                 {"webhookUrl"},
+	"email":                 {"host", "from", "to"},
+	"webhook":               {"url"},
+	notify.AgentWebhookType: {"url"},
 }
 
 type integrationInput struct {
@@ -82,7 +84,8 @@ func (s *Server) handleCreateIntegration(c fiber.Ctx) error {
 }
 
 // PUT /api/integrations/:id → update a channel. Omitted/blank secret fields keep
-// their stored value.
+// their stored value. The type may be changed; validation and secret handling
+// then follow the NEW type, since that is what the config will belong to.
 func (s *Server) handleUpdateIntegration(c fiber.Ctx) error {
 	existing, err := s.integrationParam(c)
 	if err != nil {
@@ -96,9 +99,16 @@ func (s *Server) handleUpdateIntegration(c fiber.Ctx) error {
 	if name == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "name is required")
 	}
+	kind := existing.Type
+	if t := strings.TrimSpace(in.Type); t != "" && t != kind {
+		if _, ok := requiredFields[t]; !ok {
+			return fiber.NewError(fiber.StatusBadRequest, "unknown integration type")
+		}
+		kind = t
+	}
 	merged := map[string]any{}
 	_ = json.Unmarshal(existing.Config, &merged)
-	secret := secretSet(existing.Type)
+	secret := secretSet(kind)
 	for k, v := range in.Config {
 		if secret[k] {
 			if str, ok := v.(string); ok && str == "" {
@@ -107,11 +117,11 @@ func (s *Server) handleUpdateIntegration(c fiber.Ctx) error {
 		}
 		merged[k] = v
 	}
-	if err := validateIntegrationConfig(existing.Type, merged); err != nil {
+	if err := validateIntegrationConfig(kind, merged); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 	raw, _ := json.Marshal(merged)
-	updated, err := s.conn().UpdateIntegration(existing.ID, name, in.Enabled, in.NotifyWarnings, raw)
+	updated, err := s.conn().UpdateIntegration(existing.ID, kind, name, in.Enabled, in.NotifyWarnings, raw)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "could not update integration")
 	}

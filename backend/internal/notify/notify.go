@@ -104,6 +104,12 @@ var senders = map[string]Sender{}
 
 func register(kind string, s Sender) { senders[kind] = s }
 
+// Register installs a sender for a channel type. Senders that need runtime
+// dependencies (the Agent webhook needs the query layer) cannot be built by
+// init(), so the process that owns those dependencies registers them at
+// startup instead.
+func Register(kind string, s Sender) { register(kind, s) }
+
 // SenderFor returns the registered sender for a channel type, if any.
 func SenderFor(kind string) (Sender, bool) {
 	s, ok := senders[kind]
