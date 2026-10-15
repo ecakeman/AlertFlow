@@ -14,9 +14,12 @@
 package query
 
 import (
+	"context"
 	"errors"
+	"strconv"
 	"time"
 
+	"github.com/ecakeman/alertflow/internal/cache"
 	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/db"
 )
@@ -49,6 +52,9 @@ type ConfigSource func() *config.Config
 type Service struct {
 	DB  *db.DB
 	Cfg ConfigSource
+	// Cache is the optional read cache. Nil (no REDIS_URL) disables caching:
+	// every cache call degrades to a direct PostgreSQL read.
+	Cache *cache.Store
 }
 
 // New builds a query service. cfg may be nil in tests that only exercise
@@ -147,11 +153,30 @@ type MetricsResult struct {
 // did not run. The aggregates, uptime windows and TLS snapshot degrade to zero
 // values on error, matching the long-standing behaviour of the endpoint — a
 // missing sparkline must not blank the whole page.
-func (s *Service) ServiceMetrics(id, rangeKey string, now time.Time) (*MetricsResult, error) {
+//
+// The composed result is cached (keyed on the service, the range and a
+// quantised "now"), because it is the most expensive read the API serves.
+func (s *Service) ServiceMetrics(ctx context.Context, id, rangeKey string, now time.Time) (*MetricsResult, error) {
 	svc := s.Find(id)
 	if svc == nil {
 		return nil, ErrServiceNotFound
 	}
+	live := *svc
+	gen := s.Cache.Generation(ctx, metricsScope(id))
+	key := cache.Key(cacheVersion, "metrics", gen, id, rangeKey, keyTime(now))
+	res, err := cache.Remember(ctx, s.Cache, key, metricsCacheTTL, func(ctx context.Context) (*MetricsResult, error) {
+		return s.loadServiceMetrics(live, id, rangeKey, now)
+	})
+	if err != nil {
+		return nil, err
+	}
+	// The service definition is config, not data: always serve the live one so
+	// an edit is never hidden behind a cached copy.
+	res.Service = live
+	return res, nil
+}
+
+func (s *Service) loadServiceMetrics(svc config.Service, id, rangeKey string, now time.Time) (*MetricsResult, error) {
 	since := RangeSince(now, rangeKey)
 	bucket := ChooseBucket(now.Unix()-since.Unix(), svc.Check.Interval)
 
@@ -171,7 +196,7 @@ func (s *Service) ServiceMetrics(id, rangeKey string, now time.Time) (*MetricsRe
 	tlsInfo, _ := s.DB.GetServiceTLS(id)
 
 	return &MetricsResult{
-		Service:       *svc,
+		Service:       svc,
 		Status:        metrics[id],
 		Series:        series,
 		From:          since.Unix(),
@@ -192,7 +217,10 @@ type CheckPage struct {
 // CheckHistory returns a service's stored cycles, newest first. beforeID is an
 // exclusive keyset cursor (0 for the first page). limit is clamped into
 // [1, MaxCheckPageSize]; a non-positive limit means the default page size.
-func (s *Service) CheckHistory(id string, beforeID int64, limit int) (*CheckPage, error) {
+//
+// Cached per (service, before, limit). The key carries every parameter that
+// changes the page, so two different pages can never share an entry.
+func (s *Service) CheckHistory(ctx context.Context, id string, beforeID int64, limit int) (*CheckPage, error) {
 	if s.Find(id) == nil {
 		return nil, ErrServiceNotFound
 	}
@@ -202,6 +230,15 @@ func (s *Service) CheckHistory(id string, beforeID int64, limit int) (*CheckPage
 	if limit > MaxCheckPageSize {
 		limit = MaxCheckPageSize
 	}
+	gen := s.Cache.Generation(ctx, checksScope(id))
+	key := cache.Key(cacheVersion, "checks", gen, id,
+		strconv.FormatInt(beforeID, 10), strconv.Itoa(limit))
+	return cache.Remember(ctx, s.Cache, key, checksCacheTTL, func(ctx context.Context) (*CheckPage, error) {
+		return s.loadCheckHistory(id, beforeID, limit)
+	})
+}
+
+func (s *Service) loadCheckHistory(id string, beforeID int64, limit int) (*CheckPage, error) {
 	rows, err := s.DB.ListChecks(id, beforeID, limit)
 	if err != nil {
 		return nil, err
@@ -288,11 +325,18 @@ func (s *Service) IncidentDetail(id int64, now time.Time) (*IncidentDetail, erro
 // what the service list already carries — currently the count of distinct
 // services that logged a warning cycle inside settings.dashboard.
 // warning_period_hours.
-func (s *Service) DashboardStats(now time.Time) (int, error) {
+//
+// Cached under one invalidation scope, since it aggregates across services, and
+// keyed on the configured window plus a quantised "now".
+func (s *Service) DashboardStats(ctx context.Context, now time.Time) (int, error) {
 	hours := s.config().Settings.Dashboard.WarningPeriodHours
 	if hours < 1 {
 		hours = 1
 	}
-	since := now.Add(-time.Duration(hours) * time.Hour).Unix()
-	return s.DB.WarningServiceCountSince(since)
+	gen := s.Cache.Generation(ctx, dashScope)
+	key := cache.Key(cacheVersion, "dash", gen, strconv.Itoa(hours), keyTime(now))
+	return cache.Remember(ctx, s.Cache, key, dashboardCacheTTL, func(ctx context.Context) (int, error) {
+		since := now.Add(-time.Duration(hours) * time.Hour).Unix()
+		return s.DB.WarningServiceCountSince(since)
+	})
 }

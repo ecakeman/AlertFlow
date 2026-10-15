@@ -4,6 +4,7 @@
 package api
 
 import (
+	"context"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	recovermw "github.com/gofiber/fiber/v3/middleware/recover"
 
+	"github.com/ecakeman/alertflow/internal/cache"
 	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/db"
 	"github.com/ecakeman/alertflow/internal/monitor"
@@ -27,6 +29,10 @@ import (
 
 // maxBodyBytes bounds request bodies (config imports can be up to ~20 MiB).
 const maxBodyBytes = 32 << 20
+
+// cacheInvalidateTimeout bounds the post-check cache invalidation, which runs
+// on the scheduler goroutine and must not delay the next check.
+const cacheInvalidateTimeout = 2 * time.Second
 
 // Server holds all runtime state and serves the HTTP API + embedded SPA.
 type Server struct {
@@ -40,6 +46,8 @@ type Server struct {
 	// diagnostic-context builder both go through it; it holds a live config
 	// accessor rather than a snapshot.
 	queries *query.Service
+	// redis is the read cache shared with queries. Nil when REDIS_URL is unset.
+	redis *cache.Store
 
 	app    *fiber.App
 	webFS  fs.FS
@@ -89,7 +97,25 @@ func New(configDir string) (*Server, error) {
 		webhooks:      newWebhookLimiter(),
 		stop:          make(chan struct{}),
 	}
+	// The read cache is an enhancement: an unusable REDIS_URL is logged and the
+	// API serves straight from PostgreSQL rather than refusing to start.
+	redisCache, cacheErr := cache.New(os.Getenv("REDIS_URL"))
+	if cacheErr != nil {
+		slog.Error("redis: ignoring unusable REDIS_URL; serving without a read cache", "error", cacheErr)
+		redisCache = nil
+	}
+
 	s.queries = query.New(database, s.config)
+	s.queries.Cache = redisCache
+	s.redis = redisCache
+	s.sched.OnCheckStored = s.invalidateCachedReads
+	if redisCache.Enabled() {
+		if err := redisCache.Ping(context.Background()); err != nil {
+			slog.Warn("redis: not reachable, serving without a read cache", "error", err)
+		} else {
+			slog.Info("redis: read cache enabled")
+		}
+	}
 	s.app = fiber.New(fiber.Config{
 		AppName:      "AlertFlow",
 		BodyLimit:    maxBodyBytes,
@@ -111,6 +137,7 @@ func (s *Server) App() *fiber.App { return s.app }
 func (s *Server) Close() {
 	close(s.stop)
 	s.scheduler().Stop()
+	_ = s.redis.Close()
 	s.mu.Lock()
 	s.database.Close()
 	s.mu.Unlock()
@@ -262,6 +289,18 @@ func (s *Server) conn() *db.DB {
 // query returns the read-composition service. It is immutable once built (it
 // reads the live config through a function), so it needs no lock of its own.
 func (s *Server) query() *query.Service { return s.queries }
+
+// invalidateCachedReads retires the cached views a freshly stored check can
+// change. It runs on the scheduler goroutine right after the check row commits,
+// so it is bounded and never blocks the next cycle.
+func (s *Server) invalidateCachedReads(serviceID string) {
+	if s.queries == nil || s.queries.Cache == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cacheInvalidateTimeout)
+	defer cancel()
+	s.queries.InvalidateService(ctx, serviceID)
+}
 
 func (s *Server) scheduler() *monitor.Scheduler {
 	s.mu.RLock()

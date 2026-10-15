@@ -19,6 +19,20 @@ services:
       timeout: 5s
       retries: 10
 
+  # Redis 只承担「可降级的读缓存」：指标聚合、检查分页、Dashboard 统计。
+  # 不落盘（纯缓存，重启即空），不参与 Incident 状态，也不做任务队列。
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
   alertflow:
     build:
       context: .
@@ -40,10 +54,13 @@ services:
       ALERTFLOW_AGENT_TOKEN: ${ALERTFLOW_AGENT_TOKEN:-}
       AGENT_BASE_URL: ${AGENT_BASE_URL:-http://agent:8000}
       AGENT_API_TOKEN: ${AGENT_API_TOKEN:-}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     volumes:
       - alertflow-config:/config
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: unless-stopped
 

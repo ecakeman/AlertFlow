@@ -22,6 +22,12 @@ type Scheduler struct {
 	db     *db.DB
 	client *http.Client
 
+	// OnCheckStored, when set, runs after a check row and its outbox row have
+	// committed (and the cert snapshot is written). The API server uses it to
+	// retire cached reads for that service. It runs on the worker goroutine, so
+	// it must return quickly.
+	OnCheckStored func(serviceID string)
+
 	mu      sync.Mutex
 	workers map[string]*worker
 	wg      sync.WaitGroup
@@ -169,6 +175,11 @@ func (s *Scheduler) finishCycle(w *worker, svc config.Service, cyc cycleResult, 
 		return
 	}
 	s.storeTLS(svc, cyc.Result, now)
+	// Only after the row is durable: invalidating on a check that failed to
+	// store would drop a cache entry that is still correct.
+	if s.OnCheckStored != nil {
+		s.OnCheckStored(svc.ID)
+	}
 
 	w.mu.Lock()
 	w.lastStatus = cyc.Status

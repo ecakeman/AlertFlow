@@ -223,7 +223,7 @@ type metricsResponse struct {
 // series, multi-window uptime and current TLS certificate info.
 func (s *Server) handleServiceMetrics(c fiber.Ctx) error {
 	id := c.Params("id")
-	res, err := s.query().ServiceMetrics(id, c.Query("range"), time.Now())
+	res, err := s.query().ServiceMetrics(c.Context(), id, c.Query("range"), time.Now())
 	if errors.Is(err, query.ErrServiceNotFound) {
 		return fiber.NewError(fiber.StatusNotFound, "service not found")
 	}
@@ -255,7 +255,7 @@ func (s *Server) handleServiceChecks(c fiber.Ctx) error {
 	if v, err := strconv.ParseInt(c.Query("before"), 10, 64); err == nil && v > 0 {
 		before = v
 	}
-	page, err := s.query().CheckHistory(id, before, limit)
+	page, err := s.query().CheckHistory(c.Context(), id, before, limit)
 	if errors.Is(err, query.ErrServiceNotFound) {
 		return fiber.NewError(fiber.StatusNotFound, "service not found")
 	}

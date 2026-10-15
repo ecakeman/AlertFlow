@@ -16,7 +16,7 @@ type dashboardStatsDTO struct {
 // tiles need beyond what GET /api/services already carries — currently just
 // the configurable-period warning count. See DashboardSettings.
 func (s *Server) handleDashboardStats(c fiber.Ctx) error {
-	count, err := s.query().DashboardStats(time.Now())
+	count, err := s.query().DashboardStats(c.Context(), time.Now())
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "could not load dashboard stats")
 	}
