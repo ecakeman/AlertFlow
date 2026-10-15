@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -33,13 +34,31 @@ const (
 	// integer per scope and never expires; bumping it retires every key built
 	// from the previous generation without scanning for them.
 	genPrefix = "af:gen:"
+
+	// breakerThreshold/breakerCooldown are a conventional circuit breaker.
+	//
+	// Without one, a down Redis is worse than no cache at all: every read waits
+	// out opTimeout before falling through to PostgreSQL. Measured under load,
+	// that is ~250 ms per cached read against ~150 µs when Redis is healthy —
+	// and the penalty is a pure wait, so throughput only recovers by adding
+	// concurrency. After this many consecutive failures the store stops calling
+	// Redis for the cooldown, goes straight to the loader, and probes again when
+	// the cooldown expires.
+	breakerThreshold = 5
+	breakerCooldown  = 5 * time.Second
 )
+
+// errBreakerOpen means the breaker tripped: Redis is skipped this time.
+var errBreakerOpen = errors.New("cache: breaker open")
 
 // Store is a Redis client plus the in-process state the cache needs.
 type Store struct {
 	rdb     redis.UniversalClient
 	group   singleflight.Group
 	timeout time.Duration
+
+	failures  atomic.Int32
+	openUntil atomic.Int64
 }
 
 // New opens a Redis client. An empty url returns (nil, nil), meaning caching is
@@ -103,15 +122,20 @@ func (s *Store) Generation(ctx context.Context, scope string) int64 {
 	if !s.Enabled() {
 		return 0
 	}
-	c, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-	n, err := s.rdb.Get(c, genPrefix+scope).Int64()
-	if errors.Is(err, redis.Nil) {
-		return 0
-	}
+	var n int64
+	err := s.call(ctx, func(c context.Context) error {
+		v, err := s.rdb.Get(c, genPrefix+scope).Int64()
+		if errors.Is(err, redis.Nil) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		n = v
+		return nil
+	})
 	if err != nil {
 		s.warn("generation", scope, err)
-		return 0
 	}
 	return n
 }
@@ -123,9 +147,9 @@ func (s *Store) Bump(ctx context.Context, scope string) {
 	if !s.Enabled() {
 		return
 	}
-	c, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-	if err := s.rdb.Incr(c, genPrefix+scope).Err(); err != nil {
+	if err := s.call(ctx, func(c context.Context) error {
+		return s.rdb.Incr(c, genPrefix+scope).Err()
+	}); err != nil {
 		s.warn("bump", scope, err)
 	}
 }
@@ -136,13 +160,23 @@ func (s *Store) getJSON(ctx context.Context, key string, dst any) bool {
 	if !s.Enabled() {
 		return false
 	}
-	c, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-	raw, err := s.rdb.Get(c, key).Bytes()
-	if err != nil {
-		if !errors.Is(err, redis.Nil) {
-			s.warn("get", key, err)
+	var raw []byte
+	err := s.call(ctx, func(c context.Context) error {
+		v, err := s.rdb.Get(c, key).Bytes()
+		if errors.Is(err, redis.Nil) {
+			return nil
 		}
+		if err != nil {
+			return err
+		}
+		raw = v
+		return nil
+	})
+	if err != nil {
+		s.warn("get", key, err)
+		return false
+	}
+	if raw == nil {
 		return false
 	}
 	if err := json.Unmarshal(raw, dst); err != nil {
@@ -162,9 +196,9 @@ func (s *Store) setJSON(ctx context.Context, key string, value any, ttl time.Dur
 		s.warn("encode", key, err)
 		return
 	}
-	c, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-	if err := s.rdb.Set(c, key, raw, ttl).Err(); err != nil {
+	if err := s.call(ctx, func(c context.Context) error {
+		return s.rdb.Set(c, key, raw, ttl).Err()
+	}); err != nil {
 		s.warn("set", key, err)
 	}
 }
@@ -173,16 +207,51 @@ func (s *Store) delete(ctx context.Context, keys ...string) {
 	if !s.Enabled() || len(keys) == 0 {
 		return
 	}
-	c, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-	if err := s.rdb.Del(c, keys...).Err(); err != nil {
+	if err := s.call(ctx, func(c context.Context) error {
+		return s.rdb.Del(c, keys...).Err()
+	}); err != nil {
 		s.warn("delete", keys[0], err)
 	}
 }
 
+// call runs one Redis command unless the breaker is open, and records the
+// outcome. When the breaker is open the round-trip is skipped entirely, so the
+// caller falls straight through to the loader instead of waiting out a timeout.
+func (s *Store) call(ctx context.Context, fn func(context.Context) error) error {
+	if !s.available() {
+		return errBreakerOpen
+	}
+	c, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	err := fn(c)
+	s.note(err == nil)
+	return err
+}
+
+func (s *Store) available() bool {
+	until := s.openUntil.Load()
+	return until == 0 || time.Now().UnixNano() >= until
+}
+
+func (s *Store) note(ok bool) {
+	if ok {
+		s.failures.Store(0)
+		return
+	}
+	if s.failures.Add(1) >= breakerThreshold {
+		s.failures.Store(0)
+		s.openUntil.Store(time.Now().Add(breakerCooldown).UnixNano())
+		slog.Warn("cache: pausing Redis after consecutive failures", "cooldown", breakerCooldown.String())
+	}
+}
+
 // warn logs a cache problem at debug level. A down Redis is an expected state,
-// not an incident, so it must not fill the log at info level.
+// not an incident, so it must not fill the log at info level. A tripped breaker
+// is not logged here at all: it would repeat once per request.
 func (s *Store) warn(op, key string, err error) {
+	if errors.Is(err, errBreakerOpen) {
+		return
+	}
 	slog.Debug("cache: "+op, "key", key, "error", err)
 }
 

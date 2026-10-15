@@ -225,3 +225,78 @@ func TestGenerationStartsAtZero(t *testing.T) {
 		t.Fatalf("generation after one bump = %d, want 1", g)
 	}
 }
+
+// TestBreakerOpensAfterConsecutiveFailures pins the behaviour the load test
+// found: without it, a down Redis costs one op timeout per read, which measured
+// ~250 ms against ~150 µs when healthy — far worse than having no cache.
+func TestBreakerOpensAfterConsecutiveFailures(t *testing.T) {
+	s, err := New("redis://127.0.0.1:6399/0") // nothing listens here
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+
+	for i := 0; i < breakerThreshold; i++ {
+		s.Generation(ctx, "breaker")
+	}
+	if s.available() {
+		t.Fatalf("breaker did not open after %d consecutive failures", breakerThreshold)
+	}
+
+	// While it is open the round-trip must be skipped entirely: reads stay fast
+	// and the loader still answers.
+	start := time.Now()
+	for i := 0; i < 200; i++ {
+		if _, err := Remember(ctx, s, "k", time.Minute, func(context.Context) (string, error) {
+			return "from-db", nil
+		}); err != nil {
+			t.Fatalf("remember with the breaker open: %v", err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("200 reads took %v with the breaker open; they must not wait on Redis", elapsed)
+	}
+}
+
+func TestBreakerNeedsConsecutiveFailures(t *testing.T) {
+	s, err := New("redis://127.0.0.1:6399/0")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+
+	for i := 0; i < breakerThreshold-1; i++ {
+		s.note(false)
+	}
+	s.note(true) // a success resets the run
+	for i := 0; i < breakerThreshold-1; i++ {
+		s.note(false)
+	}
+	if !s.available() {
+		t.Fatal("breaker opened on failures that were not consecutive")
+	}
+	if got := s.failures.Load(); got != breakerThreshold-1 {
+		t.Fatalf("failures = %d, want %d", got, breakerThreshold-1)
+	}
+}
+
+func TestBreakerClosesAfterCooldown(t *testing.T) {
+	s, err := New("redis://127.0.0.1:6399/0")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+
+	for i := 0; i < breakerThreshold; i++ {
+		s.note(false)
+	}
+	if s.available() {
+		t.Fatal("breaker did not open")
+	}
+	// Pretend the cooldown elapsed: the next call probes Redis again.
+	s.openUntil.Store(time.Now().Add(-time.Second).UnixNano())
+	if !s.available() {
+		t.Fatal("breaker did not close after the cooldown")
+	}
+}
