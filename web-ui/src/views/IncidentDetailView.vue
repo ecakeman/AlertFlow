@@ -87,6 +87,7 @@ function hypothesisClass(status: string): string {
 onMounted(() => {
   load()
   loadAgent()
+  loadChat()
 })
 
 const durationText = computed(() => {
@@ -167,12 +168,48 @@ async function sendChat() {
   try {
     // 只带最近若干轮，避免会话上下文无限增长。
     const history = chat.value.slice(-8).map((m) => ({ role: m.role, text: m.text }))
-    const res = await api.agentChat(id.value, text, history)
-    chat.value.push({ role: 'agent', text: res.reply, evidence_ids: res.evidence_ids })
+    // 提交后不再等模型：问题入库、由 Agent 后台回答，这里轮询结果。
+    const created = await api.agentChatRequest(id.value, text, history)
+    const state = await pollChat(created.requestId)
+    if (state.status === 'answered') {
+      chat.value.push({ role: 'agent', text: state.reply ?? '', evidence_ids: state.evidenceIds })
+    } else {
+      chat.value.push({ role: 'agent', text: state.error || '这次没能给出回答。' })
+    }
   } catch (e) {
-    chat.value.push({ role: 'agent', text: errMsg(e) })
+    chat.value.push({ role: 'agent', text: e instanceof Error ? e.message : errMsg(e) })
   } finally {
     chatBusy.value = false
+  }
+}
+
+/** 轮询一次请求直到有结论；超时按失败展示，而不是一直转圈。 */
+async function pollChat(requestId: string, timeoutMs = 120_000) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const state = await api.agentChatResult(id.value, requestId)
+    if (state.status !== 'pending') return state
+    if (Date.now() > deadline) throw new Error('等待诊断 Agent 回答超时')
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+  }
+}
+
+/** 恢复该事件已有的问答（刷新页面后仍然看得到）。 */
+async function loadChat() {
+  try {
+    const res = await api.agentChatHistory(id.value)
+    chat.value = res.requests.flatMap((r) => {
+      const turns: AgentChatMessage[] = [{ role: 'user', text: r.message }]
+      if (r.status === 'answered') {
+        turns.push({ role: 'agent', text: r.reply ?? '', evidence_ids: r.evidenceIds })
+      } else if (r.status === 'failed') {
+        turns.push({ role: 'agent', text: r.error || '这次没能给出回答。' })
+      }
+      return turns
+    })
+  } catch {
+    // 历史加载失败不该影响页面其余部分。
+    chat.value = []
   }
 }
 </script>

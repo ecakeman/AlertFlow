@@ -194,3 +194,94 @@ func TestAgentCallbackDoesNotFallThroughToTheSPA(t *testing.T) {
 		t.Fatalf("webhook path served the SPA: %s", data)
 	}
 }
+
+func chatCallbackBody(messageType, reply, failure string) string {
+	return fmt.Sprintf(`{
+		"schema_version": "v2",
+		"message_id": "chat:chat-1:%s",
+		"message_type": %q,
+		"correlation_id": "incident:1",
+		"payload": {
+			"request_id": "chat-1",
+			"incident_id": 1,
+			"reply": %q,
+			"evidence_ids": ["chk:11"],
+			"error": %q
+		}
+	}`, strings.TrimPrefix(messageType, "chat."), messageType, reply, failure)
+}
+
+func TestAgentChatCallbackAnswersAndDedupes(t *testing.T) {
+	app, database := agentCallbackApp(t, "callback-secret")
+	inc, err := database.CreateIncident("svc", "auto", 1_700_000_000, nil, nil)
+	if err != nil {
+		t.Fatalf("create incident: %v", err)
+	}
+	if _, err := database.CreateIntegration(
+		db.AgentWebhookType, "agent", true, false, json.RawMessage(`{"url":"http://agent.invalid"}`),
+	); err != nil {
+		t.Fatalf("create integration: %v", err)
+	}
+	if _, _, err := database.CreateChatRequest(
+		db.ChatRequestRow{RequestID: "chat-1", IncidentID: inc.ID, Message: "why?"},
+		[]byte(`{"event":"chat_requested"}`), 1_700_000_000); err != nil {
+		t.Fatalf("create chat request: %v", err)
+	}
+
+	body := chatCallbackBody("chat.completed", "the probe returned 503", "")
+	status, out := postAgentCallback(t, app, "Bearer callback-secret", body)
+	if status != http.StatusOK || !strings.Contains(out, `"duplicate":false`) {
+		t.Fatalf("answer = %d %s", status, out)
+	}
+	row, err := database.GetChatRequest("chat-1")
+	if err != nil || row == nil {
+		t.Fatalf("read back: %v %+v", err, row)
+	}
+	if row.Status != db.ChatAnswered || row.Reply == nil || *row.Reply != "the probe returned 503" {
+		t.Fatalf("row = %+v", row)
+	}
+
+	status, out = postAgentCallback(t, app, "Bearer callback-secret", body)
+	if status != http.StatusOK || !strings.Contains(out, `"duplicate":true`) {
+		t.Fatalf("repeat answer = %d %s", status, out)
+	}
+}
+
+func TestAgentChatCallbackRecordsFailure(t *testing.T) {
+	app, database := agentCallbackApp(t, "callback-secret")
+	inc, err := database.CreateIncident("svc", "auto", 1_700_000_000, nil, nil)
+	if err != nil {
+		t.Fatalf("create incident: %v", err)
+	}
+	if _, err := database.CreateIntegration(
+		db.AgentWebhookType, "agent", true, false, json.RawMessage(`{"url":"http://agent.invalid"}`),
+	); err != nil {
+		t.Fatalf("create integration: %v", err)
+	}
+	if _, _, err := database.CreateChatRequest(
+		db.ChatRequestRow{RequestID: "chat-1", IncidentID: inc.ID, Message: "why?"},
+		[]byte(`{}`), 1_700_000_000); err != nil {
+		t.Fatalf("create chat request: %v", err)
+	}
+
+	body := chatCallbackBody("chat.failed", "", "the agent has no model configured")
+	if status, out := postAgentCallback(t, app, "Bearer callback-secret", body); status != http.StatusOK {
+		t.Fatalf("failure callback = %d %s", status, out)
+	}
+	row, err := database.GetChatRequest("chat-1")
+	if err != nil || row == nil {
+		t.Fatalf("read back: %v %+v", err, row)
+	}
+	if row.Status != db.ChatFailed || !strings.Contains(row.Error, "model") {
+		t.Fatalf("row = %+v", row)
+	}
+}
+
+func TestAgentChatCallbackRejectsMissingRequestID(t *testing.T) {
+	app, _ := agentCallbackApp(t, "callback-secret")
+	status, out := postAgentCallback(t, app, "Bearer callback-secret",
+		`{"schema_version":"v2","message_id":"m","message_type":"chat.completed","payload":{}}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d %s", status, out)
+	}
+}

@@ -10,6 +10,8 @@ import (
 	"errors"
 	"strconv"
 	"time"
+
+	"github.com/ecakeman/alertflow/internal/db"
 )
 
 // ErrNoSender is returned when no sender is registered for an integration type.
@@ -24,7 +26,20 @@ const (
 	// EventWarning is a check that failed and then recovered on a retry. It has
 	// no incident, and only integrations that opted in receive it.
 	EventWarning Event = "warning"
+	// EventChatRequested is a troubleshooting question for the diagnostic agent.
+	// Only the agent channel can handle it; chat requests are queued solely for
+	// that integration, so a notification channel never sees one.
+	EventChatRequested Event = db.EventChatRequested
 )
+
+// ChatRequest is a read-only question queued for the diagnostic agent. It rides
+// the notification delivery path so it inherits the same leases, retries and
+// dead-lettering rather than being a second delivery mechanism.
+type ChatRequest struct {
+	RequestID string
+	Message   string
+	History   json.RawMessage
+}
 
 // Message is the payload handed to each Sender.
 type Message struct {
@@ -40,6 +55,8 @@ type Message struct {
 	Error       string     // warning: why the first attempt failed
 	CheckID     int64      // 0 when the event is not a check
 	DeliveryID  int64      // notification_deliveries.id, used when IncidentID is 0
+	// Chat is set for a chat_requested delivery and nil for every notification.
+	Chat *ChatRequest
 }
 
 // Down reports whether the message is a service-down (start) event.

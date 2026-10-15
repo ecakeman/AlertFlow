@@ -151,7 +151,8 @@ func messageFrom(raw json.RawMessage) (notify.Message, error) {
 		return notify.Message{}, err
 	}
 	switch snap.Event {
-	case string(notify.EventIncidentStart), string(notify.EventIncidentResolve), string(notify.EventWarning):
+	case string(notify.EventIncidentStart), string(notify.EventIncidentResolve),
+		string(notify.EventWarning), string(notify.EventChatRequested):
 	default:
 		return notify.Message{}, fmt.Errorf("unsupported delivery event %q", snap.Event)
 	}
@@ -176,6 +177,13 @@ func messageFrom(raw json.RawMessage) (notify.Message, error) {
 	if snap.ResolvedAt != nil {
 		resolved := time.Unix(*snap.ResolvedAt, 0)
 		msg.ResolvedAt = &resolved
+	}
+	if snap.Chat != nil {
+		msg.Chat = &notify.ChatRequest{
+			RequestID: snap.Chat.RequestID,
+			Message:   snap.Chat.Message,
+			History:   snap.Chat.History,
+		}
 	}
 	return msg, nil
 }

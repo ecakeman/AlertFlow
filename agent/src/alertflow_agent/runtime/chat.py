@@ -100,12 +100,19 @@ def build_prompt(settings, store, repo, incident_id: int, history: list, questio
 
 
 def answer(settings, store, repo, model, incident_id: int, history: list, question: str) -> dict:
+    """回答一个问题。答不出来就抛异常——**不要**用一句套话冒充答案。
+
+    调用方（异步 chat worker）据此重试或标记失败，页面因此能看到"没答出来"，
+    而不是一句看起来像回答的废话。
+    """
     prompt, cited = build_prompt(settings, store, repo, incident_id, history, question)
-    reply = ""
+    if not hasattr(model, "answer"):
+        raise RuntimeError("the agent has no model configured")
     try:
-        reply = model.answer(prompt) if hasattr(model, "answer") else ""
-    except Exception as exc:  # noqa: BLE001
+        reply = model.answer(prompt)
+    except Exception as exc:  # noqa: BLE001 - 记下来再抛给调用方
         log.warning("chat model failed: %s", type(exc).__name__)
-    if not reply:
-        reply = "抱歉，这次无法给出回答（模型未配置或调用失败）。"
-    return {"reply": reply.strip(), "evidence_ids": cited}
+        raise
+    if not reply or not str(reply).strip():
+        raise RuntimeError("the model returned an empty answer")
+    return {"reply": str(reply).strip(), "evidence_ids": cited}

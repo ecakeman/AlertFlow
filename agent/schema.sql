@@ -78,6 +78,33 @@ CREATE INDEX IF NOT EXISTS agent_callback_due
     WHERE status IN ('pending', 'retry_wait', 'sending');
 
 -- ============================================================================
+-- 排查问题（异步聊天）
+-- ============================================================================
+
+-- 问题先落库、再由 worker 回答、答案经回调 outbox 回传。持久化的意义在于
+-- Agent 重启后未回答的问题会被接着处理，而不是凭空消失。
+CREATE TABLE IF NOT EXISTS chat_requests (
+    id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    request_id      text UNIQUE NOT NULL,
+    incident_id     bigint NOT NULL,
+    message         text NOT NULL,
+    history         jsonb NOT NULL DEFAULT '[]'::jsonb,
+    status          text NOT NULL DEFAULT 'pending',
+    attempt_count   int NOT NULL DEFAULT 0,
+    next_attempt_at timestamptz NOT NULL DEFAULT now(),
+    lease_until     timestamptz,
+    reply           text,
+    evidence_ids    jsonb,
+    error           text,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    updated_at      timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS chat_requests_due
+    ON chat_requests (next_attempt_at)
+    WHERE status IN ('pending', 'retry_wait', 'sending');
+
+-- ============================================================================
 -- 长期记忆
 -- ============================================================================
 

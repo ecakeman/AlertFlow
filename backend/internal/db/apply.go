@@ -29,6 +29,17 @@ type DeliverySnapshot struct {
 	Attempts    int    `json:"attempts,omitempty"`
 	Error       string `json:"error,omitempty"`
 	CheckID     int64  `json:"checkId,omitempty"`
+	// Chat is set only for a chat_requested delivery: a read-only question for
+	// the diagnostic agent. It rides the notification delivery table so it
+	// inherits the same leases, retries and dead-lettering.
+	Chat *ChatSnapshot `json:"chat,omitempty"`
+}
+
+// ChatSnapshot is a troubleshooting question queued for the agent.
+type ChatSnapshot struct {
+	RequestID string          `json:"requestId"`
+	Message   string          `json:"message"`
+	History   json.RawMessage `json:"history,omitempty"`
 }
 
 // ApplyCheckEvent applies one check event: incident changes, the processed

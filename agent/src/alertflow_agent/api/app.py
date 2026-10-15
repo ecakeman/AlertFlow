@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from alertflow_agent.runtime.verify import cited
 from alertflow_agent.schemas.events import (
+    CHAT_MESSAGE_TYPE,
     TEST_MESSAGE_TYPE,
     AgentInbound,
     WebhookBody,
@@ -145,10 +146,13 @@ def create_app(settings, store, runner) -> FastAPI:
 
         from alertflow_agent.runtime.chat import answer as chat_answer
 
-        return chat_answer(
-            settings, store, getattr(runner, "memory", None), getattr(runner, "model", None),
-            incident_id, history[-8:], question[:2000],
-        )
+        try:
+            return chat_answer(
+                settings, store, getattr(runner, "memory", None), getattr(runner, "model", None),
+                incident_id, history[-8:], question[:2000],
+            )
+        except Exception:  # noqa: BLE001 - 答不出来要如实说，而不是回一句套话
+            return JSONResponse({"error": "the agent could not answer"}, status_code=502)
 
     return app
 
@@ -192,6 +196,8 @@ def _ingest_v2(payload: dict, store, settings):
     if envelope.message_type == TEST_MESSAGE_TYPE:
         # 连通性/鉴权自测：不建 run，免得留下一堆没有事件的空诊断。
         return {"message_id": envelope.message_id, "action": "ignored"}
+    if envelope.message_type == CHAT_MESSAGE_TYPE:
+        return _enqueue_chat(envelope, store)
     event = normalize_event(envelope.payload.get("event") or {})
     if not event.get("event_id"):
         event["event_id"] = envelope.message_id
@@ -209,6 +215,33 @@ def _ingest_v2(payload: dict, store, settings):
     if existing:
         return JSONResponse({"run_id": existing["id"], "action": "duplicate"}, status_code=200)
     return JSONResponse({"run_id": row["id"], "action": "started"}, status_code=202)
+
+
+def _enqueue_chat(envelope: AgentInbound, store):
+    """把一条排查问题排进队列。
+
+    这里只入库、立刻返回：真正的回答由 chat worker 在后台做，答案经回调 outbox 回传。
+    把它当成 incident_start 会是灾难——那会开一次诊断，而不是回答一个问题。
+    """
+    payload = envelope.payload
+    request_id = str(payload.get("request_id") or "").strip()
+    question = str(payload.get("message") or "").strip()
+    if not request_id or not question:
+        return JSONResponse({"error": "request_id and message are required"}, status_code=400)
+    history = payload.get("history")
+    if not isinstance(history, list):
+        history = []
+    incident_id = payload.get("incident_id")
+    created = store.enqueue_chat_request({
+        "request_id": request_id,
+        "incident_id": int(incident_id) if incident_id is not None else 0,
+        "message": question[:4000],
+        "history": history[-8:],
+    })
+    return JSONResponse(
+        {"request_id": request_id, "action": "started" if created else "duplicate"},
+        status_code=202 if created else 200,
+    )
 
 
 def _row(event: dict, mode: str, dedupe: str | None = None) -> dict:

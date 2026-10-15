@@ -152,6 +152,41 @@ def failure_callback(run_id: str, run: dict, reason: str) -> dict:
     return _envelope(run_id, f"run:{run_id}:failed", "run.failed", run, payload)
 
 
+def chat_callback(request_id: str, incident_id, reply: str, evidence_ids: list) -> dict:
+    """一条排查问题的回答。与 run 的回传走同一条 outbox / 同一套重试。"""
+    envelope = {
+        "schema_version": SCHEMA_VERSION,
+        "message_id": f"chat:{request_id}:answered",
+        "message_type": "chat.completed",
+        "correlation_id": f"incident:{incident_id}" if incident_id else f"chat:{request_id}",
+        "sent_at": iso_now(),
+        "payload": {
+            "request_id": request_id,
+            "incident_id": incident_id,
+            "reply": reply,
+            "evidence_ids": list(evidence_ids or [])[:40],
+            "finished_at": iso_now(),
+        },
+    }
+    return envelope
+
+
+def chat_failed_callback(request_id: str, incident_id, reason: str) -> dict:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "message_id": f"chat:{request_id}:failed",
+        "message_type": "chat.failed",
+        "correlation_id": f"incident:{incident_id}" if incident_id else f"chat:{request_id}",
+        "sent_at": iso_now(),
+        "payload": {
+            "request_id": request_id,
+            "incident_id": incident_id,
+            "error": _clip(reason, MAX_ERROR_CHARS),
+            "finished_at": iso_now(),
+        },
+    }
+
+
 def backoff_seconds(attempt: int) -> int:
     delay = BACKOFF_BASE_SECONDS
     for _ in range(1, max(attempt, 1)):

@@ -179,6 +179,11 @@ func (s *Server) routes() {
 	app.Post("/api/incidents/:id/comments", auth, s.handleAddIncidentComment)
 	app.Get("/api/incidents/:id/deliveries", auth, s.handleListDeliveries)
 	app.Get("/api/incidents/:id/agent-report", auth, s.handleIncidentAgentReport)
+	// Async chat: queue a question, then poll its request. The synchronous
+	// POST /agent-chat below stays until the async flow is verified end to end.
+	app.Get("/api/incidents/:id/agent-chat/requests", auth, s.handleListAgentChatRequests)
+	app.Post("/api/incidents/:id/agent-chat/requests", auth, s.handleCreateAgentChatRequest)
+	app.Get("/api/incidents/:id/agent-chat/requests/:requestId", auth, s.handleGetAgentChatRequest)
 	app.Post("/api/incidents/:id/agent-chat", auth, s.handleIncidentAgentChat)
 
 	// Admin only.
@@ -408,5 +413,11 @@ func (s *Server) runRetention() {
 	}
 	if err := database.DeleteExpiredSessions(time.Now().Unix()); err != nil {
 		slog.Error("retention: delete sessions", "error", err)
+	}
+	// A question the agent never answered must not sit at "pending" forever.
+	if n, err := database.ExpireStaleChatRequests(time.Now().Unix()); err != nil {
+		slog.Error("retention: expire chat requests", "error", err)
+	} else if n > 0 {
+		slog.Info("retention: expired unanswered chat requests", "count", n)
 	}
 }

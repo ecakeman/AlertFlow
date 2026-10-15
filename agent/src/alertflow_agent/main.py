@@ -49,6 +49,7 @@ def serve(settings: Settings | None = None) -> None:
 
     from alertflow_agent.api.app import create_app
     from alertflow_agent.callbacks import CallbackSender
+    from alertflow_agent.chat_worker import ChatWorker
 
     settings, store, runner, checkpoint = build(settings)
     stop = threading.Event()
@@ -58,6 +59,10 @@ def serve(settings: Settings | None = None) -> None:
     callbacks = CallbackSender(settings, store)
     sender = threading.Thread(target=callbacks.run, args=(stop,), name="agent-callback")
     sender.start()
+    # 排查问题在后台回答，答案同样走回调 outbox。
+    chat = ChatWorker(settings, store, runner)
+    chatter = threading.Thread(target=chat.run, args=(stop,), name="agent-chat")
+    chatter.start()
     app = create_app(settings, store, runner)
 
     @app.on_event("shutdown")
@@ -65,6 +70,7 @@ def serve(settings: Settings | None = None) -> None:
         stop.set()
         worker.join(timeout=settings.run_timeout_seconds)
         sender.join(timeout=5)
+        chatter.join(timeout=5)
         if checkpoint is not None:
             checkpoint[1].__exit__(None, None, None)
         closer = getattr(store, "conn", None)

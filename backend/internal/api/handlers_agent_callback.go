@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -48,6 +49,26 @@ var agentCallbackTypes = map[string]bool{
 	"run.failed":    true,
 }
 
+// Chat answers come back over the same edge but describe a question, not a run.
+const (
+	agentMsgChatCompleted = "chat.completed"
+	agentMsgChatFailed    = "chat.failed"
+)
+
+var agentChatCallbackTypes = map[string]bool{
+	agentMsgChatCompleted: true,
+	agentMsgChatFailed:    true,
+}
+
+// agentChatCallbackPayload is the answer to a queued question.
+type agentChatCallbackPayload struct {
+	RequestID   string          `json:"request_id"`
+	IncidentID  *int64          `json:"incident_id"`
+	Reply       string          `json:"reply"`
+	EvidenceIDs json.RawMessage `json:"evidence_ids"`
+	Error       string          `json:"error"`
+}
+
 // POST /webhooks/agent → the diagnostic agent pushes a run result back.
 //
 // This is a different edge from POST /api/alerts/webhook (external alerts
@@ -75,8 +96,11 @@ func (s *Server) handleAgentCallback(c fiber.Ctx) error {
 	if env.MessageID == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "message_id is required")
 	}
-	if !agentCallbackTypes[env.MessageType] {
+	if !agentCallbackTypes[env.MessageType] && !agentChatCallbackTypes[env.MessageType] {
 		return fiber.NewError(fiber.StatusBadRequest, "unsupported message_type")
+	}
+	if agentChatCallbackTypes[env.MessageType] {
+		return s.handleAgentChatCallback(c, env)
 	}
 	var payload agentCallbackPayload
 	if err := json.Unmarshal(env.Payload, &payload); err != nil {
@@ -128,4 +152,42 @@ func parseAgentTime(raw string) *int64 {
 	}
 	seconds := parsed.Unix()
 	return &seconds
+}
+
+// handleAgentChatCallback stores an answer to a queued question.
+//
+// A repeated callback changes nothing (the row is already answered) and reports
+// duplicate=true — the same at-least-once/idempotent split as the run results.
+func (s *Server) handleAgentChatCallback(c fiber.Ctx, env agentCallbackEnvelope) error {
+	var payload agentChatCallbackPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid payload")
+	}
+	if payload.RequestID == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "request_id is required")
+	}
+	now := time.Now().Unix()
+
+	var (
+		applied bool
+		err     error
+	)
+	if env.MessageType == agentMsgChatFailed {
+		reason := strings.TrimSpace(payload.Error)
+		if reason == "" {
+			reason = "the agent could not answer"
+		}
+		applied, err = s.conn().FailChatRequest(payload.RequestID, reason, now)
+	} else {
+		applied, err = s.conn().CompleteChatRequest(payload.RequestID, payload.Reply, payload.EvidenceIDs, now)
+	}
+	if err != nil {
+		slog.ErrorContext(c.Context(), "agent callback: chat store failed", "request_id", payload.RequestID, "error", err)
+		return fiber.NewError(fiber.StatusInternalServerError, "could not store the chat answer")
+	}
+	return c.JSON(fiber.Map{
+		"ok":         true,
+		"duplicate":  !applied,
+		"request_id": payload.RequestID,
+	})
 }

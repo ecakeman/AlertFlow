@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,13 +11,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ecakeman/alertflow/internal/db"
 	"github.com/ecakeman/alertflow/internal/query"
 )
 
 // AgentWebhookType is the integration type reserved for the diagnostic Agent.
 // It is deliberately distinct from "webhook": a generic webhook must never
 // receive the internal diagnostic context, and only this type does.
-const AgentWebhookType = "agent_webhook"
+const AgentWebhookType = db.AgentWebhookType
 
 // AgentSchemaVersion is the version of the AlertFlow→Agent message contract.
 const AgentSchemaVersion = "v2"
@@ -32,7 +34,30 @@ const (
 	AgentMsgResolved  = "diagnostic.resolved"
 	AgentMsgWarning   = "diagnostic.warning"
 	AgentMsgTest      = "diagnostic.test"
+	// AgentMsgChatRequested asks the agent a read-only troubleshooting question
+	// about an incident it has already diagnosed.
+	AgentMsgChatRequested = "chat.requested"
 )
+
+// agentChatMessage is the chat.requested envelope. It is a separate type from
+// AgentMessage because a question has no incident transition to describe — and
+// sharing the diagnostic envelope would risk it being read as one.
+type agentChatMessage struct {
+	SchemaVersion string           `json:"schema_version"`
+	MessageID     string           `json:"message_id"`
+	MessageType   string           `json:"message_type"`
+	CorrelationID string           `json:"correlation_id"`
+	SentAt        string           `json:"sent_at"`
+	Payload       agentChatPayload `json:"payload"`
+}
+
+type agentChatPayload struct {
+	RequestID  string          `json:"request_id"`
+	IncidentID int64           `json:"incident_id"`
+	ServiceID  string          `json:"service_id"`
+	Message    string          `json:"message"`
+	History    json.RawMessage `json:"history,omitempty"`
+}
 
 // AgentMessage is the versioned envelope AlertFlow pushes to the Agent.
 //
@@ -100,6 +125,10 @@ func (s AgentSender) Send(ctx context.Context, raw json.RawMessage, msg Message)
 		return errors.New("agent_webhook: query service is not configured")
 	}
 
+	if msg.Chat != nil {
+		return s.sendChat(ctx, msg, cfg)
+	}
+
 	message := s.build(ctx, msg, cfg)
 	limit := s.MaxBytes
 	if limit <= 0 {
@@ -109,12 +138,54 @@ func (s AgentSender) Send(ctx context.Context, raw json.RawMessage, msg Message)
 	if err != nil {
 		return err
 	}
+	return postAgentJSON(ctx, cfg, body)
+}
 
+// maxChatMessageRunes bounds one question. The agent clips too; this keeps an
+// oversized question from ever leaving here.
+const maxChatMessageRunes = 4000
+
+// sendChat posts a read-only troubleshooting question.
+//
+// It carries no diagnostic context: the agent already holds this incident's
+// evidence from the diagnostic run, and answers from that plus its long-term
+// memory.
+func (s AgentSender) sendChat(ctx context.Context, msg Message, cfg webhookConfig) error {
+	history := msg.Chat.History
+	if len(history) == 0 {
+		history = json.RawMessage("[]")
+	}
+	body, err := json.Marshal(agentChatMessage{
+		SchemaVersion: AgentSchemaVersion,
+		MessageID:     "chat:" + msg.Chat.RequestID,
+		MessageType:   AgentMsgChatRequested,
+		CorrelationID: "incident:" + strconv.FormatInt(msg.IncidentID, 10),
+		SentAt:        time.Now().UTC().Format(time.RFC3339),
+		Payload: agentChatPayload{
+			RequestID:  msg.Chat.RequestID,
+			IncidentID: msg.IncidentID,
+			ServiceID:  msg.ServiceID,
+			Message:    clipRunes(msg.Chat.Message, maxChatMessageRunes),
+			History:    history,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if len(body) > AgentMaxPayloadBytes {
+		// Permanent: retrying an oversized question can never succeed.
+		return fmt.Errorf("agent_webhook: chat request is %d bytes, over the %d limit", len(body), AgentMaxPayloadBytes)
+	}
+	return postAgentJSON(ctx, cfg, body)
+}
+
+// postAgentJSON sends an already-encoded message to the agent.
+func postAgentJSON(ctx context.Context, cfg webhookConfig, body []byte) error {
 	method := strings.ToUpper(strings.TrimSpace(cfg.Method))
 	if method == "" {
 		method = http.MethodPost
 	}
-	req, err := http.NewRequestWithContext(ctx, method, cfg.URL, strings.NewReader(string(body)))
+	req, err := http.NewRequestWithContext(ctx, method, cfg.URL, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -123,6 +194,14 @@ func (s AgentSender) Send(ctx context.Context, raw json.RawMessage, msg Message)
 		req.Header.Set(k, v)
 	}
 	return doRequest(req)
+}
+
+func clipRunes(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit]) + "…"
 }
 
 // build assembles the envelope. A warning has no incident to anchor a context

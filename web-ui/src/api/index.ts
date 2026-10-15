@@ -10,6 +10,7 @@ import type {
   Delivery,
   IncidentDetail,
   AgentReport,
+  AgentChatRequest,
   Integration,
   IntegrationType,
   User,
@@ -139,7 +140,24 @@ export const api = {
     request<Delivery[]>('GET', `/api/incidents/${incidentId}/deliveries`),
   agentReport: (id: number) =>
     request<AgentReport>('GET', `/api/incidents/${id}/agent-report`),
-  /** 与诊断 Agent 就本次事件对话（只读工具 + 记忆，服务端代理）。 */
+  /** 排队一个排查问题（异步）。回答由 Agent 后台产生，用 agentChatResult 轮询。 */
+  agentChatRequest: (
+    id: number,
+    message: string,
+    history: { role: string; text: string }[] = [],
+    requestId?: string,
+  ) =>
+    request<AgentChatRequest>('POST', `/api/incidents/${id}/agent-chat/requests`, {
+      message,
+      history,
+      requestId,
+    }),
+  agentChatResult: (id: number, requestId: string) =>
+    request<AgentChatRequest>('GET', `/api/incidents/${id}/agent-chat/requests/${requestId}`),
+  /** 该事件的历史问答，用于刷新页面后恢复会话。 */
+  agentChatHistory: (id: number) =>
+    request<{ requests: AgentChatRequest[] }>('GET', `/api/incidents/${id}/agent-chat/requests`),
+  /** 已废弃的同步路径：服务端仍保留，前端不再使用。 */
   agentChat: (id: number, message: string, history: { role: string; text: string }[] = []) =>
     request<{ reply: string; evidence_ids?: string[] }>('POST', `/api/incidents/${id}/agent-chat`, {
       message,

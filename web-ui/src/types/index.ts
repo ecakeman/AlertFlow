@@ -323,3 +323,16 @@ export interface AgentChatMessage {
   evidence_ids?: string[]
 }
 
+/** 一次异步排查请求。回答由 Agent 在后台产生，前端轮询这个状态。 */
+export interface AgentChatRequest {
+  requestId: string
+  incidentId: number
+  status: 'pending' | 'answered' | 'failed'
+  message: string
+  reply?: string
+  evidenceIds?: string[]
+  error?: string
+  createdAt: string
+  updatedAt: string
+}
+

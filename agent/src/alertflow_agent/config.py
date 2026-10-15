@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     callback_batch: int = 5
     callback_poll_seconds: float = 2.0
 
+    # --- 异步排查会话（chat）---
+    chat_max_attempts: int = 3
+    chat_batch: int = 3
+    chat_poll_seconds: float = 1.0
+    chat_answer_timeout_seconds: int = 120
+
     # --- 长期记忆（事件簿 / 服务档案）---
     memory_enabled: bool = True
     memory_lookback_days: int = 30          # 预筛窗口

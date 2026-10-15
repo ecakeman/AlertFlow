@@ -24,6 +24,11 @@ MESSAGE_TYPES = {
 
 TEST_MESSAGE_TYPE = "diagnostic.test"
 
+# A read-only troubleshooting question about an incident the agent already
+# diagnosed. It carries no event transition — sharing the diagnostic envelope
+# would risk it being read as one.
+CHAT_MESSAGE_TYPE = "chat.requested"
+
 
 class InboundEvent(BaseModel):
     schema_version: str
@@ -107,6 +112,12 @@ class AgentInbound(BaseModel):
         if not self.message_id:
             return "missing message_id"
         if self.message_type == TEST_MESSAGE_TYPE:
+            return None
+        if self.message_type == CHAT_MESSAGE_TYPE:
+            if not str(self.payload.get("request_id") or "").strip():
+                return "missing request_id"
+            if not str(self.payload.get("message") or "").strip():
+                return "missing message"
             return None
         if self.message_type not in MESSAGE_TYPES:
             return "unknown message_type"

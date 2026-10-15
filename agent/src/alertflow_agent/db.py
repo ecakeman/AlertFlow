@@ -43,6 +43,8 @@ class MemoryStore:
         self.reports: dict[str, list[dict]] = {}
         self.callbacks: list[dict] = []
         self.callback_ids: dict[str, str] = {}
+        self.chats: list[dict] = []
+        self.chat_ids: dict[str, str] = {}
 
     def insert_run(self, row: dict) -> dict | None:
         with self.lock:
@@ -149,6 +151,88 @@ class MemoryStore:
     def callback_rows(self) -> list[dict]:
         with self.lock:
             return [dict(row) for row in self.callbacks]
+
+    # --- 异步排查会话 --------------------------------------------------------
+
+    def enqueue_chat_request(self, row: dict) -> bool:
+        with self.lock:
+            request_id = row["request_id"]
+            if request_id in self.chat_ids:
+                return False
+            stored = {
+                "id": str(uuid.uuid4()),
+                "request_id": request_id,
+                "incident_id": row.get("incident_id") or 0,
+                "message": row["message"],
+                "history": row.get("history") or [],
+                "status": "pending",
+                "attempt_count": 0,
+                "next_attempt_at": 0.0,
+                "lease_until": 0.0,
+                "reply": None,
+                "evidence_ids": None,
+                "error": None,
+            }
+            self.chats.append(stored)
+            self.chat_ids[request_id] = stored["id"]
+            return True
+
+    def get_chat_request(self, request_id: str) -> dict | None:
+        with self.lock:
+            for row in self.chats:
+                if row["request_id"] == request_id:
+                    return dict(row)
+            return None
+
+    def claim_chat_requests(self, limit: int, lease_seconds: int, max_attempts: int) -> list[dict]:
+        now = time.time()
+        claimed: list[dict] = []
+        with self.lock:
+            for row in self.chats:
+                if len(claimed) >= limit:
+                    break
+                if row["status"] in {"answered", "failed"}:
+                    continue
+                due = row["status"] in {"pending", "retry_wait"} and row["next_attempt_at"] <= now
+                expired = row["status"] == "sending" and row["lease_until"] <= now
+                if not (due or expired):
+                    continue
+                if row["attempt_count"] >= max_attempts:
+                    row["status"] = "failed"
+                    row["error"] = row["error"] or "attempt limit reached"
+                    continue
+                row["status"] = "sending"
+                row["attempt_count"] += 1
+                row["lease_until"] = now + lease_seconds
+                claimed.append(dict(row))
+        return claimed
+
+    def finish_chat_request(
+        self, request_id: str, status: str, *, reply: str | None = None,
+        evidence_ids: list | None = None, error: str | None = None,
+        retry_after_seconds: float = 0.0, callback: dict | None = None,
+    ) -> None:
+        with self.lock:
+            for row in self.chats:
+                if row["request_id"] != request_id:
+                    continue
+                row["status"] = status
+                row["error"] = error
+                row["lease_until"] = 0.0
+                if reply is not None:
+                    row["reply"] = reply
+                if evidence_ids is not None:
+                    row["evidence_ids"] = evidence_ids
+                if status == "retry_wait":
+                    row["next_attempt_at"] = time.time() + retry_after_seconds
+                # 终态与回调入队在同一个临界区：答案落地了，回调就一定已经排队。
+                if status in {"answered", "failed"}:
+                    self._enqueue_callback_locked(callback)
+                return
+
+    def chat_rows(self) -> list[dict]:
+        with self.lock:
+            return [dict(row) for row in self.chats]
 
     def transition(self, run_id: str, allowed: set[str], **fields) -> bool:
         with self.lock:
@@ -436,6 +520,103 @@ class PostgresStore:
         keys = ["id", "message_id", "message_type", "correlation_id", "payload", "status",
                 "attempt_count", "last_error", "sent_at"]
         return [dict(zip(keys, r)) for r in rows]
+
+    # --- 异步排查会话 --------------------------------------------------------
+
+    _chat_cols = """id::text, request_id, incident_id, message, history, status,
+                    attempt_count, reply, evidence_ids, error"""
+
+    @staticmethod
+    def _chat_row(row) -> dict:
+        keys = ["id", "request_id", "incident_id", "message", "history", "status",
+                "attempt_count", "reply", "evidence_ids", "error"]
+        return dict(zip(keys, row))
+
+    def enqueue_chat_request(self, row: dict) -> bool:
+        cur = self.conn.execute(
+            """INSERT INTO chat_requests (request_id, incident_id, message, history)
+               VALUES (%s, %s, %s, %s::jsonb) ON CONFLICT (request_id) DO NOTHING""",
+            (row["request_id"], row.get("incident_id") or 0, row["message"],
+             json.dumps(row.get("history") or [])),
+        )
+        return cur.rowcount == 1
+
+    def get_chat_request(self, request_id: str) -> dict | None:
+        row = self.conn.execute(
+            f"SELECT {self._chat_cols} FROM chat_requests WHERE request_id = %s", (request_id,),
+        ).fetchone()
+        return self._chat_row(row) if row else None
+
+    def claim_chat_requests(self, limit: int, lease_seconds: int, max_attempts: int) -> list[dict]:
+        with psycopg_connect(self.url) as conn:
+            with conn.transaction():
+                conn.execute(
+                    """UPDATE chat_requests
+                       SET status = 'failed',
+                           error = COALESCE(error, 'attempt limit reached'),
+                           lease_until = NULL,
+                           updated_at = now()
+                       WHERE attempt_count >= %s
+                         AND status IN ('pending', 'retry_wait', 'sending')
+                         AND (status <> 'sending' OR lease_until <= now())""",
+                    (max_attempts,),
+                )
+                rows = conn.execute(
+                    f"""UPDATE chat_requests AS c
+                        SET status = 'sending',
+                            attempt_count = c.attempt_count + 1,
+                            lease_until = now() + %s * interval '1 second',
+                            updated_at = now()
+                        FROM (
+                            SELECT id FROM chat_requests
+                            WHERE (status IN ('pending', 'retry_wait') AND next_attempt_at <= now())
+                               OR (status = 'sending' AND lease_until <= now())
+                            ORDER BY next_attempt_at
+                            FOR UPDATE SKIP LOCKED
+                            LIMIT %s
+                        ) AS picked
+                        WHERE c.id = picked.id
+                        RETURNING {self._chat_cols}""",
+                    (lease_seconds, limit),
+                ).fetchall()
+        return [self._chat_row(r) for r in rows]
+
+    def finish_chat_request(
+        self, request_id: str, status: str, *, reply: str | None = None,
+        evidence_ids: list | None = None, error: str | None = None,
+        retry_after_seconds: float = 0.0, callback: dict | None = None,
+    ) -> None:
+        with psycopg_connect(self.url) as conn:
+            with conn.transaction():
+                if status == "retry_wait":
+                    conn.execute(
+                        """UPDATE chat_requests
+                           SET status = 'retry_wait', error = %s,
+                               next_attempt_at = now() + %s * interval '1 second',
+                               lease_until = NULL, updated_at = now()
+                           WHERE request_id = %s""",
+                        (error, retry_after_seconds, request_id),
+                    )
+                    return
+                cur = conn.execute(
+                    """UPDATE chat_requests
+                       SET status = %s, error = %s,
+                           reply = COALESCE(%s, reply),
+                           evidence_ids = COALESCE(%s::jsonb, evidence_ids),
+                           lease_until = NULL, updated_at = now()
+                       WHERE request_id = %s AND status = 'sending'""",
+                    (status, error, reply,
+                     json.dumps(evidence_ids) if evidence_ids is not None else None, request_id),
+                )
+                # 终态与回调入队在同一个事务：答案落地了，回调就一定已经排队。
+                if cur.rowcount == 1:
+                    self._insert_callback_tx(conn, callback)
+
+    def chat_rows(self) -> list[dict]:
+        rows = self.conn.execute(
+            f"SELECT {self._chat_cols} FROM chat_requests ORDER BY created_at"
+        ).fetchall()
+        return [self._chat_row(r) for r in rows]
 
     def transition(self, run_id: str, allowed: set[str], **fields) -> bool:
         marks = ", ".join(["%s"] * len(allowed))
