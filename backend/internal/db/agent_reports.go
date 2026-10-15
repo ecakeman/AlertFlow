@@ -64,12 +64,19 @@ func (db *DB) SaveAgentRun(rec AgentRunRecord) (bool, error) {
 	return n == 1, nil
 }
 
-// LatestAgentRunForIncident returns the newest result reported for an incident,
+// LatestAgentRunForIncident returns the result the incident page should show,
 // or (nil, nil) when the agent has reported nothing for it.
+//
+// A row that carries a report wins over one that does not, even when the other
+// is newer. The lifecycle rows share a run's id but not its arrival time: a
+// `run.started` message that was retried can land after the `run.completed` it
+// belongs to, and showing "running" while a finished report is already stored
+// would hide exactly what the page exists to show. Among rows of the same kind
+// the newest wins.
 func (db *DB) LatestAgentRunForIncident(incidentID int64) (*AgentRunRecord, error) {
 	row := db.QueryRow(
 		`SELECT `+agentRunCols+` FROM agent_runs WHERE incident_id = $1
-		 ORDER BY updated_at DESC, id DESC LIMIT 1`, incidentID)
+		 ORDER BY (report IS NOT NULL) DESC, updated_at DESC, id DESC LIMIT 1`, incidentID)
 
 	var rec AgentRunRecord
 	var incident, started, finished sql.NullInt64

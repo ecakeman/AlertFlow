@@ -523,8 +523,13 @@ class PostgresStore:
 
     # --- 异步排查会话 --------------------------------------------------------
 
-    _chat_cols = """id::text, request_id, incident_id, message, history, status,
-                    attempt_count, reply, evidence_ids, error"""
+    # The column list is used both bare (plain SELECT) and qualified (the
+    # UPDATE ... FROM ... RETURNING in claim_chat_requests, where the subquery
+    # also has an "id" — unqualified it is ambiguous).
+    _chat_fields = ("id::text", "request_id", "incident_id", "message", "history",
+                    "status", "attempt_count", "reply", "evidence_ids", "error")
+    _chat_cols = ", ".join(_chat_fields)
+    _chat_cols_c = ", ".join(f"c.{field}" for field in _chat_fields)
 
     @staticmethod
     def _chat_row(row) -> dict:
@@ -576,7 +581,7 @@ class PostgresStore:
                             LIMIT %s
                         ) AS picked
                         WHERE c.id = picked.id
-                        RETURNING {self._chat_cols}""",
+                        RETURNING {self._chat_cols_c}""",
                     (lease_seconds, limit),
                 ).fetchall()
         return [self._chat_row(r) for r in rows]

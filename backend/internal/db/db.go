@@ -27,7 +27,13 @@ type DB struct {
 //go:embed migrations/*.sql
 var embedMigrations embed.FS
 
+// migrateMu serialises migrations inside one process. It cannot help across
+// processes, which is why migrate also takes a database advisory lock.
 var migrateMu sync.Mutex
+
+// migrationLockKey is an arbitrary but fixed key for the advisory lock that
+// serialises migrations across processes.
+const migrationLockKey int64 = 0x414C4657 // "ALFW"
 
 // Open connects to the PostgreSQL database at databaseURL, checks it, and runs
 // migrations. databaseURL is a postgres:// or postgresql:// DSN; credentials
@@ -59,9 +65,30 @@ func Open(databaseURL string) (*DB, error) {
 }
 
 // migrate runs the embedded goose migrations against PostgreSQL.
+//
+// Four roles (server, publisher, consumer, delivery) start at the same time and
+// each runs this on a fresh database. The in-process mutex only orders them
+// within one process, so a session-level advisory lock does the rest — without
+// it, two concurrent runs collide while goose is creating its version table
+// ("goose_db_version does not exist" / "duplicate key ... pg_type_typname").
+// The lock is released automatically if the process dies.
 func migrate(sqlDB *sql.DB) error {
 	migrateMu.Lock()
 	defer migrateMu.Unlock()
+
+	ctx := context.Background()
+	locker, err := sqlDB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration connection: %w", err)
+	}
+	defer locker.Close()
+	if _, err := locker.ExecContext(ctx, "SELECT pg_advisory_lock($1)", migrationLockKey); err != nil {
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
+	defer func() {
+		_, _ = locker.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", migrationLockKey)
+	}()
+
 	goose.SetBaseFS(embedMigrations)
 	goose.SetLogger(goose.NopLogger())
 	if err := goose.SetDialect("postgres"); err != nil {

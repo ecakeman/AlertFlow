@@ -137,6 +137,53 @@ func TestAgentCallbackKeepsTheNewestRunForTheIncident(t *testing.T) {
 	}
 }
 
+// startedBody is a run.started message: the agent sends no report with it, and
+// that absence is what tells the page a run is still in flight.
+func startedBody(messageID, runID string, incidentID int64) string {
+	return fmt.Sprintf(`{
+		"schema_version": "v2",
+		"message_id": %q,
+		"message_type": "run.started",
+		"correlation_id": "incident:%d",
+		"payload": {
+			"run_id": %q,
+			"incident_id": %d,
+			"service_id": "svc",
+			"event_type": "incident_start",
+			"mode": "agent",
+			"status": "running"
+		}
+	}`, messageID, incidentID, runID, incidentID)
+}
+
+// TestAgentCallbackLateStartedDoesNotHideTheReport covers a real ordering wart:
+// message_id makes each lifecycle message idempotent, but not ordered. A
+// `run.started` that was retried longer than the `run.completed` it belongs to
+// can arrive after it, and the page must still show the report.
+func TestAgentCallbackLateStartedDoesNotHideTheReport(t *testing.T) {
+	app, database := agentCallbackApp(t, "callback-secret")
+	inc, err := database.CreateIncident("svc", "auto", 1_700_000_000, nil, nil)
+	if err != nil {
+		t.Fatalf("create incident: %v", err)
+	}
+	if status, out := postAgentCallback(t, app, "Bearer callback-secret",
+		callbackBody("run:abc:v1", "run.completed", "abc", inc.ID)); status != http.StatusOK {
+		t.Fatalf("completed = %d %s", status, out)
+	}
+	// The stale "started" retry lands afterwards.
+	if status, out := postAgentCallback(t, app, "Bearer callback-secret",
+		startedBody("run:abc:started", "abc", inc.ID)); status != http.StatusOK {
+		t.Fatalf("started = %d %s", status, out)
+	}
+	rec, err := database.LatestAgentRunForIncident(inc.ID)
+	if err != nil || rec == nil {
+		t.Fatalf("read back: %v %+v", err, rec)
+	}
+	if rec.MessageType != "run.completed" || len(rec.Report) == 0 {
+		t.Fatalf("a late run.started hid the report: %+v", rec)
+	}
+}
+
 func TestAgentCallbackRejectsBadRequests(t *testing.T) {
 	app, _ := agentCallbackApp(t, "callback-secret")
 
