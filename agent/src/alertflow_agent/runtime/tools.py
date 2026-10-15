@@ -151,10 +151,6 @@ def _incident(args, state, settings, clients) -> dict:
         cid = f"cmt:{ident}:{comment['id']}"
         if _add(state, cid, "alertflow_comment", cid, "comment", comment.get("body") or "", {"body": comment.get("body")}):
             added.append(cid)
-    for alert in detail.get("externalAlerts") or []:
-        eid = f"ext:{ident}:{alert.get('source')}:{alert.get('alertKey')}"
-        if _add(state, eid, "alertflow_external_alert", eid, "external_alert", alert.get("title") or alert.get("status") or "", alert):
-            added.append(eid)
     return {"status": "success", "evidence_ids": added or [known], "data": {"comments": len(detail.get("comments") or [])}}
 
 

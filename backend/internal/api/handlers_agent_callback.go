@@ -71,10 +71,10 @@ type agentChatCallbackPayload struct {
 
 // POST /webhooks/agent → the diagnostic agent pushes a run result back.
 //
-// This is a different edge from POST /api/alerts/webhook (external alerts
-// coming in): its own token, its own body limit, and message_id as the
-// idempotency key. A storage failure answers 5xx on purpose, so the agent keeps
-// retrying instead of the result being dropped.
+// This is machine-facing and separate from everything the browser uses: its own
+// token, its own body limit, and message_id as the idempotency key. A storage
+// failure answers 5xx on purpose, so the agent keeps retrying instead of the
+// result being dropped.
 func (s *Server) handleAgentCallback(c fiber.Ctx) error {
 	if s.agentCallbackToken == "" {
 		return fiber.NewError(fiber.StatusServiceUnavailable, "agent callback token is not configured")

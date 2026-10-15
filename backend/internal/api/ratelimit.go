@@ -15,15 +15,10 @@ type loginLimiter struct {
 const (
 	loginWindow = time.Minute
 	loginMax    = 10
-	webhookMax  = 60
 )
 
 func newLoginLimiter() *loginLimiter {
 	return newLimiter(loginMax)
-}
-
-func newWebhookLimiter() *loginLimiter {
-	return newLimiter(webhookMax)
 }
 
 func newLimiter(max int) *loginLimiter {

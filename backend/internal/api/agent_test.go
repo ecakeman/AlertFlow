@@ -66,7 +66,6 @@ func agentApp(t *testing.T, token string) *fiber.App {
 		}}},
 		database:   database,
 		agentToken: token,
-		webhooks:   newWebhookLimiter(),
 	}
 	attachQuery(s)
 	s.app = fiber.New(fiber.Config{BodyLimit: maxBodyBytes, ErrorHandler: errorHandler})

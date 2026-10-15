@@ -282,17 +282,14 @@ func (s *Service) Incidents(f IncidentFilter) (*IncidentPage, error) {
 	return &IncidentPage{Incidents: list, Total: total}, nil
 }
 
-// IncidentDetail is one incident with its comments and the external alerts that
-// overlapped its open interval.
+// IncidentDetail is one incident with its comments.
 type IncidentDetail struct {
-	Incident       db.Incident
-	Comments       []db.IncidentComment
-	ExternalAlerts []db.ExternalAlertView
+	Incident db.Incident
+	Comments []db.IncidentComment
 }
 
-// IncidentDetail loads one incident and everything shown beside it. The alert
-// overlap window ends at resolved_at, or at now while the incident is ongoing.
-func (s *Service) IncidentDetail(id int64, now time.Time) (*IncidentDetail, error) {
+// IncidentDetail loads one incident and everything shown beside it.
+func (s *Service) IncidentDetail(id int64) (*IncidentDetail, error) {
 	inc, err := s.DB.GetIncident(id)
 	if err != nil {
 		return nil, err
@@ -301,24 +298,10 @@ func (s *Service) IncidentDetail(id int64, now time.Time) (*IncidentDetail, erro
 	if err != nil {
 		return nil, err
 	}
-	end := now.Unix()
-	if inc.ResolvedAt != nil {
-		end = *inc.ResolvedAt
-	}
-	if end < inc.StartedAt {
-		end = inc.StartedAt
-	}
-	alerts, err := s.DB.ListExternalAlertsOverlapping(inc.ServiceID, inc.StartedAt, end)
-	if err != nil {
-		return nil, err
-	}
 	if comments == nil {
 		comments = []db.IncidentComment{}
 	}
-	if alerts == nil {
-		alerts = []db.ExternalAlertView{}
-	}
-	return &IncidentDetail{Incident: *inc, Comments: comments, ExternalAlerts: alerts}, nil
+	return &IncidentDetail{Incident: *inc, Comments: comments}, nil
 }
 
 // DashboardStats returns the aggregates the main dashboard's tiles need beyond

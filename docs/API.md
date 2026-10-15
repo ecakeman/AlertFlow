@@ -42,13 +42,16 @@ transitions; these endpoints cover reading them plus the manual/edit path. See
 
 | Method & path                       | Auth  | Description                                                        |
 | ----------------------------------- | ----- | ------------------------------------------------------------------ |
-| `POST /api/alerts/webhook`         | bearer | Accept one external alert. See below. |
 | `GET /api/incidents`                | user  | A page of incidents, newest first, plus the total matching the filter — `{ incidents, total }`. Filters: `?status=ongoing\|resolved`, `?severity=outage\|warning`, `?serviceId=`; paging: `?limit=` 1–200 (default 20), `?offset=`. |
-| `GET /api/incidents/{id}`           | user  | One incident **with its comments** and overlapping external alerts. |
+| `GET /api/incidents/{id}`           | user  | One incident **with its comments**. |
 | `POST /api/incidents`               | admin | Log one manually `{ serviceId, title?, startedAt?, resolvedAt? }`.¹ |
 | `PUT /api/incidents/{id}`           | admin | Edit `{ title?, startedAt?, resolvedAt? }`; setting `resolvedAt` resolves it.² |
 | `DELETE /api/incidents/{id}`        | admin | Delete the incident (comments cascade).                            |
 | `POST /api/incidents/{id}/comments` | user³ | Add a comment `{ body }`.                                          |
+| `GET /api/incidents/{id}/agent-report` | user | The diagnostic agent's result for this incident, read from AlertFlow's own database. See below. |
+| `POST /api/incidents/{id}/agent-chat/requests` | user | Queue a troubleshooting question `{ message, history?, requestId? }`. |
+| `GET /api/incidents/{id}/agent-chat/requests/{requestId}` | user | One question's state (`pending` / `answered` / `failed`) and its answer. |
+| `GET /api/incidents/{id}/agent-chat/requests` | user | The incident's recent questions, oldest first, for restoring the conversation. |
 
 ¹ `startedAt` defaults to now. Returns `400` if the service already has an
 ongoing incident (at most one per service) or the `serviceId` is unknown.
@@ -56,26 +59,70 @@ ongoing incident (at most one per service) or the `serviceId` is unknown.
 ³ **Any** signed-in user may comment — this is the one incident write that is not
 admin-gated.
 
-## External alerts
+## Diagnostic agent
 
-`POST /api/alerts/webhook` does not use the session cookie. Send `Authorization: Bearer <ALERTFLOW_WEBHOOK_TOKEN>`. If that variable is empty, every request is rejected. The body is at most 64 KiB. One source address is limited to 60 requests per minute.
+AlertFlow pushes an incident's diagnosis request to the agent, and the agent
+pushes its result back to `POST /webhooks/agent` (its own bearer,
+`ALERTFLOW_AGENT_CALLBACK_TOKEN`). AlertFlow therefore keeps its own copy of
+every result, so these endpoints work whether or not the agent is online, and a
+diagnosis is never read by proxying the agent's API.
+
+`GET /api/incidents/{id}/agent-report` returns:
 
 ```jsonc
 {
-  "source": "grafana",
-  "event_id": "evt-1",          // stable id for this delivery; retries must reuse it
-  "alert_key": "cpu-high",      // same value for the firing and resolved events
-  "service_id": "api",          // must already exist in config.yaml
-  "status": "firing",           // firing | resolved
-  "occurred_at": 1780000000,    // unix seconds
-  "title": "CPU high",
-  "description": "optional"
+  "available": true,
+  "runId": "…",              // the agent's run id
+  "status": "completed",     // running while the run has started but not finished
+  "eventType": "incident_start",
+  "createdAt": "2026-07-15T10:46:00Z",
+  "usage": { "llm_calls": 5, "tokens": 8123 },
+  "report": { /* the agent's report, verbatim */ },
+  "evidence": { /* only the evidence the report cites */ }
 }
 ```
 
-`202` means the event and its outbox row were stored. `200` with `"duplicate": true` means this `source` and `event_id` were already stored. Neither response means the incident or a notification has been processed. Unknown services, missing fields, and a status other than `firing` or `resolved` return `400`.
+When there is nothing to show, the response is `200` with
+`{ "available": false, "reason": "…" }` — a missing diagnosis is a normal state,
+not a failure of the page. The reasons are `agent not configured` (no callback
+token set) and `no agent run for this incident`.
 
-The same `alert_key` stays one alert instance. An incident stays open until the HTTP status is not `offline` and no external alert for that service is `firing`. A later event is applied only when its `occurred_at` is strictly greater than both the alert's `last_occurred_at` and every stored event for that `source` and `alert_key`. An equal timestamp does not prove which event happened last, so the state already stored stays. A resolved event that arrives before any firing does not by itself open or close an incident, and it does block an older firing from opening one.
+**Chat is asynchronous.** `POST .../agent-chat/requests` stores the question and
+queues it on the same durable delivery path as a notification, then returns
+`202 { requestId, status: "pending" }`. The agent answers in the background and
+posts the result back; poll
+`GET .../agent-chat/requests/{requestId}` until `status` is `answered` or
+`failed`. Passing the same `requestId` again returns the original request rather
+than queueing a second question. A question nobody answers is marked `failed`
+after 10 minutes by the retention loop, so the page never waits forever.
+
+### The agent channel (`agent_webhook`)
+
+The diagnostic agent is reached through its own integration type, `agent_webhook`. Its config is
+`{ url, method, headers }` — the same shape as `webhook`, so a channel can be promoted in place with
+`PUT /api/integrations/{id}` by sending a new `type`; the URL and headers are kept.
+
+It is the **only** channel that receives the internal diagnostic context, and it does not use
+`bodyTemplate`. Its payload is the versioned v2 envelope:
+
+```jsonc
+{
+  "schema_version": "v2",
+  "message_id": "incident_start:12",   // stable per logical delivery: the agent's idempotency key
+  "message_type": "diagnostic.requested",  // also diagnostic.resolved / diagnostic.warning / chat.requested
+  "correlation_id": "incident:12",
+  "sent_at": "2026-07-15T10:45:30Z",
+  "payload": {
+    "event": { /* the same fields the default webhook sends */ },
+    "diagnostic_context": { /* incident, service, triggeringCheck, recentChecks, metrics,
+                                relatedIncidents, timeWindow, coverage */ }
+  }
+}
+```
+
+The context is assembled when the delivery is attempted, from the live config and PostgreSQL — not
+stored in the monitor's outbox. It is bounded, and anything dropped to fit is named in
+`coverage.truncated` so the agent can tell "no data" from "data that did not fit".
 
 ## Integrations
 
@@ -103,7 +150,7 @@ on it:
   "bodyTemplate": "{{.ServiceName}} is {{.Event}}" }                 //   (blank ⇒ default JSON payload)
 ```
 
-A blank `bodyTemplate` sends the old fields plus the agent contract. `event`, `service`, `url`, `status` (`down`, `recovered`, or `warning`), and `message` stay as they were. The added fields are `schema_version`, `event_id`, `service_id`, `service_name`, `occurred_at`, and `severity`. `occurred_at` is this event's time. `started_at` is the incident's start and is omitted for a warning. `resolved_at` is present on resolve and matches `occurred_at`. `incident_id` is present when the delivery has an incident. `check_id` is present for a check and omitted for an external alert. `attempts` and `error` are present when the snapshot has them. `event_id` is `<event>:<incident_id>`, or `delivery:<notification_deliveries.id>` when there is no incident id. A custom `bodyTemplate` renders the message, including `.OccurredAt` and `.StartedAt`.
+A blank `bodyTemplate` sends the old fields plus the agent contract. `event`, `service`, `url`, `status` (`down`, `recovered`, or `warning`), and `message` stay as they were. The added fields are `schema_version`, `event_id`, `service_id`, `service_name`, `occurred_at`, and `severity`. `occurred_at` is this event's time. `started_at` is the incident's start and is omitted for a warning. `resolved_at` is present on resolve and matches `occurred_at`. `incident_id` is present when the delivery has an incident. `check_id` is present for a check. `attempts` and `error` are present when the snapshot has them. `event_id` is `<event>:<incident_id>`, or `delivery:<notification_deliveries.id>` when there is no incident id. A custom `bodyTemplate` renders the message, including `.OccurredAt` and `.StartedAt`.
 
 `GET /internal/agent/v1/incidents`, `/incidents/{id}`, `/services/{id}/metrics`, and `/services/{id}/checks` return the same JSON as the matching `/api` reads. Send `Authorization: Bearer <ALERTFLOW_AGENT_TOKEN>`. An empty token makes the whole group return 503. A wrong token returns 401. Other methods return 405, and unknown paths return JSON 404.
 
@@ -295,9 +342,6 @@ status.
   "comments": [
     { "id": 1, "incidentId": 1, "username": "admin",
       "body": "Looking into it", "createdAt": "2026-07-15T10:50:00Z" }
-  ],
-  "externalAlerts": [
-    { "source": "grafana", "alertKey": "cpu-high", "status": "firing", "title": "CPU high" }
   ]
 }
 ```

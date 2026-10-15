@@ -5,6 +5,7 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -52,18 +53,16 @@ type Server struct {
 	app    *fiber.App
 	webFS  fs.FS
 	logins *loginLimiter
-	// webhookToken is ALERTFLOW_WEBHOOK_TOKEN. Empty means the endpoint rejects every request.
-	webhookToken string
 	// agentToken is ALERTFLOW_AGENT_TOKEN. Empty means the internal agent routes reject every request.
 	agentToken string
 	// agentCallbackToken is ALERTFLOW_AGENT_CALLBACK_TOKEN: the bearer the Agent
 	// uses to push a run result to POST /webhooks/agent. Empty disables that edge.
 	agentCallbackToken string
 	// agentBaseURL/agentAPIToken point at the diagnostic agent's API (AGENT_BASE_URL /
-	// AGENT_API_TOKEN) so the UI can read its reports; empty disables that.
+	// AGENT_API_TOKEN). Only the legacy synchronous chat proxy still uses them;
+	// reports are read from this server's own database.
 	agentBaseURL  string
 	agentAPIToken string
-	webhooks      *loginLimiter
 	stop          chan struct{}
 }
 
@@ -91,15 +90,13 @@ func New(configDir string) (*Server, error) {
 		database:      database,
 		sched:         monitor.New(database),
 		dispatcher:    dispatcher,
-		webFS:         web.FS(),
-		logins:        newLoginLimiter(),
-		webhookToken:       os.Getenv("ALERTFLOW_WEBHOOK_TOKEN"),
+		webFS:              web.FS(),
+		logins:             newLoginLimiter(),
 		agentToken:         os.Getenv("ALERTFLOW_AGENT_TOKEN"),
 		agentCallbackToken: os.Getenv("ALERTFLOW_AGENT_CALLBACK_TOKEN"),
 		agentBaseURL:       os.Getenv("AGENT_BASE_URL"),
 		agentAPIToken:      os.Getenv("AGENT_API_TOKEN"),
-		webhooks:      newWebhookLimiter(),
-		stop:          make(chan struct{}),
+		stop:               make(chan struct{}),
 	}
 	// The read cache is an enhancement: an unusable REDIS_URL is logged and the
 	// API serves straight from PostgreSQL rather than refusing to start.
@@ -162,9 +159,7 @@ func (s *Server) routes() {
 	app.Post("/api/setup", s.handleSetup)
 	app.Post("/api/auth/login", s.handleLogin)
 	app.Post("/api/auth/logout", s.handleLogout)
-	app.Post("/api/alerts/webhook", s.handleAlertWebhook)
-	// The agent's own inbound edge: a different token, body and idempotency key
-	// from the external-alert webhook above.
+	// The agent's inbound edge: its own token, body limit and idempotency key.
 	app.Post("/webhooks/agent", s.handleAgentCallback)
 
 	// Authenticated.
@@ -264,6 +259,23 @@ func (s *Server) serveSPA(c fiber.Ctx) error {
 		c.Type(ext)
 	}
 	return c.Send(data)
+}
+
+// bearerMatch compares an Authorization header against a token in constant
+// time. A malformed or differently-sized header still burns a comparison, so
+// the response time does not leak the token's length.
+func bearerMatch(header, token string) bool {
+	const prefix = "Bearer "
+	if len(header) < len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
+		subtle.ConstantTimeCompare([]byte(token), []byte(token))
+		return false
+	}
+	got := header[len(prefix):]
+	if len(got) != len(token) {
+		subtle.ConstantTimeCompare([]byte(token), []byte(token))
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
 }
 
 func (s *Server) requireAgent(c fiber.Ctx) error {

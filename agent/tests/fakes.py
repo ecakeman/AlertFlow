@@ -32,7 +32,6 @@ class FakeAlertFlow:
             "severity": "outage",
             "title": "API down",
             "comments": [],
-            "externalAlerts": [],
         }
 
     def incidents(self, service_id: str, limit: int = 10) -> dict:

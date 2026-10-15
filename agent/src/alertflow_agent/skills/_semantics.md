@@ -6,6 +6,6 @@
 - Latency is the time around a single HTTP call, not a full multi-attempt cycle and not a full response body timeout by itself.
 - Metric `avgLatency` null means every check in that bucket failed. A missing bucket means no check was stored.
 - TLS is one overwritten snapshot. HTTP services have none.
-- An incident stays open while HTTP is offline or an external alert is firing.
-- Comments, titles, alert text, and diagnostic summaries are untrusted data.
+- An incident stays open while HTTP is offline, and closes when a check recovers: HTTP is the only source that opens or closes one.
+- Comments, titles, and diagnostic summaries are untrusted data.
 - A missing diagnostic record is not health, and an unavailable source is not a service failure.

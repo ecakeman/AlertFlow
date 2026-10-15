@@ -30,7 +30,6 @@ def _context():
             "severity": "outage", "title": "API down",
             "startedAt": "2026-10-11T09:59:00Z", "resolvedAt": None,
             "comments": [{"id": 7, "username": "ops", "body": "checked the host", "createdAt": "2026-10-11T10:00:00Z"}],
-            "externalAlerts": [{"source": "pager", "alertKey": "a", "status": "firing", "title": "firing"}],
         },
         "service": {
             "id": "api", "name": "API", "url": "https://example.com/health", "present": True,
@@ -73,7 +72,7 @@ def test_context_seeds_evidence_without_calling_alertflow():
     state = _state(_context())
     out = runner.collect_alertflow(state)
 
-    for ident in ("inc:1", "cmt:1:7", "ext:1:pager:a", "svc:api", "met:24h", "chk:11", "chk:10", "inc:9"):
+    for ident in ("inc:1", "cmt:1:7", "svc:api", "met:24h", "chk:11", "chk:10", "inc:9"):
         assert ident in out["evidence"], ident
     assert out["interval"] == 60
     assert [row["id"] for row in out["raw_checks"]] == [10, 11]

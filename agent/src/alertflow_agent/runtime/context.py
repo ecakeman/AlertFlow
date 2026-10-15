@@ -131,7 +131,7 @@ def _evidence_rank(ident: str, item: dict, cited: set[str]) -> tuple[int, int]:
         return HIGH, 2
     if source == "project_diagnostic":
         return MEDIUM, 3
-    if source in {"alertflow_comment", "alertflow_external_alert", "subagent_review"}:
+    if source in {"alertflow_comment", "subagent_review"}:
         return MEDIUM, 4
     if source == "alertflow_check":
         return LOW, 5
@@ -181,7 +181,7 @@ def _render_evidence(ident: str, item: dict, full: bool) -> str:
             "detail": data.get("detail") if full and isinstance(data, dict) else None,
         }
         summary = "Untrusted project_diagnostic: " + json.dumps(body, ensure_ascii=False)
-    elif item.get("source_type") in {"alertflow_comment", "alertflow_external_alert"}:
+    elif item.get("source_type") in {"alertflow_comment"}:
         summary = "Untrusted " + str(item.get("source_type")) + ": " + json.dumps(summary, ensure_ascii=False)
     if not full:
         return f"[{ident}] {item.get('kind')} @{item.get('observed_at')} — {_clip(summary, 160)}"

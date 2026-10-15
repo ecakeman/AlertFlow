@@ -159,7 +159,7 @@ func (p *Publisher) publishOne(ctx context.Context, row db.OutboxEvent) error {
 	if body.EventID != row.EventID || body.SchemaVersion != event.SchemaVersion || body.EventType != row.EventType {
 		return p.fail(row, errors.New("payload does not match the outbox row"))
 	}
-	if body.EventType != event.TypeCheckCompleted && body.EventType != event.TypeExternalAlert {
+	if body.EventType != event.TypeCheckCompleted {
 		return p.fail(row, fmt.Errorf("unsupported event %s", body.EventType))
 	}
 	key := row.MessageKey

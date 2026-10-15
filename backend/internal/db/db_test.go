@@ -17,7 +17,7 @@ func TestMigrationsCreateTables(t *testing.T) {
 		"service_tls", "incidents", "incident_comments",
 		"integrations", "notification_log", "outbox_events",
 		"processed_events", "dead_letter_events", "service_runtime_state", "notification_deliveries",
-		"external_alert_events", "external_alerts",
+		"agent_runs", "agent_chat_requests",
 	}
 	for _, table := range want {
 		var name string
@@ -27,6 +27,16 @@ func TestMigrationsCreateTables(t *testing.T) {
 		).Scan(&name)
 		if err != nil {
 			t.Errorf("table %q not created: %v", table, err)
+		}
+	}
+	// External alert ingestion was removed; its tables must not come back.
+	for _, table := range []string{"external_alert_events", "external_alerts"} {
+		var name string
+		if err := database.QueryRow(
+			`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1`,
+			table,
+		).Scan(&name); err == nil {
+			t.Errorf("table %q still exists after the external-alert cleanup", table)
 		}
 	}
 }

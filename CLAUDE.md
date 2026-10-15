@@ -53,16 +53,17 @@ invent a test command.
 - **Backend packages** (`backend/internal/`): `state` (tiny `state.json` outside the config dir, recording
   which config dir is active — lets a custom config-dir setting survive restarts), `config` (yaml load/save/validate), `db` (pgx `database/sql`
   — keep `CGO_ENABLED=0`; schema via **goose** PostgreSQL migrations in `db/migrations/*.sql`, embedded and
-  run on `Open`), `event` (`monitor.check.completed` payload and `Decide`), `publish` (outbox to Kafka), `consume` (Kafka to incidents and pending deliveries), `auth` (bcrypt + session tokens; cookies are set by the api layer), `monitor` (HTTP
+  run on `Open`), `event` (`monitor.check.completed` payload and `Decide`), `publish` (outbox to Kafka), `consume` (Kafka to incidents and pending deliveries), `query` (the read-composition layer above), `cache` (optional Redis read cache), `auth` (bcrypt + session tokens; cookies are set by the api layer), `monitor` (HTTP
   checker + goroutine-per-service ticker scheduler; `Sync` reconciles on config change; also reads the
   TLS cert off HTTPS responses; it does not call `incident`), `incident` (opens/resolves
   outage incidents from online↔offline transitions; imports `db`+`notify`, never `monitor`, to avoid a
   cycle), `notify` (incident-start/resolve notifications; a `Dispatcher` fans out to per-type `Sender`s
-  — telegram/slack/email/webhook — registered via `init()`), `image` (WebP
+  — telegram/slack/email/webhook, registered via `init()`, plus `agent_webhook`, registered at startup
+  because it needs the query layer), `image` (WebP
   validate/store), `archive` (export/import zip), `logger` (slog JSON setup), `api` (the `Server` owns
   config+db+scheduler and applies edits copy-on-write under a lock; **Fiber v3** app with per-route
   auth/admin middleware, a central `ErrorHandler` rendering `{ "error": ... }`, and a native SPA
-  catch-all serving the embedded FS), `web` (`//go:embed dist`, exposes `web.FS()`). Entry:
+  catch-all serving the embedded FS — `/api/` and `/webhooks/` never fall through to it), `web` (`//go:embed dist`, exposes `web.FS()`). Entry:
   `cmd/alertflow/main.go` (`ALERTFLOW_ROLE`: `server` listens and runs the scheduler; `publisher`, `consumer`, and `delivery` do not).
 - **Frontend:** Vue 3 `<script setup>`, Pinia stores (`auth`, `services`, `incidents`, `integrations`,
   `settings`, `ui`), typed API client in `src/api/`, `useServicesPolling` (~10s) drives live updates.
@@ -72,14 +73,12 @@ invent a test command.
 
 ## Invariants (breaking these causes real bugs)
 
-- **An incident stays open while HTTP is `offline` or an external alert is `firing`.** The check
+- **An incident stays open while HTTP is `offline`.** The check
   scheduler does not apply that change: it commits the check and an outbox event, then stops.
-  The consumer applies check transitions with `event.Decide` and external alerts in the same kind of
-  transaction. It does not call `OnTransition` or `Dispatcher.Notify`. A recovery from only one source
-  does not close the incident. At most one `ongoing` incident per
+  The consumer applies check transitions with `event.Decide` in one transaction. It does not call
+  `OnTransition` or `Dispatcher.Notify`. At most one `ongoing` incident per
   service, enforced by a **partial unique index**. `lastStatus` is in-memory, re-seeded from the
-  latest `checks` row, and used only to decide retries. `service_runtime_state` is the HTTP status,
-  not the external alert. Full flow:
+  latest `checks` row, and used only to decide retries. Full flow:
   [ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-incident-lifecycle).
 - **`config.yaml` is mutated only via `Server.updateConfig`** (clone → mutate → validate → atomic save
   → swap → `Sync`). Never touch `s.cfg` directly; add new `Service` fields to `config/clone.go` too.
@@ -88,6 +87,19 @@ invent a test command.
   is exposed) and preserved on `PUT` when blank/omitted. They *are* included in export archives on
   purpose — a secret-less backup can't restore working channels.
 - **Route guards are UX only** — the API must enforce roles independently (`auth, admin` middleware).
+- **Reads go through `query`.** `backend/internal/query` is the one place that composes monitoring
+  reads (service list, metrics, check paging, incidents, dashboard, and the diagnostic context).
+  Fiber handlers keep auth, input validation and status codes; they do not assemble SQL results.
+  `query.Service.Cache` is an optional Redis read cache — always nil-safe, and it only ever caches
+  derived views (never incident state or the diagnostic context). Reuse the SQL in `db`; add a
+  method there rather than writing a second query.
+- **The agent has its own two edges, and they are not the notification channels.**
+  Outbound: integration type `agent_webhook` (not `webhook`), encoded by `notify.AgentSender` into
+  the versioned v2 envelope — it is the only channel that receives the diagnostic context.
+  Inbound: `POST /webhooks/agent` (bearer `ALERTFLOW_AGENT_CALLBACK_TOKEN`), which stores results in
+  `agent_runs` / `agent_chat_requests` keyed by a unique `message_id`, so a redelivery is a no-op.
+  `/api/incidents/:id/agent-report` reads that local copy — it does not call the agent.
+  External alert ingestion (`POST /api/alerts/webhook`) no longer exists.
 - **Check results are `online`/`offline`/`warning`**; `unknown` means "no data yet" and never comes
   from a check. `warning` is a *cycle* that failed and then succeeded on a retry — the service
   answered, so it counts as uptime and opens no incident. `Check()` itself still only ever returns

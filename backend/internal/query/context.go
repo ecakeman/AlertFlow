@@ -62,18 +62,17 @@ type DiagnosticContext struct {
 	Coverage         Coverage          `json:"coverage"`
 }
 
-// IncidentContext is the incident plus the notes and alerts shown beside it.
+// IncidentContext is the incident plus the notes left on it.
 type IncidentContext struct {
-	ID             int64                  `json:"id"`
-	ServiceID      string                 `json:"serviceId"`
-	ServiceName    string                 `json:"serviceName"`
-	Status         string                 `json:"status"`
-	Severity       string                 `json:"severity"`
-	Title          string                 `json:"title"`
-	StartedAt      string                 `json:"startedAt"`
-	ResolvedAt     *string                `json:"resolvedAt"`
-	Comments       []CommentContext       `json:"comments"`
-	ExternalAlerts []ExternalAlertContext `json:"externalAlerts"`
+	ID          int64            `json:"id"`
+	ServiceID   string           `json:"serviceId"`
+	ServiceName string           `json:"serviceName"`
+	Status      string           `json:"status"`
+	Severity    string           `json:"severity"`
+	Title       string           `json:"title"`
+	StartedAt   string           `json:"startedAt"`
+	ResolvedAt  *string          `json:"resolvedAt"`
+	Comments    []CommentContext `json:"comments"`
 }
 
 // CommentContext is one note on an incident.
@@ -82,14 +81,6 @@ type CommentContext struct {
 	Username  string `json:"username"`
 	Body      string `json:"body"`
 	CreatedAt string `json:"createdAt"`
-}
-
-// ExternalAlertContext is one alert instance overlapping the incident window.
-type ExternalAlertContext struct {
-	Source   string `json:"source"`
-	AlertKey string `json:"alertKey"`
-	Status   string `json:"status"`
-	Title    string `json:"title"`
 }
 
 // ServiceContext is the service definition the Agent needs to reason about a
@@ -188,7 +179,6 @@ type Coverage struct {
 type ContextOptions struct {
 	IncidentID int64
 	EventTime  time.Time
-	Now        time.Time
 	// CheckLookbackMinutes widens the check window before the event. Zero uses
 	// DefaultCheckLookbackMinutes.
 	CheckLookbackMinutes int
@@ -200,11 +190,7 @@ type ContextOptions struct {
 // failure degrades: the field is left empty and Coverage records why, because a
 // missing series must not stop a diagnosis that can still be made from the rest.
 func (s *Service) DiagnosticContext(opts ContextOptions) (*DiagnosticContext, error) {
-	now := opts.Now
-	if now.IsZero() {
-		now = time.Now()
-	}
-	detail, err := s.IncidentDetail(opts.IncidentID, now)
+	detail, err := s.IncidentDetail(opts.IncidentID)
 	if err != nil {
 		return nil, err
 	}
@@ -256,7 +242,6 @@ func (s *Service) DiagnosticContext(opts ContextOptions) (*DiagnosticContext, er
 	}
 
 	ctx.Incident.Comments = s.contextComments(detail.Comments, &ctx.Coverage)
-	ctx.Incident.ExternalAlerts = s.contextAlerts(detail.ExternalAlerts)
 
 	ctx.Service = s.contextService(inc.ServiceID, &ctx.Coverage)
 	ctx.RecentChecks, ctx.TriggeringCheck = s.contextChecks(inc.ServiceID, checksFrom, eventTime.Unix(), &ctx.Coverage)
@@ -328,21 +313,6 @@ func (s *Service) contextComments(comments []db.IncidentComment, cov *Coverage) 
 	return out
 }
 
-func (s *Service) contextAlerts(alerts []db.ExternalAlertView) []ExternalAlertContext {
-	out := make([]ExternalAlertContext, 0, len(alerts))
-	for _, a := range alerts {
-		out = append(out, ExternalAlertContext{
-			Source: a.Source, AlertKey: a.AlertKey, Status: a.Status, Title: clipText(a.Title),
-		})
-	}
-	return out
-}
-
-// contextChecks walks stored cycles back from the event and returns the window
-// oldest-first, plus the newest cycle at or before the event (the triggering
-// check). It reuses ListChecks' keyset cursor rather than adding a windowed SQL
-// query, and stops after contextScanPages pages so a far-past event cannot make
-// the builder read the whole retention window.
 func (s *Service) contextChecks(serviceID string, from, to int64, cov *Coverage) ([]CheckContext, *CheckContext) {
 	var (
 		collected []db.Check

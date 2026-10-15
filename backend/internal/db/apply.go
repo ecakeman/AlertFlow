@@ -144,13 +144,6 @@ func applyCheckEventTx(tx *sql.Tx, ev event.CheckCompleted) error {
 		subject.startedAt = ev.OccurredAt
 		kind = "incident_start"
 	case event.TransitionResolve:
-		active, err := countFiringAlerts(tx, ev.ServiceID)
-		if err != nil {
-			return err
-		}
-		if active > 0 {
-			break
-		}
 		id, startedAt, err := resolveOngoingTx(tx, ev.ServiceID, ev.OccurredAt, now)
 		if err != nil {
 			return err

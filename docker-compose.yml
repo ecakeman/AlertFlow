@@ -50,7 +50,6 @@ services:
       ALERTFLOW_DATABASE_URL: postgres://alertflow:${POSTGRES_PASSWORD:-alertflow}@postgres:5432/alertflow?sslmode=disable
       ALERTFLOW_CONFIG_DIR: /config
       ALERTFLOW_ADDR: :8080
-      ALERTFLOW_WEBHOOK_TOKEN: ${ALERTFLOW_WEBHOOK_TOKEN:-}
       ALERTFLOW_AGENT_TOKEN: ${ALERTFLOW_AGENT_TOKEN:-}
       # Agent 回传诊断结果用的独立令牌（POST /webhooks/agent）
       ALERTFLOW_AGENT_CALLBACK_TOKEN: ${ALERTFLOW_AGENT_CALLBACK_TOKEN:-}

@@ -392,8 +392,6 @@ class Runner:
             _evidence(state, f"inc:{detail['id']}", "alertflow_incident", "incident", detail.get("title") or detail.get("status") or "incident", {"status": detail.get("status"), "severity": detail.get("severity")})
             for comment in detail.get("comments") or []:
                 _evidence(state, f"cmt:{detail['id']}:{comment['id']}", "alertflow_comment", "comment", comment.get("body") or "", {"body": comment.get("body")})
-            for alert in detail.get("externalAlerts") or []:
-                _evidence(state, f"ext:{detail['id']}:{alert.get('source')}:{alert.get('alertKey')}", "alertflow_external_alert", "external_alert", alert.get("title") or alert.get("status") or "", alert)
         if listing:
             for inc in listing.get("incidents") or []:
                 _evidence(state, f"inc:{inc['id']}", "alertflow_incident", "incident", inc.get("title") or inc.get("status") or "incident", {"status": inc.get("status"), "severity": inc.get("severity")})
@@ -468,10 +466,6 @@ class Runner:
             for comment in incident.get("comments") or []:
                 _evidence(state, f"cmt:{incident['id']}:{comment.get('id')}", "alertflow_comment",
                           "comment", comment.get("body") or "", {"body": comment.get("body")})
-            for alert in incident.get("externalAlerts") or []:
-                _evidence(state, f"ext:{incident['id']}:{alert.get('source')}:{alert.get('alertKey')}",
-                          "alertflow_external_alert", "external_alert",
-                          alert.get("title") or alert.get("status") or "", alert)
         for inc in context.get("relatedIncidents") or []:
             if isinstance(inc, dict) and inc.get("id"):
                 _evidence(state, f"inc:{inc['id']}", "alertflow_incident", "incident",
@@ -556,8 +550,7 @@ class Runner:
         latency = state["evidence"].get("ana:latency@0", {}).get("data") or {}
         errors = state["evidence"].get("ana:errors@0", {}).get("data") or {}
         offline = any(seg.get("status") == "offline" for seg in segments_data.get("segments") or [])
-        external = any(v["source_type"] == "alertflow_external_alert" for v in state["evidence"].values())
-        if state["event"]["event"] == "incident_start" and (offline or external):
+        if state["event"]["event"] == "incident_start" and offline:
             chosen.append("service-unavailable")
         warnings = (state["evidence"].get("ana:status@0", {}).get("data") or {}).get("warning", {}).get("n", 0)
         if warnings or segments_data.get("transitions", 0) >= 3 or state["event"]["event"] == "warning":

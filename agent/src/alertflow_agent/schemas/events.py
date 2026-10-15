@@ -157,7 +157,6 @@ def _sanitize_incident(raw, truncated: list[str], *, with_notes: bool) -> dict:
             comments = comments[-MAX_CONTEXT_COMMENTS:]
             truncated.append("COMMENTS_TRUNCATED_BY_AGENT")
         out["comments"] = [{**c, "body": _clip(c.get("body"))} for c in comments]
-        out["externalAlerts"] = [a for a in (out.get("externalAlerts") or []) if isinstance(a, dict)]
     return out
 
 

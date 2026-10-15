@@ -1,16 +1,16 @@
 # service-unavailable
 
 ## 适用
-incident_start with an offline segment or a firing external alert.
+incident_start with an offline segment.
 
 ## 需要的证据
-ana:segments, ana:errors, external alerts, tls snapshot.
+ana:segments, ana:errors, tls snapshot.
 
 ## 候选原因与区分信号
-Probe timeout, HTTP status, or an external alert that keeps the incident open after HTTP recovery.
+Probe timeout, HTTP status, or a latency cliff in the metric series.
 
 ## 调查顺序
-Read the status segments, then the error class, then external alerts.
+Read the status segments, then the error class, then the TLS snapshot.
 
 ## 解释限制
 A 503 does not prove a database failure.

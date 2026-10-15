@@ -66,7 +66,7 @@ func (s *Server) handleGetIncident(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid incident id")
 	}
-	detail, err := s.query().IncidentDetail(id, time.Now())
+	detail, err := s.query().IncidentDetail(id)
 	if errors.Is(err, query.ErrIncidentNotFound) {
 		return fiber.NewError(fiber.StatusNotFound, "incident not found")
 	}
@@ -77,12 +77,6 @@ func (s *Server) handleGetIncident(c fiber.Ctx) error {
 	out.Comments = make([]incidentCommentDTO, 0, len(detail.Comments))
 	for _, cm := range detail.Comments {
 		out.Comments = append(out.Comments, toIncidentCommentDTO(cm))
-	}
-	out.ExternalAlerts = make([]externalAlertDTO, 0, len(detail.ExternalAlerts))
-	for _, alert := range detail.ExternalAlerts {
-		out.ExternalAlerts = append(out.ExternalAlerts, externalAlertDTO{
-			Source: alert.Source, AlertKey: alert.AlertKey, Status: alert.Status, Title: alert.Title,
-		})
 	}
 	return c.JSON(out)
 }

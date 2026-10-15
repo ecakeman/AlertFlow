@@ -5,7 +5,7 @@ upmonitor is configured by a single `config.yaml` in your config directory
 plain YAML you can edit by hand — it is validated and re-loaded whenever the app
 saves it.
 
-`ALERTFLOW_AGENT_TOKEN` is not a YAML field. An empty value makes `GET /internal/agent/v1/...` return 503. `ALERTFLOW_WEBHOOK_TOKEN` is the separate inbound alert token.
+`ALERTFLOW_AGENT_TOKEN` is not a YAML field. An empty value makes `GET /internal/agent/v1/...` return 503. `ALERTFLOW_AGENT_CALLBACK_TOKEN` is the separate bearer for the agent's own inbound edge, `POST /webhooks/agent`.
 
 **Not in this file** (they live in PostgreSQL, via `ALERTFLOW_DATABASE_URL`): users,
 sessions, metrics history, TLS snapshots, **incidents + comments**, and

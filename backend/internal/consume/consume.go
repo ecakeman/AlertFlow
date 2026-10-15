@@ -1,7 +1,6 @@
-// Package consume reads check and external-alert events and applies each one in
-// one database transaction. It commits the Kafka offset only after that
-// transaction commits. It does not send notifications; it only inserts pending
-// delivery rows.
+// Package consume reads check events and applies each one in one database
+// transaction. It commits the Kafka offset only after that transaction commits.
+// It does not send notifications; it only inserts pending delivery rows.
 package consume
 
 import (
@@ -137,21 +136,6 @@ func (c *Consumer) Handle(msg kafka.Message) (commit bool, err error) {
 			return c.deadLetter(msg, env, reason)
 		}
 		err = c.DB.ApplyCheckEvent(ev)
-	case event.TypeExternalAlert:
-		var ev event.ExternalAlert
-		if err := json.Unmarshal(msg.Value, &ev); err != nil {
-			return c.deadLetter(msg, env, err.Error())
-		}
-		if ev.EventID == "" || ev.Source == "" || ev.AlertKey == "" || ev.ServiceID == "" {
-			return c.deadLetter(msg, env, "payload is missing event_id, source, alert_key, or service_id")
-		}
-		if ev.Status != "firing" && ev.Status != "resolved" {
-			return c.deadLetter(msg, env, "payload status must be firing or resolved")
-		}
-		if reason := matchMessage(msg, ev.EventID, ev.ServiceID); reason != "" {
-			return c.deadLetter(msg, env, reason)
-		}
-		err = c.DB.ApplyExternalAlert(ev)
 	default:
 		return c.deadLetter(msg, env, fmt.Sprintf("unsupported event %s version %d", env.EventType, env.SchemaVersion))
 	}
@@ -179,7 +163,7 @@ func envelope(msg kafka.Message) (messageEnvelope, string) {
 	if env.SchemaVersion != event.SchemaVersion {
 		return env, fmt.Sprintf("unsupported event %s version %d", env.EventType, env.SchemaVersion)
 	}
-	if env.EventType != event.TypeCheckCompleted && env.EventType != event.TypeExternalAlert {
+	if env.EventType != event.TypeCheckCompleted {
 		return env, fmt.Sprintf("unsupported event %s version %d", env.EventType, env.SchemaVersion)
 	}
 	return env, ""

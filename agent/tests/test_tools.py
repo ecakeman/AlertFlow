@@ -54,5 +54,4 @@ class _CommentClient(FakeAlertFlow):
     def incident(self, incident_id: int) -> dict:
         body = super().incident(incident_id)
         body["comments"] = [{"id": 7, "body": "checked the host"}]
-        body["externalAlerts"] = [{"source": "pager", "alertKey": "a", "title": "firing", "status": "firing"}]
         return body

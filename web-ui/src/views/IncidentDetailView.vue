@@ -253,11 +253,6 @@ async function loadChat() {
             </RouterLink>
             · {{ detail.source === 'auto' ? '自动检测' : '手动记录' }}
           </p>
-          <ul v-if="detail.externalAlerts?.length" class="mt-2 space-y-1 text-sm text-muted-foreground">
-            <li v-for="alert in detail.externalAlerts" :key="alert.source + ':' + alert.alertKey">
-              {{ alert.source }} · {{ alert.title }} · {{ alert.status }}
-            </li>
-          </ul>
         </div>
         <div v-if="auth.isAdmin" class="flex items-center gap-2">
           <Button variant="outline" size="sm" @click="editOpen = true">

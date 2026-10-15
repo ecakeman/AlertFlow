@@ -35,7 +35,7 @@ func TestDiagnosticContextAnchorsOnEventTime(t *testing.T) {
 		t.Fatalf("create incident: %v", err)
 	}
 
-	ctx, err := s.DiagnosticContext(ContextOptions{IncidentID: inc.ID, EventTime: event, Now: event})
+	ctx, err := s.DiagnosticContext(ContextOptions{IncidentID: inc.ID, EventTime: event})
 	if err != nil {
 		t.Fatalf("DiagnosticContext: %v", err)
 	}
@@ -68,14 +68,13 @@ func TestDiagnosticContextAnchorsOnEventTime(t *testing.T) {
 	if ctx.TimeWindow.EventTime != iso(event.Unix()) {
 		t.Fatalf("event time = %s", ctx.TimeWindow.EventTime)
 	}
-	// A delayed delivery must not move the window: passing a much later Now
-	// leaves the anchor and the upper bound untouched.
-	later, err := s.DiagnosticContext(ContextOptions{IncidentID: inc.ID, EventTime: event, Now: event.Add(2 * time.Hour)})
-	if err != nil {
-		t.Fatalf("DiagnosticContext(later): %v", err)
+	// The window is derived from the event and from nothing else, so a delivery
+	// that happens hours later still describes the same slice of time.
+	if ctx.TimeWindow.To != iso(event.Unix()) {
+		t.Fatalf("window end = %s, want the event time", ctx.TimeWindow.To)
 	}
-	if later.TimeWindow != ctx.TimeWindow {
-		t.Fatalf("window moved with delivery time: %+v vs %+v", later.TimeWindow, ctx.TimeWindow)
+	if want := iso(event.Unix() - MaxContextLookbackHours*3600); ctx.TimeWindow.From != want {
+		t.Fatalf("window start = %s, want %s", ctx.TimeWindow.From, want)
 	}
 }
 
@@ -100,7 +99,7 @@ func TestDiagnosticContextTruncatesChecks(t *testing.T) {
 	}
 
 	ctx, err := s.DiagnosticContext(ContextOptions{
-		IncidentID: inc.ID, EventTime: event, Now: event, CheckLookbackMinutes: 24 * 60,
+		IncidentID: inc.ID, EventTime: event, CheckLookbackMinutes: 24 * 60,
 	})
 	if err != nil {
 		t.Fatalf("DiagnosticContext: %v", err)
@@ -126,7 +125,7 @@ func TestDiagnosticContextMissingServiceIsAGap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create incident: %v", err)
 	}
-	ctx, err := s.DiagnosticContext(ContextOptions{IncidentID: inc.ID, EventTime: event, Now: event})
+	ctx, err := s.DiagnosticContext(ContextOptions{IncidentID: inc.ID, EventTime: event})
 	if err != nil {
 		t.Fatalf("DiagnosticContext: %v", err)
 	}
