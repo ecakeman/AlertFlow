@@ -52,6 +52,8 @@ services:
       ALERTFLOW_ADDR: :8080
       ALERTFLOW_WEBHOOK_TOKEN: ${ALERTFLOW_WEBHOOK_TOKEN:-}
       ALERTFLOW_AGENT_TOKEN: ${ALERTFLOW_AGENT_TOKEN:-}
+      # Agent 回传诊断结果用的独立令牌（POST /webhooks/agent）
+      ALERTFLOW_AGENT_CALLBACK_TOKEN: ${ALERTFLOW_AGENT_CALLBACK_TOKEN:-}
       AGENT_BASE_URL: ${AGENT_BASE_URL:-http://agent:8000}
       AGENT_API_TOKEN: ${AGENT_API_TOKEN:-}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -147,6 +149,9 @@ services:
       AGENT_API_TOKEN: ${AGENT_API_TOKEN:-}
       ALERTFLOW_AGENT_TOKEN: ${ALERTFLOW_AGENT_TOKEN:-}
       ALERTFLOW_BASE_URL: http://alertflow:8080
+      # 诊断结果回传（Agent → AlertFlow）。未配置令牌时结果只留在 Agent 自己的库里。
+      AGENT_CALLBACK_URL: ${AGENT_CALLBACK_URL:-http://alertflow:8080/webhooks/agent}
+      AGENT_CALLBACK_TOKEN: ${AGENT_CALLBACK_TOKEN:-}
       AGENT_DATABASE_URL: postgres://alertflow:${POSTGRES_PASSWORD:-alertflow}@postgres:5432/alertflow_agent?sslmode=disable
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
@@ -154,6 +159,10 @@ services:
       DIAGNOSTICS_FILE: /diagnostics/diagnostics.yaml
       CHECK_LOOKBACK_MINUTES: ${CHECK_LOOKBACK_MINUTES:-60}
       CHECK_MAX_ROWS: ${CHECK_MAX_ROWS:-500}
+      # 入站信封上限，与 Go 侧 AgentMaxPayloadBytes 对齐（默认上下文比早期事件大得多）
+      WEBHOOK_MAX_BYTES: ${WEBHOOK_MAX_BYTES:-524288}
+      # 回头找 AlertFlow 要数据的工具（检查历史/指标/Incident 详情）每次 run 的次数上限
+      MAX_QUERY_CALLS: ${MAX_QUERY_CALLS:-8}
       MAX_LEAD_ROUNDS: ${MAX_LEAD_ROUNDS:-8}
       MAX_LLM_CALLS: ${MAX_LLM_CALLS:-24}
       MAX_TOOL_CALLS: ${MAX_TOOL_CALLS:-14}

@@ -50,6 +50,34 @@ CREATE TABLE IF NOT EXISTS reports (
 );
 
 -- ============================================================================
+-- 回传 AlertFlow 的待发消息
+-- ============================================================================
+
+-- 报告写入与回调入队在**同一个事务**里完成：不会出现「报告已经落库、进程在发出
+-- 回调前挂掉、之后再也不回传」的窗口。发送成功才标 sent；失败按退避重试，超过
+-- 次数上限标 dead。发送是 at-least-once，AlertFlow 按 message_id 幂等。
+-- 单进程 Agent，所以用 lease_until 而不是 lease_owner 防重复领取。
+CREATE TABLE IF NOT EXISTS agent_callback_outbox (
+    id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    message_id      text UNIQUE NOT NULL,
+    message_type    text NOT NULL,
+    correlation_id  text NOT NULL DEFAULT '',
+    payload         jsonb NOT NULL,
+    status          text NOT NULL DEFAULT 'pending',
+    attempt_count   int NOT NULL DEFAULT 0,
+    next_attempt_at timestamptz NOT NULL DEFAULT now(),
+    last_error      text,
+    lease_until     timestamptz,
+    sent_at         timestamptz,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    updated_at      timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS agent_callback_due
+    ON agent_callback_outbox (next_attempt_at)
+    WHERE status IN ('pending', 'retry_wait', 'sending');
+
+-- ============================================================================
 -- 长期记忆
 -- ============================================================================
 

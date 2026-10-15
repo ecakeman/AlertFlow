@@ -41,6 +41,15 @@ class Settings(BaseSettings):
     report_grace_seconds: int = 90
     max_concurrent_runs: int = 2
 
+    # --- 回传 AlertFlow（Agent → Go）---
+    # 未配置 token 时不入队也不发送：结果留在 Agent 自己的库里。
+    # agent_callback_url 为空时取 ALERTFLOW_BASE_URL + /webhooks/agent。
+    agent_callback_url: str = ""
+    agent_callback_token: str = ""
+    callback_max_attempts: int = 8
+    callback_batch: int = 5
+    callback_poll_seconds: float = 2.0
+
     # --- 长期记忆（事件簿 / 服务档案）---
     memory_enabled: bool = True
     memory_lookback_days: int = 30          # 预筛窗口

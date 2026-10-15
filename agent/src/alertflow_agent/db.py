@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +10,27 @@ from pathlib import Path
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _set_clause(fields: dict) -> tuple[str, list]:
+    """Build a SQL SET clause. JSON columns take a JSON string and a ::jsonb cast."""
+    sets: list[str] = []
+    values: list = []
+    for key, value in fields.items():
+        if key in {"input_event", "usage", "report", "payload", "evidence"}:
+            sets.append(f"{key} = %s::jsonb")
+            values.append(json.dumps(value))
+        else:
+            sets.append(f"{key} = %s")
+            values.append(value)
+    return ", ".join(sets), values
+
+
+def psycopg_connect(url: str):
+    """Open a short-lived connection. Kept in one place so every JSON write casts."""
+    import psycopg
+
+    return psycopg.connect(url)
 
 
 class MemoryStore:
@@ -19,6 +41,8 @@ class MemoryStore:
         self.events: dict[str, list[dict]] = {}
         self.evidence: dict[str, dict] = {}
         self.reports: dict[str, list[dict]] = {}
+        self.callbacks: list[dict] = []
+        self.callback_ids: dict[str, str] = {}
 
     def insert_run(self, row: dict) -> dict | None:
         with self.lock:
@@ -45,13 +69,86 @@ class MemoryStore:
         with self.lock:
             self.runs[run_id].update(fields)
 
-    def finish(self, run_id: str, **fields) -> bool:
+    def finish(self, run_id: str, callback: dict | None = None, **fields) -> bool:
         with self.lock:
             row = self.runs[run_id]
             if row["status"] == "cancelled":
                 return False
             row.update(fields)
+            self._enqueue_callback_locked(callback)
             return True
+
+    # --- 回调 outbox ---------------------------------------------------------
+    # 入队与运行状态变更共用同一把锁（Postgres 侧是同一个事务）：
+    # 「报告写好了但回调没排队」不会发生。
+
+    def _enqueue_callback_locked(self, callback: dict | None) -> bool:
+        if not callback:
+            return False
+        message_id = callback["message_id"]
+        if message_id in self.callback_ids:
+            return False
+        row = {
+            "id": str(uuid.uuid4()),
+            "message_id": message_id,
+            "message_type": callback.get("message_type") or "",
+            "correlation_id": callback.get("correlation_id") or "",
+            "payload": callback,
+            "status": "pending",
+            "attempt_count": 0,
+            "next_attempt_at": 0.0,
+            "last_error": None,
+            "lease_until": 0.0,
+            "sent_at": None,
+        }
+        self.callbacks.append(row)
+        self.callback_ids[message_id] = row["id"]
+        return True
+
+    def enqueue_callback(self, callback: dict) -> bool:
+        with self.lock:
+            return self._enqueue_callback_locked(callback)
+
+    def claim_callbacks(self, limit: int, lease_seconds: int, max_attempts: int) -> list[dict]:
+        now = time.time()
+        claimed: list[dict] = []
+        with self.lock:
+            for row in self.callbacks:
+                if len(claimed) >= limit:
+                    break
+                if row["status"] in {"sent", "dead"}:
+                    continue
+                due = row["status"] in {"pending", "retry_wait"} and row["next_attempt_at"] <= now
+                expired = row["status"] == "sending" and row["lease_until"] <= now
+                if not (due or expired):
+                    continue
+                if row["attempt_count"] >= max_attempts:
+                    row["status"] = "dead"
+                    row["last_error"] = row["last_error"] or "attempt limit reached"
+                    continue
+                row["status"] = "sending"
+                row["attempt_count"] += 1
+                row["lease_until"] = now + lease_seconds
+                claimed.append(dict(row))
+        return claimed
+
+    def finish_callback(self, callback_id: str, status: str, error: str | None, retry_after_seconds: float) -> None:
+        with self.lock:
+            for row in self.callbacks:
+                if row["id"] != callback_id:
+                    continue
+                row["status"] = status
+                row["last_error"] = error
+                row["lease_until"] = 0.0
+                if status == "retry_wait":
+                    row["next_attempt_at"] = time.time() + retry_after_seconds
+                if status == "sent":
+                    row["sent_at"] = time.time()
+                return
+
+    def callback_rows(self) -> list[dict]:
+        with self.lock:
+            return [dict(row) for row in self.callbacks]
 
     def transition(self, run_id: str, allowed: set[str], **fields) -> bool:
         with self.lock:
@@ -100,7 +197,7 @@ class MemoryStore:
             self._append_locked(run_id, "incident.resolved", {"event_id": event_id, "resolved_at": resolved_at})
             return action
 
-    def commit_report(self, run_id: str, version: int, report: dict, status: str, stop_reason, usage: dict, queue_revise: bool = False, cited: list | None = None, replace_partial: bool = False) -> str:
+    def commit_report(self, run_id: str, version: int, report: dict, status: str, stop_reason, usage: dict, queue_revise: bool = False, cited: list | None = None, replace_partial: bool = False, callback: dict | None = None) -> str:
         with self.lock:
             row = self.runs[run_id]
             if row["status"] == "cancelled":
@@ -122,6 +219,8 @@ class MemoryStore:
                 current = json.loads(json.dumps(row["input_event"]))
                 current["event"] = "incident_resolve"
                 row.update(input_event=current, status="queued", stage="revise", mode="baseline")
+            # 与报告写入同一个临界区：报告落库了，回调就一定已经排队。
+            self._enqueue_callback_locked(callback)
             return "saved"
 
     def list_events(self, run_id: str, after: int = 0) -> list[dict]:
@@ -227,8 +326,116 @@ class PostgresStore:
         vals.append(run_id)
         self.conn.execute(f"UPDATE runs SET {', '.join(sets)} WHERE id = %s", vals)
 
-    def finish(self, run_id: str, **fields) -> bool:
-        return self._update_where(run_id, "status <> 'cancelled'", fields)
+    def finish(self, run_id: str, callback: dict | None = None, **fields) -> bool:
+        if not callback:
+            return self._update_where(run_id, "status <> 'cancelled'", fields)
+        import psycopg
+
+        with psycopg.connect(self.url) as conn:
+            with conn.transaction():
+                row = conn.execute("SELECT status FROM runs WHERE id = %s FOR UPDATE", (run_id,)).fetchone()
+                if not row or row[0] == "cancelled":
+                    return False
+                clause, values = _set_clause(fields)
+                values.append(run_id)
+                conn.execute(f"UPDATE runs SET {clause} WHERE id = %s", values)
+                self._insert_callback_tx(conn, callback)
+                return True
+
+    # --- 回调 outbox ---------------------------------------------------------
+
+    def _insert_callback_tx(self, conn, callback: dict | None) -> bool:
+        if not callback:
+            return False
+        cur = conn.execute(
+            """INSERT INTO agent_callback_outbox (message_id, message_type, correlation_id, payload)
+               VALUES (%s, %s, %s, %s::jsonb) ON CONFLICT (message_id) DO NOTHING""",
+            (callback["message_id"], callback.get("message_type") or "",
+             callback.get("correlation_id") or "", json.dumps(callback)),
+        )
+        return cur.rowcount == 1
+
+    def enqueue_callback(self, callback: dict) -> bool:
+        with psycopg_connect(self.url) as conn:
+            with conn.transaction():
+                return self._insert_callback_tx(conn, callback)
+
+    def claim_callbacks(self, limit: int, lease_seconds: int, max_attempts: int) -> list[dict]:
+        with psycopg_connect(self.url) as conn:
+            with conn.transaction():
+                # 先给用尽重试次数的行收尾，再领取到期的。
+                conn.execute(
+                    """UPDATE agent_callback_outbox
+                       SET status = 'dead',
+                           last_error = COALESCE(last_error, 'attempt limit reached'),
+                           lease_until = NULL,
+                           updated_at = now()
+                       WHERE attempt_count >= %s
+                         AND status IN ('pending', 'retry_wait', 'sending')
+                         AND (status <> 'sending' OR lease_until <= now())""",
+                    (max_attempts,),
+                )
+                rows = conn.execute(
+                    """UPDATE agent_callback_outbox AS c
+                       SET status = 'sending',
+                           attempt_count = c.attempt_count + 1,
+                           lease_until = now() + %s * interval '1 second',
+                           updated_at = now()
+                       FROM (
+                           SELECT id FROM agent_callback_outbox
+                           WHERE (status IN ('pending', 'retry_wait') AND next_attempt_at <= now())
+                              OR (status = 'sending' AND lease_until <= now())
+                           ORDER BY next_attempt_at
+                           FOR UPDATE SKIP LOCKED
+                           LIMIT %s
+                       ) AS picked
+                       WHERE c.id = picked.id
+                       RETURNING c.id::text, c.message_id, c.message_type, c.correlation_id,
+                                 c.payload, c.attempt_count""",
+                    (lease_seconds, limit),
+                ).fetchall()
+        return [
+            {"id": r[0], "message_id": r[1], "message_type": r[2], "correlation_id": r[3],
+             "payload": r[4], "attempt_count": r[5]}
+            for r in rows
+        ]
+
+    def finish_callback(self, callback_id: str, status: str, error: str | None, retry_after_seconds: float) -> None:
+        if status == "retry_wait":
+            self.conn.execute(
+                """UPDATE agent_callback_outbox
+                   SET status = 'retry_wait', last_error = %s,
+                       next_attempt_at = now() + %s * interval '1 second',
+                       lease_until = NULL, updated_at = now()
+                   WHERE id = %s""",
+                (error, retry_after_seconds, callback_id),
+            )
+            return
+        if status == "sent":
+            self.conn.execute(
+                """UPDATE agent_callback_outbox
+                   SET status = 'sent', sent_at = now(), last_error = NULL,
+                       lease_until = NULL, updated_at = now()
+                   WHERE id = %s""",
+                (callback_id,),
+            )
+            return
+        self.conn.execute(
+            """UPDATE agent_callback_outbox
+               SET status = 'dead', last_error = %s, lease_until = NULL, updated_at = now()
+               WHERE id = %s""",
+            (error, callback_id),
+        )
+
+    def callback_rows(self) -> list[dict]:
+        rows = self.conn.execute(
+            """SELECT id::text, message_id, message_type, correlation_id, payload, status,
+                      attempt_count, last_error, sent_at
+               FROM agent_callback_outbox ORDER BY created_at"""
+        ).fetchall()
+        keys = ["id", "message_id", "message_type", "correlation_id", "payload", "status",
+                "attempt_count", "last_error", "sent_at"]
+        return [dict(zip(keys, r)) for r in rows]
 
     def transition(self, run_id: str, allowed: set[str], **fields) -> bool:
         marks = ", ".join(["%s"] * len(allowed))
@@ -237,18 +444,10 @@ class PostgresStore:
     def _update_where(self, run_id: str, clause: str, fields: dict, extra: list | None = None) -> bool:
         if not fields:
             return False
-        sets = []
-        vals = []
-        for key, value in fields.items():
-            if key in {"input_event", "usage"}:
-                sets.append(f"{key} = %s::jsonb")
-                vals.append(json.dumps(value))
-            else:
-                sets.append(f"{key} = %s")
-                vals.append(value)
+        assignments, vals = _set_clause(fields)
         vals.extend(extra or [])
         vals.append(run_id)
-        cur = self.conn.execute(f"UPDATE runs SET {', '.join(sets)} WHERE {clause} AND id = %s", vals)
+        cur = self.conn.execute(f"UPDATE runs SET {assignments} WHERE {clause} AND id = %s", vals)
         return cur.rowcount == 1
 
     def has_event(self, run_id: str, kind: str, event_id: str) -> bool:
@@ -326,7 +525,7 @@ class PostgresStore:
             except psycopg.errors.UniqueViolation:
                 return "duplicate"
 
-    def commit_report(self, run_id: str, version: int, report: dict, status: str, stop_reason, usage: dict, queue_revise: bool = False, cited: list | None = None, replace_partial: bool = False) -> str:
+    def commit_report(self, run_id: str, version: int, report: dict, status: str, stop_reason, usage: dict, queue_revise: bool = False, cited: list | None = None, replace_partial: bool = False, callback: dict | None = None) -> str:
         import psycopg
 
         with psycopg.connect(self.url) as conn:
@@ -376,6 +575,8 @@ class PostgresStore:
                     values,
                 )
                 self._append_tx(conn, run_id, "report.saved", {"version": version, "status": status, "cited": cited or []})
+                # 与报告写入同一个事务：报告落库了，回调就一定已经排队。
+                self._insert_callback_tx(conn, callback)
                 return "saved"
 
     def _append_tx(self, conn, run_id: str, kind: str, payload: dict) -> int:

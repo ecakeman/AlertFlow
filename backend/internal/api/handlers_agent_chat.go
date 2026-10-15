@@ -18,6 +18,10 @@ type agentChatTurn struct {
 	Text string `json:"text"`
 }
 
+// agentHTTPClient is shared by the server-side calls to the agent's API. It
+// lives here because the chat proxy is the only caller left.
+var agentHTTPClient = &http.Client{Timeout: 8 * time.Second}
+
 type agentChatRequest struct {
 	Message string          `json:"message"`
 	History []agentChatTurn `json:"history"`

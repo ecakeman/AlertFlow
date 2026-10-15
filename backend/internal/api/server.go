@@ -56,6 +56,9 @@ type Server struct {
 	webhookToken string
 	// agentToken is ALERTFLOW_AGENT_TOKEN. Empty means the internal agent routes reject every request.
 	agentToken string
+	// agentCallbackToken is ALERTFLOW_AGENT_CALLBACK_TOKEN: the bearer the Agent
+	// uses to push a run result to POST /webhooks/agent. Empty disables that edge.
+	agentCallbackToken string
 	// agentBaseURL/agentAPIToken point at the diagnostic agent's API (AGENT_BASE_URL /
 	// AGENT_API_TOKEN) so the UI can read its reports; empty disables that.
 	agentBaseURL  string
@@ -90,10 +93,11 @@ func New(configDir string) (*Server, error) {
 		dispatcher:    dispatcher,
 		webFS:         web.FS(),
 		logins:        newLoginLimiter(),
-		webhookToken:  os.Getenv("ALERTFLOW_WEBHOOK_TOKEN"),
-		agentToken:    os.Getenv("ALERTFLOW_AGENT_TOKEN"),
-		agentBaseURL:  os.Getenv("AGENT_BASE_URL"),
-		agentAPIToken: os.Getenv("AGENT_API_TOKEN"),
+		webhookToken:       os.Getenv("ALERTFLOW_WEBHOOK_TOKEN"),
+		agentToken:         os.Getenv("ALERTFLOW_AGENT_TOKEN"),
+		agentCallbackToken: os.Getenv("ALERTFLOW_AGENT_CALLBACK_TOKEN"),
+		agentBaseURL:       os.Getenv("AGENT_BASE_URL"),
+		agentAPIToken:      os.Getenv("AGENT_API_TOKEN"),
 		webhooks:      newWebhookLimiter(),
 		stop:          make(chan struct{}),
 	}
@@ -159,6 +163,9 @@ func (s *Server) routes() {
 	app.Post("/api/auth/login", s.handleLogin)
 	app.Post("/api/auth/logout", s.handleLogout)
 	app.Post("/api/alerts/webhook", s.handleAlertWebhook)
+	// The agent's own inbound edge: a different token, body and idempotency key
+	// from the external-alert webhook above.
+	app.Post("/webhooks/agent", s.handleAgentCallback)
 
 	// Authenticated.
 	app.Get("/api/auth/me", auth, s.handleMe)
@@ -221,6 +228,11 @@ func (s *Server) routes() {
 // client-side routes. Unmatched /api paths return a JSON 404 instead.
 func (s *Server) serveSPA(c fiber.Ctx) error {
 	if strings.HasPrefix(c.Path(), "/api/") {
+		return fiber.NewError(fiber.StatusNotFound, "not found")
+	}
+	// /webhooks/* is machine-facing too: an unmatched path must not fall through
+	// to the SPA and answer a webhook with index.html.
+	if strings.HasPrefix(c.Path(), "/webhooks/") {
 		return fiber.NewError(fiber.StatusNotFound, "not found")
 	}
 	if strings.HasPrefix(c.Path(), "/internal/") {

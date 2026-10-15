@@ -152,6 +152,7 @@ class Runner:
         if not row or row.get("status") == "cancelled":
             return row or {}
         self._refresh_runtime_config()
+        self._notify_started(run_id, row)
         try:
             if resume:
                 self._resume(row)
@@ -253,9 +254,52 @@ class Runner:
                 "replan_bad": event.get("replan_bad"),
         }, {"configurable": {"thread_id": thread_id}})
 
+    def _notify_started(self, run_id: str, row: dict) -> None:
+        """告诉 AlertFlow「这次诊断开始了」，前端因此能显示"运行中"。
+
+        不入事务：丢了只是少一个进行中的提示。message_id 固定，重跑/恢复不会重复。
+        """
+        if not self.settings.agent_callback_token:
+            return
+        from alertflow_agent.callbacks import started_callback
+
+        try:
+            self.store.enqueue_callback(started_callback(run_id, row))
+        except Exception:  # noqa: BLE001 - 提示发不出去不影响诊断
+            log.warning("could not queue the run.started callback")
+
     def _fail(self, run_id: str, reason: str) -> None:
-        if self.store.finish(run_id, status="failed", failure_reason=reason, stage="failed", finished_at=iso_now()):
+        if self.store.finish(
+            run_id,
+            callback=self._failure_callback(run_id, reason),
+            status="failed",
+            failure_reason=reason,
+            stage="failed",
+            finished_at=iso_now(),
+        ):
             self.store.append_event(run_id, "run.failed", {"reason": reason})
+
+    def _report_callback(self, run: dict, version: int, report: dict, cited_ids, evidence: dict):
+        """回传消息。未配置回调令牌时返回 None：不入队，免得堆一堆没人领的消息。
+
+        只回传报告引用到的证据——完整证据留在 Agent 自己这边。
+        """
+        if not self.settings.agent_callback_token:
+            return None
+        from alertflow_agent.callbacks import report_callback
+
+        used = set(cited_ids)
+        return report_callback(
+            run.get("id") or "", run, version, report, report.get("usage") or {},
+            {key: value for key, value in evidence.items() if key in used},
+        )
+
+    def _failure_callback(self, run_id: str, reason: str):
+        if not self.settings.agent_callback_token:
+            return None
+        from alertflow_agent.callbacks import failure_callback
+
+        return failure_callback(run_id, self.store.get(run_id) or {}, reason)
 
     def _graph(self, checkpointer):
         graph = StateGraph(GraphState)
@@ -740,11 +784,14 @@ class Runner:
             version = 2
         report["version"] = version
         pending = (fresh.get("input_event") or {}).get("pending_revise")
+        used = sorted(cited(report))
         self.store.commit_report(
             run_id, version, report, status, state.get("stop_reason") or None, report["usage"],
             queue_revise=bool(pending and self.settings.agent_revise_on_resolve and version == 1),
-            cited=sorted(cited(report)),
+            cited=used,
             replace_partial=fresh.get("stage") == "resume" and version == 1,
+            # 回调与报告在同一个事务里入队：报告落库了，结果就一定会被回传。
+            callback=self._report_callback(fresh, version, report, used, state.get("evidence") or {}),
         )
         state["report"] = report
         return state

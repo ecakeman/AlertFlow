@@ -48,17 +48,23 @@ def serve(settings: Settings | None = None) -> None:
     import uvicorn
 
     from alertflow_agent.api.app import create_app
+    from alertflow_agent.callbacks import CallbackSender
 
     settings, store, runner, checkpoint = build(settings)
     stop = threading.Event()
     worker = threading.Thread(target=_loop, args=(settings, store, runner, stop), name="agent-worker")
     worker.start()
+    # 诊断结果通过这条线程回传给 AlertFlow；它发不发得出去不影响 run 本身。
+    callbacks = CallbackSender(settings, store)
+    sender = threading.Thread(target=callbacks.run, args=(stop,), name="agent-callback")
+    sender.start()
     app = create_app(settings, store, runner)
 
     @app.on_event("shutdown")
     def _shutdown():
         stop.set()
         worker.join(timeout=settings.run_timeout_seconds)
+        sender.join(timeout=5)
         if checkpoint is not None:
             checkpoint[1].__exit__(None, None, None)
         closer = getattr(store, "conn", None)
