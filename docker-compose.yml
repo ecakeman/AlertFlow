@@ -2,7 +2,9 @@
 # PostgreSQL holds runtime data. Service definitions stay in the config volume.
 services:
   postgres:
-    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    # Agent 的 schema.sql 需要 vector 扩展（长期记忆的 pgvector 检索），
+    # 因此默认镜像必须是带 pgvector 的，否则干净克隆起不来。
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg16}
     environment:
       POSTGRES_USER: alertflow
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-alertflow}
