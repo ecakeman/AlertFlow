@@ -2,6 +2,7 @@ package query
 
 import (
 	"context"
+	"hash/crc32"
 	"strconv"
 	"time"
 )
@@ -32,10 +33,35 @@ const dashScope = "dash:all"
 func metricsScope(serviceID string) string { return "metrics:" + serviceID }
 func checksScope(serviceID string) string  { return "checks:" + serviceID }
 
-// keyTime renders an instant for use in a cache key: truncated to the key
-// bucket, so callers inside the same bucket share one entry.
-func keyTime(t time.Time) string {
-	return strconv.FormatInt(t.Truncate(keyBucket).Unix(), 10)
+// keyTime renders an instant for use in a cache key: a wall-clock bucket,
+// shifted by a per-key offset.
+//
+// The bucket itself exists so that "now" is stable for a while — without it
+// every request would build a fresh key and nothing would ever hit. But an
+// unshifted bucket makes every key rotate on the same wall-clock boundary, so
+// the entire cache misses at the same instant. That is a cache avalanche, and
+// it is self-inflicted: it scales with the number of distinct keys, not with
+// traffic, so a demo with three keys never shows it and a system with a few
+// hundred would.
+//
+// The offset is derived from the key's identity, so it is stable for a given
+// key (the hit rate is unchanged) and different keys rebuild at different
+// moments inside the window. It affects the key only: nothing in the query
+// depends on it.
+func keyTime(t time.Time, identity string) string {
+	shift := time.Duration(offsetSeconds(identity)) * time.Second
+	return strconv.FormatInt(t.Add(-shift).Truncate(keyBucket).Unix(), 10)
+}
+
+// offsetSeconds picks the second inside the bucket window at which this key
+// rotates. The hash only chooses a slot; a collision just means two keys share
+// an offset, which is harmless.
+func offsetSeconds(identity string) int64 {
+	width := int64(keyBucket / time.Second)
+	if width <= 1 {
+		return 0
+	}
+	return int64(crc32.ChecksumIEEE([]byte(identity))) % width
 }
 
 // InvalidateService retires every cached view a new check for serviceID can

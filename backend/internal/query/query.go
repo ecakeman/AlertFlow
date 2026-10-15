@@ -163,7 +163,7 @@ func (s *Service) ServiceMetrics(ctx context.Context, id, rangeKey string, now t
 	}
 	live := *svc
 	gen := s.Cache.Generation(ctx, metricsScope(id))
-	key := cache.Key(cacheVersion, "metrics", gen, id, rangeKey, keyTime(now))
+	key := cache.Key(cacheVersion, "metrics", gen, id, rangeKey, keyTime(now, id+"|"+rangeKey))
 	res, err := cache.Remember(ctx, s.Cache, key, metricsCacheTTL, func(ctx context.Context) (*MetricsResult, error) {
 		return s.loadServiceMetrics(live, id, rangeKey, now)
 	})
@@ -317,7 +317,7 @@ func (s *Service) DashboardStats(ctx context.Context, now time.Time) (int, error
 		hours = 1
 	}
 	gen := s.Cache.Generation(ctx, dashScope)
-	key := cache.Key(cacheVersion, "dash", gen, strconv.Itoa(hours), keyTime(now))
+	key := cache.Key(cacheVersion, "dash", gen, strconv.Itoa(hours), keyTime(now, "dash"))
 	return cache.Remember(ctx, s.Cache, key, dashboardCacheTTL, func(ctx context.Context) (int, error) {
 		since := now.Add(-time.Duration(hours) * time.Hour).Unix()
 		return s.DB.WarningServiceCountSince(since)

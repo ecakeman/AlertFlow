@@ -2,7 +2,9 @@ package query
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -140,4 +142,89 @@ func TestCheckHistoryKeyedByParams(t *testing.T) {
 	if len(page1.Checks) != 2 || len(page2.Checks) != 3 {
 		t.Fatalf("pages returned %d and %d rows, want 2 and 3", len(page1.Checks), len(page2.Checks))
 	}
+}
+
+// TestOffsetSpreadsAcrossTheBucketWindow is the avalanche guard. An unshifted
+// bucket makes every key rotate on the same wall-clock boundary, so the whole
+// cache rebuilds at once; that is invisible with a handful of keys and grows
+// with the number of distinct keys, not with traffic.
+func TestOffsetSpreadsAcrossTheBucketWindow(t *testing.T) {
+	width := int64(keyBucket / time.Second)
+	seen := map[int64]bool{}
+	for i := 0; i < 200; i++ {
+		off := offsetSeconds(fmt.Sprintf("service-%d|24h", i))
+		if off < 0 || off >= width {
+			t.Fatalf("offset %d is outside [0,%d)", off, width)
+		}
+		seen[off] = true
+	}
+	if int64(len(seen)) != width {
+		t.Fatalf("200 keys used %d of the %d rotation slots; rebuilds are not spread", len(seen), width)
+	}
+}
+
+// TestKeyTimeStaysBucketAligned keeps the shift from turning into an arbitrary
+// timestamp — the value still has to be a real bucket boundary, or the key
+// would change on every request and nothing would ever hit.
+func TestKeyTimeStaysBucketAligned(t *testing.T) {
+	width := int64(keyBucket / time.Second)
+	base := time.Unix(1_700_000_123, 0) // deliberately off a bucket boundary
+	for i := 0; i < 50; i++ {
+		raw, err := strconv.ParseInt(keyTime(base, fmt.Sprintf("svc-%d|1h", i)), 10, 64)
+		if err != nil {
+			t.Fatalf("keyTime returned a non-integer: %v", err)
+		}
+		if raw%width != 0 {
+			t.Fatalf("keyTime produced %d, which is not a multiple of %ds", raw, width)
+		}
+	}
+}
+
+func TestKeyTimeSpreadsKeysAtTheSameInstant(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	seen := map[string]bool{}
+	for i := 0; i < 50; i++ {
+		seen[keyTime(base, fmt.Sprintf("svc-%d|24h", i))] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("every key landed on the same bucket at the same instant: %v", seen)
+	}
+}
+
+func TestKeyTimeIsStablePerKey(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	if a, b := keyTime(base, "svc|24h"), keyTime(base, "svc|24h"); a != b {
+		t.Fatalf("the same key at the same instant gave %s then %s", a, b)
+	}
+	// A full window later it must have rotated, or the cache would never refresh.
+	if a, b := keyTime(base, "svc|24h"), keyTime(base.Add(keyBucket), "svc|24h"); a == b {
+		t.Fatalf("the key did not rotate after a full bucket: %s", a)
+	}
+}
+
+// TestKeyTimeRotatesKeysAtDifferentSeconds is the property the shift exists for:
+// within one window, keys must not all change bucket on the same tick. Without
+// it every key rebuilds at once, which is the avalanche.
+func TestKeyTimeRotatesKeysAtDifferentSeconds(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	rotation := map[int64]int{}
+	for i := 0; i < 20; i++ {
+		seed := int64(i)
+		identity := fmt.Sprintf("svc-%d|24h", i)
+		prev := keyTime(base, identity)
+		for s := 1; s < int(keyBucket/time.Second); s++ {
+			if keyTime(base.Add(time.Duration(s)*time.Second), identity) != prev {
+				rotation[seed] = s
+				break
+			}
+		}
+	}
+	distinct := map[int]bool{}
+	for _, second := range rotation {
+		distinct[second] = true
+	}
+	if len(distinct) < 2 {
+		t.Fatalf("every key rotated on the same second: %v", rotation)
+	}
+	t.Logf("rotation seconds across %d keys: %v", len(rotation), rotation)
 }
