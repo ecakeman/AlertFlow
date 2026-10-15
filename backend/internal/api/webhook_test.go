@@ -72,6 +72,7 @@ func webhookApp(t *testing.T, token string) (*fiber.App, *db.DB) {
 		webhookToken: token,
 		webhooks:     newWebhookLimiter(),
 	}
+	attachQuery(s)
 	s.app = fiber.New(fiber.Config{BodyLimit: maxBodyBytes, ErrorHandler: errorHandler})
 	s.routes()
 	return s.app, database

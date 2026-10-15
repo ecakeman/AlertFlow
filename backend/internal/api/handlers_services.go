@@ -11,29 +11,20 @@ import (
 	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/db"
 	"github.com/ecakeman/alertflow/internal/image"
+	"github.com/ecakeman/alertflow/internal/query"
 )
 
 var errServiceNotFound = errors.New("service not found")
 
-// retentionWindow returns the unix cutoff for the current retention setting.
-func (s *Server) retentionWindow(cfg *config.Config) int64 {
-	days := cfg.Settings.Check.RetentionDays
-	if days < 1 {
-		days = config.DefaultRetentionDays
-	}
-	return time.Now().Add(-time.Duration(days) * 24 * time.Hour).Unix()
-}
-
 // GET /api/services → all services with current status + metrics.
 func (s *Server) handleListServices(c fiber.Ctx) error {
-	cfg := s.config()
-	metrics, err := s.conn().MetricsForAll(s.retentionWindow(cfg), 24)
+	list, err := s.query().ServiceList()
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "could not load metrics")
 	}
-	out := make([]serviceDTO, 0, len(cfg.Services))
-	for _, svc := range cfg.Services {
-		out = append(out, toServiceDTO(svc, metrics[svc.ID]))
+	out := make([]serviceDTO, 0, len(list))
+	for _, item := range list {
+		out = append(out, toServiceDTO(item.Service, item.Metrics))
 	}
 	return c.JSON(out)
 }
@@ -129,9 +120,11 @@ func (s *Server) handleUpdateService(c fiber.Ctx) error {
 	if err != nil {
 		return configErr(err)
 	}
-	cfg := s.config()
-	metrics, _ := s.conn().MetricsForAll(s.retentionWindow(cfg), 24)
-	return c.JSON(toServiceDTO(*cfg.Find(id), metrics[id]))
+	status, err := s.query().ServiceStatusFor(id)
+	if err != nil {
+		return configErr(err)
+	}
+	return c.JSON(toServiceDTO(status.Service, status.Metrics))
 }
 
 // DELETE /api/services/:id → remove a service, its image and its history.
@@ -209,9 +202,11 @@ func (s *Server) handleCheckNow(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "service not found")
 	}
 	s.scheduler().CheckNow(*svc)
-	cfg := s.config()
-	metrics, _ := s.conn().MetricsForAll(s.retentionWindow(cfg), 24)
-	return c.JSON(toServiceDTO(*svc, metrics[id]))
+	status, err := s.query().ServiceStatusFor(id)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "could not load metrics")
+	}
+	return c.JSON(toServiceDTO(status.Service, status.Metrics))
 }
 
 type metricsResponse struct {
@@ -224,93 +219,27 @@ type metricsResponse struct {
 	TLS           *tlsDTO          `json:"tls"`
 }
 
-// rangeSince maps a ?range= value to a lookback window (default 24h). "365d" is
-// no longer offered as a tab but stays accepted — it is a documented API value.
-func rangeSince(now time.Time, r string) time.Time {
-	switch r {
-	case "1h":
-		return now.Add(-time.Hour)
-	case "6h":
-		return now.Add(-6 * time.Hour)
-	case "7d":
-		return now.Add(-7 * 24 * time.Hour)
-	case "30d":
-		return now.Add(-30 * 24 * time.Hour)
-	case "365d":
-		return now.Add(-365 * 24 * time.Hour)
-	default:
-		return now.Add(-24 * time.Hour)
-	}
-}
-
-// targetPoints is roughly how many buckets a chart wants across any range —
-// enough to show shape, few enough to stay legible and cheap to send.
-const targetPoints = 96
-
-// bucketLadder holds the bucket widths a series may be downsampled to. Every
-// range divides one of these exactly, so no bucket straddles the window edge.
-var bucketLadder = []int64{30, 60, 300, 900, 1800, 3600, 7200, 28800}
-
-// chooseBucket picks a bucket width for a span, in seconds. It must be at least
-// span/targetPoints (or the payload balloons) and at least the service's check
-// interval — a bucket narrower than the interval leaves most buckets empty and
-// renders as a comb. A 5-minute-interval service over 1h therefore gets 12 fat
-// buckets rather than 98 mostly-empty ones.
-func chooseBucket(span int64, interval int) int64 {
-	min := span / targetPoints
-	if int64(interval) > min {
-		min = int64(interval)
-	}
-	for _, b := range bucketLadder {
-		if b >= min {
-			return b
-		}
-	}
-	return bucketLadder[len(bucketLadder)-1]
-}
-
 // GET /api/services/:id/metrics?range=1h|6h|24h|7d|30d|365d → aggregates, time
 // series, multi-window uptime and current TLS certificate info.
 func (s *Server) handleServiceMetrics(c fiber.Ctx) error {
 	id := c.Params("id")
-	svc := s.config().Find(id)
-	if svc == nil {
+	res, err := s.query().ServiceMetrics(id, c.Query("range"), time.Now())
+	if errors.Is(err, query.ErrServiceNotFound) {
 		return fiber.NewError(fiber.StatusNotFound, "service not found")
 	}
-	now := time.Now()
-	since := rangeSince(now, c.Query("range"))
-	bucket := chooseBucket(now.Unix()-since.Unix(), svc.Check.Interval)
-	metrics, _ := s.conn().MetricsForAll(since.Unix(), 60)
-	series, err := s.conn().SeriesFor(id, since.Unix(), now.Unix(), bucket)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "could not load metrics")
 	}
-	if series == nil {
-		series = []db.SeriesPoint{}
-	}
-
-	day := 24 * time.Hour
-	up7, _, _ := s.conn().UptimeSince(id, now.Add(-7*day).Unix())
-	up30, _, _ := s.conn().UptimeSince(id, now.Add(-30*day).Unix())
-	up365, _, _ := s.conn().UptimeSince(id, now.Add(-365*day).Unix())
-	tlsInfo, _ := s.conn().GetServiceTLS(id)
-
 	return c.JSON(metricsResponse{
-		serviceDTO:    toServiceDTO(*svc, metrics[id]),
-		Series:        series,
-		From:          since.Unix(),
-		To:            now.Unix(),
-		BucketSeconds: bucket,
-		UptimeWindows: uptimeWindowsDTO{Days7: up7, Days30: up30, Days365: up365},
-		TLS:           toTLSDTO(tlsInfo),
+		serviceDTO:    toServiceDTO(res.Service, res.Status),
+		Series:        res.Series,
+		From:          res.From,
+		To:            res.To,
+		BucketSeconds: res.BucketSeconds,
+		UptimeWindows: uptimeWindowsDTO{Days7: res.Uptime.Days7, Days30: res.Uptime.Days30, Days365: res.Uptime.Days365},
+		TLS:           toTLSDTO(res.TLS),
 	})
 }
-
-// defaultCheckPageSize/maxCheckPageSize bound the ping console's page size.
-const (
-	defaultCheckPageSize = 100
-	maxCheckPageSize     = 500
-)
 
 // GET /api/services/:id/checks?limit=&before= → stored check cycles, newest
 // first, for the service's ping console. Rows come back un-squashed: collapsing
@@ -318,32 +247,26 @@ const (
 // across page boundaries.
 func (s *Server) handleServiceChecks(c fiber.Ctx) error {
 	id := c.Params("id")
-	if s.config().Find(id) == nil {
-		return fiber.NewError(fiber.StatusNotFound, "service not found")
-	}
-	limit := defaultCheckPageSize
+	limit := query.DefaultCheckPageSize
 	if v, err := strconv.Atoi(c.Query("limit")); err == nil && v > 0 {
-		limit = min(v, maxCheckPageSize)
+		limit = v
 	}
 	var before int64
 	if v, err := strconv.ParseInt(c.Query("before"), 10, 64); err == nil && v > 0 {
 		before = v
 	}
-	rows, err := s.conn().ListChecks(id, before, limit)
+	page, err := s.query().CheckHistory(id, before, limit)
+	if errors.Is(err, query.ErrServiceNotFound) {
+		return fiber.NewError(fiber.StatusNotFound, "service not found")
+	}
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "could not load checks")
 	}
-	out := make([]checkRowDTO, 0, len(rows))
-	for _, r := range rows {
+	out := make([]checkRowDTO, 0, len(page.Checks))
+	for _, r := range page.Checks {
 		out = append(out, toCheckRowDTO(r))
 	}
-	resp := checksResponse{Checks: out}
-	// Only advertise a cursor on a full page; a short page is the end.
-	if len(rows) == limit && limit > 0 {
-		next := rows[len(rows)-1].ID
-		resp.NextBefore = &next
-	}
-	return c.JSON(resp)
+	return c.JSON(checksResponse{Checks: out, NextBefore: page.NextBefore})
 }
 
 // configErr maps a config-update error to a 404 or 400 Fiber error.

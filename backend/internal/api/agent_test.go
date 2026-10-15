@@ -10,7 +10,16 @@ import (
 
 	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/db"
+	"github.com/ecakeman/alertflow/internal/query"
 )
+
+// attachQuery wires the read-composition layer onto a Server built by hand.
+// New() does this in production; the test helpers construct the struct directly
+// (they have no config dir on disk), so they must attach it themselves before
+// routes() is called.
+func attachQuery(s *Server) {
+	s.queries = query.New(s.database, s.config)
+}
 
 func TestAgentRoutesRequireToken(t *testing.T) {
 	app := agentApp(t, "")
@@ -59,6 +68,7 @@ func agentApp(t *testing.T, token string) *fiber.App {
 		agentToken: token,
 		webhooks:   newWebhookLimiter(),
 	}
+	attachQuery(s)
 	s.app = fiber.New(fiber.Config{BodyLimit: maxBodyBytes, ErrorHandler: errorHandler})
 	s.routes()
 	return s.app

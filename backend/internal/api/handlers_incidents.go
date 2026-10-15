@@ -9,6 +9,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 
 	"github.com/ecakeman/alertflow/internal/db"
+	"github.com/ecakeman/alertflow/internal/query"
 )
 
 // serviceName resolves a service id to its display name, tolerating services
@@ -19,12 +20,6 @@ func (s *Server) serviceName(id string) string {
 	}
 	return "(deleted service)"
 }
-
-// defaultIncidentPageSize/maxIncidentPageSize bound the incidents list's page size.
-const (
-	defaultIncidentPageSize = 20
-	maxIncidentPageSize     = 200
-)
 
 // GET /api/incidents?status=&severity=&serviceId=&limit=&offset= → a page of
 // incidents (newest first) plus the total matching the filter, for pagination.
@@ -42,60 +37,49 @@ func (s *Server) handleListIncidents(c fiber.Ctx) error {
 	}
 	serviceID := c.Query("serviceId")
 
-	limit := defaultIncidentPageSize
+	limit := query.DefaultIncidentPageSize
 	if v, err := strconv.Atoi(c.Query("limit")); err == nil && v > 0 {
-		limit = min(v, maxIncidentPageSize)
+		limit = v
 	}
 	var offset int
 	if v, err := strconv.Atoi(c.Query("offset")); err == nil && v > 0 {
 		offset = v
 	}
 
-	total, err := s.conn().CountIncidents(serviceID, status, severity)
+	page, err := s.query().Incidents(query.IncidentFilter{
+		ServiceID: serviceID, Status: status, Severity: severity,
+		Limit: min(limit, query.MaxIncidentPageSize), Offset: offset,
+	})
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "could not load incidents")
 	}
-	incidents, err := s.conn().ListIncidents(serviceID, status, severity, limit, offset)
-	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not load incidents")
-	}
-	out := make([]incidentDTO, 0, len(incidents))
-	for _, inc := range incidents {
+	out := make([]incidentDTO, 0, len(page.Incidents))
+	for _, inc := range page.Incidents {
 		out = append(out, toIncidentDTO(inc, s.serviceName(inc.ServiceID)))
 	}
-	return c.JSON(incidentsResponse{Incidents: out, Total: total})
+	return c.JSON(incidentsResponse{Incidents: out, Total: page.Total})
 }
 
 // GET /api/incidents/:id → an incident with its comments.
 func (s *Server) handleGetIncident(c fiber.Ctx) error {
-	inc, err := s.incidentParam(c)
+	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil {
-		return err
+		return fiber.NewError(fiber.StatusBadRequest, "invalid incident id")
 	}
-	comments, err := s.conn().ListIncidentComments(inc.ID)
+	detail, err := s.query().IncidentDetail(id, time.Now())
+	if errors.Is(err, query.ErrIncidentNotFound) {
+		return fiber.NewError(fiber.StatusNotFound, "incident not found")
+	}
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not load comments")
+		return fiber.NewError(fiber.StatusInternalServerError, "could not load incident")
 	}
-	end := inc.StartedAt
-	if inc.ResolvedAt != nil {
-		end = *inc.ResolvedAt
-	} else {
-		end = time.Now().Unix()
-	}
-	if end < inc.StartedAt {
-		end = inc.StartedAt
-	}
-	alerts, err := s.conn().ListExternalAlertsOverlapping(inc.ServiceID, inc.StartedAt, end)
-	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not load external alerts")
-	}
-	out := incidentDetailDTO{incidentDTO: toIncidentDTO(*inc, s.serviceName(inc.ServiceID))}
-	out.Comments = make([]incidentCommentDTO, 0, len(comments))
-	for _, cm := range comments {
+	out := incidentDetailDTO{incidentDTO: toIncidentDTO(detail.Incident, s.serviceName(detail.Incident.ServiceID))}
+	out.Comments = make([]incidentCommentDTO, 0, len(detail.Comments))
+	for _, cm := range detail.Comments {
 		out.Comments = append(out.Comments, toIncidentCommentDTO(cm))
 	}
-	out.ExternalAlerts = make([]externalAlertDTO, 0, len(alerts))
-	for _, alert := range alerts {
+	out.ExternalAlerts = make([]externalAlertDTO, 0, len(detail.ExternalAlerts))
+	for _, alert := range detail.ExternalAlerts {
 		out.ExternalAlerts = append(out.ExternalAlerts, externalAlertDTO{
 			Source: alert.Source, AlertKey: alert.AlertKey, Status: alert.Status, Title: alert.Title,
 		})

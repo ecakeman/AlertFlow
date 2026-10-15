@@ -1,4 +1,4 @@
-package api
+package query
 
 import (
 	"testing"
@@ -21,8 +21,8 @@ func TestRangeSince(t *testing.T) {
 		{"", 24 * time.Hour},           // unset falls back to 24h
 		{"bogus", 24 * time.Hour},
 	} {
-		if got := now.Sub(rangeSince(now, tt.r)); got != tt.want {
-			t.Errorf("rangeSince(%q) looks back %v, want %v", tt.r, got, tt.want)
+		if got := now.Sub(RangeSince(now, tt.r)); got != tt.want {
+			t.Errorf("RangeSince(%q) looks back %v, want %v", tt.r, got, tt.want)
 		}
 	}
 }
@@ -61,9 +61,9 @@ func TestChooseBucket(t *testing.T) {
 		{"24h at absurd interval", day, 999_999, 28800, 3},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got := chooseBucket(tt.span, tt.interval)
+			got := ChooseBucket(tt.span, tt.interval)
 			if got != tt.want {
-				t.Fatalf("chooseBucket(%d, %d) = %d, want %d", tt.span, tt.interval, got, tt.want)
+				t.Fatalf("ChooseBucket(%d, %d) = %d, want %d", tt.span, tt.interval, got, tt.want)
 			}
 			if got > tt.span {
 				return // a bucket wider than the span is fine (one partial bucket)
@@ -75,8 +75,8 @@ func TestChooseBucket(t *testing.T) {
 			if pts := tt.span / got; pts != tt.wantPts {
 				t.Errorf("span/bucket = %d points, want %d", pts, tt.wantPts)
 			}
-			if pts := tt.span / got; pts > targetPoints {
-				t.Errorf("span/bucket = %d points, exceeds targetPoints %d", pts, targetPoints)
+			if pts := tt.span / got; pts > TargetPoints {
+				t.Errorf("span/bucket = %d points, exceeds TargetPoints %d", pts, TargetPoints)
 			}
 		})
 	}

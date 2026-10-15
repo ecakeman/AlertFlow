@@ -20,6 +20,7 @@ import (
 	"github.com/ecakeman/alertflow/internal/db"
 	"github.com/ecakeman/alertflow/internal/monitor"
 	"github.com/ecakeman/alertflow/internal/notify"
+	"github.com/ecakeman/alertflow/internal/query"
 	"github.com/ecakeman/alertflow/internal/state"
 	"github.com/ecakeman/alertflow/internal/web"
 )
@@ -35,6 +36,10 @@ type Server struct {
 	database   *db.DB
 	sched      *monitor.Scheduler
 	dispatcher *notify.Dispatcher
+	// queries is the single composition layer for reads. Handlers and the
+	// diagnostic-context builder both go through it; it holds a live config
+	// accessor rather than a snapshot.
+	queries *query.Service
 
 	app    *fiber.App
 	webFS  fs.FS
@@ -47,8 +52,8 @@ type Server struct {
 	// AGENT_API_TOKEN) so the UI can read its reports; empty disables that.
 	agentBaseURL  string
 	agentAPIToken string
-	webhooks   *loginLimiter
-	stop         chan struct{}
+	webhooks      *loginLimiter
+	stop          chan struct{}
 }
 
 // New opens the database and config for configDir, builds the Fiber app, starts
@@ -70,20 +75,21 @@ func New(configDir string) (*Server, error) {
 
 	dispatcher := notify.NewDispatcher(database)
 	s := &Server{
-		configDir:    configDir,
-		cfg:          cfg,
-		database:     database,
-		sched:        monitor.New(database),
-		dispatcher:   dispatcher,
-		webFS:        web.FS(),
-		logins:       newLoginLimiter(),
-		webhookToken: os.Getenv("ALERTFLOW_WEBHOOK_TOKEN"),
-		agentToken:   os.Getenv("ALERTFLOW_AGENT_TOKEN"),
+		configDir:     configDir,
+		cfg:           cfg,
+		database:      database,
+		sched:         monitor.New(database),
+		dispatcher:    dispatcher,
+		webFS:         web.FS(),
+		logins:        newLoginLimiter(),
+		webhookToken:  os.Getenv("ALERTFLOW_WEBHOOK_TOKEN"),
+		agentToken:    os.Getenv("ALERTFLOW_AGENT_TOKEN"),
 		agentBaseURL:  os.Getenv("AGENT_BASE_URL"),
 		agentAPIToken: os.Getenv("AGENT_API_TOKEN"),
-		webhooks:     newWebhookLimiter(),
-		stop:         make(chan struct{}),
+		webhooks:      newWebhookLimiter(),
+		stop:          make(chan struct{}),
 	}
+	s.queries = query.New(database, s.config)
 	s.app = fiber.New(fiber.Config{
 		AppName:      "AlertFlow",
 		BodyLimit:    maxBodyBytes,
@@ -252,6 +258,10 @@ func (s *Server) conn() *db.DB {
 	defer s.mu.RUnlock()
 	return s.database
 }
+
+// query returns the read-composition service. It is immutable once built (it
+// reads the live config through a function), so it needs no lock of its own.
+func (s *Server) query() *query.Service { return s.queries }
 
 func (s *Server) scheduler() *monitor.Scheduler {
 	s.mu.RLock()
