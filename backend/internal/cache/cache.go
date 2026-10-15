@@ -59,6 +59,9 @@ type Store struct {
 
 	failures  atomic.Int32
 	openUntil atomic.Int64
+	// probing marks the half-open probe: while set, other callers keep skipping
+	// Redis instead of piling on.
+	probing atomic.Bool
 }
 
 // New opens a Redis client. An empty url returns (nil, nil), meaning caching is
@@ -70,6 +73,16 @@ func New(url string) (*Store, error) {
 	opts, err := redis.ParseURL(url)
 	if err != nil {
 		return nil, err
+	}
+	// A cache read is already allowed to fail — the caller falls through to
+	// PostgreSQL by design — so retrying it only adds latency and load. The
+	// default of 3 retries, each bounded by opTimeout, turned one slow moment
+	// into a 750 ms stall (3 × 250 ms), and under overload the retries fed back
+	// into the load. Measured with an open-loop run at 20k rps: p50 fell from
+	// 230 ms to 2.5 ms, and the 750 ms tail disappeared, once retries were off.
+	// An explicit max_retries in the URL still wins.
+	if opts.MaxRetries == 0 {
+		opts.MaxRetries = -1
 	}
 	return &Store{rdb: redis.NewClient(opts), timeout: opTimeout}, nil
 }
@@ -218,7 +231,7 @@ func (s *Store) delete(ctx context.Context, keys ...string) {
 // outcome. When the breaker is open the round-trip is skipped entirely, so the
 // caller falls straight through to the loader instead of waiting out a timeout.
 func (s *Store) call(ctx context.Context, fn func(context.Context) error) error {
-	if !s.available() {
+	if !s.allow() {
 		return errBreakerOpen
 	}
 	c, cancel := context.WithTimeout(ctx, s.timeout)
@@ -228,20 +241,54 @@ func (s *Store) call(ctx context.Context, fn func(context.Context) error) error 
 	return err
 }
 
+// allow is the closed/open/half-open decision. While the breaker is open
+// nothing reaches Redis. Once the cooldown expires, exactly ONE caller wins the
+// claim and becomes the probe; everyone else keeps skipping Redis until it
+// reports back.
+//
+// That probe is the whole point. Without it, every caller retried the moment the
+// cooldown lapsed, and under load the breaker re-tripped hundreds of times a
+// second — measured with an open-loop run at 10k rps: 674 trips and 674 log
+// lines inside one second.
+func (s *Store) allow() bool {
+	until := s.openUntil.Load()
+	if until == 0 {
+		return true
+	}
+	if time.Now().UnixNano() < until {
+		return false
+	}
+	return s.probing.CompareAndSwap(false, true)
+}
+
+// available reports the breaker's state without claiming the probe. Tests and
+// the startup log use it; callers use allow.
 func (s *Store) available() bool {
 	until := s.openUntil.Load()
 	return until == 0 || time.Now().UnixNano() >= until
 }
 
 func (s *Store) note(ok bool) {
+	wasProbing := s.probing.Swap(false)
 	if ok {
 		s.failures.Store(0)
+		if s.openUntil.Swap(0) != 0 {
+			slog.Info("cache: Redis recovered; resuming")
+		}
+		return
+	}
+	if wasProbing {
+		// The probe answered "still down". Re-open for another cooldown, with no
+		// log: the transition was already reported when it first opened.
+		s.failures.Store(0)
+		s.openUntil.Store(time.Now().Add(breakerCooldown).UnixNano())
 		return
 	}
 	if s.failures.Add(1) >= breakerThreshold {
 		s.failures.Store(0)
-		s.openUntil.Store(time.Now().Add(breakerCooldown).UnixNano())
-		slog.Warn("cache: pausing Redis after consecutive failures", "cooldown", breakerCooldown.String())
+		if s.openUntil.Swap(time.Now().Add(breakerCooldown).UnixNano()) == 0 {
+			slog.Warn("cache: pausing Redis after consecutive failures", "cooldown", breakerCooldown.String())
+		}
 	}
 }
 

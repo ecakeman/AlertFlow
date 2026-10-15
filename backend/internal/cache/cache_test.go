@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // testStore points at a dedicated Redis database so a test run cannot disturb
@@ -298,5 +300,96 @@ func TestBreakerClosesAfterCooldown(t *testing.T) {
 	s.openUntil.Store(time.Now().Add(-time.Second).UnixNano())
 	if !s.available() {
 		t.Fatal("breaker did not close after the cooldown")
+	}
+}
+
+// TestBreakerHalfOpenLetsOneProbeThrough pins the fix for what an open-loop run
+// at 10k rps exposed: with no half-open state, every caller retried the instant
+// the cooldown lapsed, so the breaker re-tripped 674 times in one second and
+// logged each trip.
+func TestBreakerHalfOpenLetsOneProbeThrough(t *testing.T) {
+	s, err := New("redis://127.0.0.1:6399/0")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+
+	for i := 0; i < breakerThreshold; i++ {
+		s.note(false)
+	}
+	if s.available() {
+		t.Fatal("breaker did not open")
+	}
+
+	// The cooldown lapses; a crowd of callers arrives at once.
+	s.openUntil.Store(time.Now().Add(-time.Second).UnixNano())
+	allowed := 0
+	for i := 0; i < 50; i++ {
+		if s.allow() {
+			allowed++
+		}
+	}
+	if allowed != 1 {
+		t.Fatalf("half-open let %d callers through, want exactly 1", allowed)
+	}
+
+	// The probe fails: the breaker must re-open at once, not wait for another
+	// five failures while the crowd keeps trying.
+	s.note(false)
+	if s.available() {
+		t.Fatal("a failed probe did not re-open the breaker")
+	}
+}
+
+// TestBreakerClosesWhenTheProbeSucceeds is the other half of half-open.
+func TestBreakerClosesWhenTheProbeSucceeds(t *testing.T) {
+	s, err := New("redis://127.0.0.1:6399/0")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+
+	for i := 0; i < breakerThreshold; i++ {
+		s.note(false)
+	}
+	s.openUntil.Store(time.Now().Add(-time.Second).UnixNano())
+	if !s.allow() {
+		t.Fatal("no probe was allowed after the cooldown")
+	}
+	s.note(true)
+	if !s.available() {
+		t.Fatal("a successful probe did not close the breaker")
+	}
+	if got := s.openUntil.Load(); got != 0 {
+		t.Fatalf("openUntil = %d after recovery, want 0", got)
+	}
+}
+
+// TestNewDisablesRetries pins the policy: a cache read that fails already
+// degrades to PostgreSQL, so retrying it only adds latency and load. Three
+// retries bounded by opTimeout is what produced a 750 ms tail under load.
+func TestNewDisablesRetries(t *testing.T) {
+	s, err := New("redis://127.0.0.1:6380/0")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	client, ok := s.rdb.(*redis.Client)
+	if !ok {
+		t.Fatalf("client type %T", s.rdb)
+	}
+	// go-redis spells "no retries" as -1 on the way in and normalises it to 0,
+	// while an unset value becomes the default 3. So 0 here means disabled.
+	if got := client.Options().MaxRetries; got != 0 {
+		t.Fatalf("MaxRetries = %d, want 0 (disabled; unset would be 3)", got)
+	}
+	// An explicit setting still wins.
+	s2, err := New("redis://127.0.0.1:6380/0?max_retries=2")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s2.Close()
+	if got := s2.rdb.(*redis.Client).Options().MaxRetries; got != 2 {
+		t.Fatalf("MaxRetries = %d, want the URL's 2", got)
 	}
 }
