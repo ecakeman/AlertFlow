@@ -17,6 +17,16 @@ class Settings(BaseSettings):
     agent_revise_on_resolve: bool = False
     check_lookback_minutes: int = 60
     check_max_rows: int = 500
+    # --- 入站与按需查询的边界 ---
+    # webhook_max_bytes 与 Go 侧 AgentMaxPayloadBytes 对齐：下推的默认上下文比早期
+    # 事件大得多，64 KiB 装不下。
+    webhook_max_bytes: int = 512 * 1024
+    context_max_checks: int = 200
+    context_max_metric_points: int = 200
+    context_max_text: int = 2000
+    # 回头找 AlertFlow 要数据的工具（检查历史/指标/Incident 详情）每次 run 的次数上限。
+    # 默认上下文已经把基础数据下推了，所以这些是补充手段，不是主路径。
+    max_query_calls: int = 8
     max_lead_rounds: int = 8
     max_llm_calls: int = 24
     max_tool_calls: int = 14

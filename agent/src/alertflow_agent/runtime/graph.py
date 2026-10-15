@@ -8,7 +8,7 @@ from langgraph.graph import END, StateGraph
 from alertflow_agent.analysis.errors import classify_error
 from alertflow_agent.analysis.stats import error_stats, latency_stats
 from alertflow_agent.analysis.timeline import coverage, key_checks, segments, status_counts
-from alertflow_agent.integrations.alertflow import collect_checks, iso_now
+from alertflow_agent.integrations.alertflow import collect_checks, iso_now, normalize_check
 from alertflow_agent.integrations.project_diagnostics import fetch, load_config
 from alertflow_agent.runtime.guards import before_lead, fresh_guard, note_tool
 from alertflow_agent.runtime.model import call_model
@@ -58,6 +58,9 @@ class GraphState(TypedDict, total=False):
     replan_bad: bool
     cancelled: bool
     script_args: dict
+    # 随事件一起下推的默认上下文（AlertFlow 已组装好）。它不进 state["event"]，
+    # 只用于建 Evidence Registry；后续深挖仍走查询工具。
+    provided_context: dict
 
 
 def _epoch(value: str) -> int:
@@ -212,12 +215,17 @@ class Runner:
 
     def _invoke_fresh(self, row: dict, thread_id: str) -> dict:
         run_id = row["id"]
-        occurred = row["input_event"]["occurred_at"]
-        end_at = row["input_event"].get("resolved_at") or occurred
+        event = dict(row["input_event"])
+        # 下推的上下文单独取出来：它是"启动这次诊断的材料"，不是事件本身。
+        # 混进 state["event"] 会被当成事件字段喂给模型。
+        provided_context = event.pop("diagnostic_context", None)
+        occurred = event["occurred_at"]
+        end_at = event.get("resolved_at") or occurred
         return self.graph.invoke({
                 "run_id": run_id,
                 "mode": row["mode"],
-                "event": row["input_event"],
+                "event": event,
+                "provided_context": provided_context,
                 "evidence": {},
                 "raw_checks": [],
                 "series": [],
@@ -234,7 +242,7 @@ class Runner:
                 "replan_requested": "",
                 "failure_reason": "",
                 "stop_reason": "",
-                "script": row["input_event"].get("script") or ["finish"],
+                "script": event.get("script") or ["finish"],
                 "analysis_n": 0,
                 "interval": None,
                 "started": datetime.now(timezone.utc).timestamp(),
@@ -242,7 +250,7 @@ class Runner:
                 "skill_texts": {},
                 "diagnostic_calls": 0,
                 "prior_report": self._prior_report(row),
-                "replan_bad": row["input_event"].get("replan_bad"),
+                "replan_bad": event.get("replan_bad"),
         }, {"configurable": {"thread_id": thread_id}})
 
     def _fail(self, run_id: str, reason: str) -> None:
@@ -297,6 +305,20 @@ class Runner:
                 "resolved_at": event["resolved_at"],
                 "duration_s": duration,
             })
+        # 有下推的默认上下文就用它建注册表，不再把同样的数据回拉一遍。
+        # 只有上下文在但一份可用证据都没有时（服务不在配置里、指标源整段缺失），
+        # 才回到实时读取，并把这件事记进 coverage。
+        context = state.get("provided_context")
+        if context:
+            self._seed_from_context(state, context)
+            if state["evidence"]:
+                return state
+            state["coverage"].setdefault("gaps", []).append("CONTEXT_INSUFFICIENT")
+        return self._collect_live(state)
+
+    def _collect_live(self, state):
+        """没有下推上下文时的实时读取（v1 事件、或上下文不可用）。"""
+        event = state["event"]
         gaps = list(state["coverage"].get("gaps") or [])
         status = {}
         detail = self._source(status, "incident", lambda: self.alertflow.incident(event["incident_id"]) if event.get("incident_id") else None)
@@ -334,6 +356,86 @@ class Runner:
         for row in key_checks(state["raw_checks"]):
             _evidence(state, f"chk:{row['id']}", "alertflow_check", "http_check", row.get("error") or row["status"], row)
         state["coverage"]["gaps"] = gaps
+        return state
+
+    def _seed_from_context(self, state, context):
+        """用下推的默认上下文建立 Evidence Registry。
+
+        覆盖 collect_alertflow 原来要现拉的四样东西：当前 Incident（含评论与外部告警）、
+        服务检查配置、24 小时指标与 TLS 快照、近期 Incident、默认检查记录。
+        查询工具不删——它们负责后续按需深挖（更长时间范围、更久历史、特定 Incident）。
+        """
+        service_id = state["event"]["service_id"]
+        gaps = list(state["coverage"].get("gaps") or [])
+        status = {"provided_context": "ok"}
+
+        window = context.get("timeWindow") or {}
+        if window.get("from") and window.get("to"):
+            # 窗口由事件时间决定，不由投递时刻决定——Go 侧已经算好了，直接采用。
+            state["coverage"]["from"] = _epoch(window["from"])
+            state["coverage"]["to"] = _epoch(window["to"])
+        coverage = context.get("coverage") or {}
+        for name, value in (coverage.get("sources") or {}).items():
+            status[name] = value
+        for code in list(coverage.get("gaps") or []) + list(coverage.get("truncated") or []):
+            gaps.append(str(code))
+
+        service = context.get("service") or {}
+        check_cfg = service.get("check") or {}
+        state["interval"] = check_cfg.get("interval")
+        if service.get("present"):
+            _evidence(state, f"svc:{service_id}", "alertflow_service", "service",
+                      "check configuration from the pushed context", check_cfg)
+        else:
+            gaps.append("SERVICE_NOT_IN_CONFIG")
+
+        metrics = context.get("metrics") or {}
+        series = [{"ts": point.get("ts"), "avg_latency": point.get("avgLatency")}
+                  for point in (metrics.get("series") or [])]
+        state["series"] = series
+        if series:
+            _evidence(state, "met:24h", "alertflow_metric", "metric_series",
+                      "series pushed with the event",
+                      {"series": series, "from": metrics.get("from"), "to": metrics.get("to"),
+                       "bucket_seconds": metrics.get("bucketSeconds")})
+        if metrics.get("tls"):
+            _evidence(state, f"tls:{service_id}", "alertflow_tls", "tls",
+                      metrics["tls"].get("error") or "tls snapshot", metrics["tls"], ["TLS_SNAPSHOT_ONLY"])
+            gaps.append("TLS_SNAPSHOT_ONLY")
+
+        trigger = context.get("triggeringCheck")
+        if isinstance(trigger, dict) and trigger.get("id") is not None:
+            row = normalize_check(trigger)
+            _evidence(state, f"chk:{row['id']}", "alertflow_check", "http_check",
+                      row.get("error") or row["status"], row, ["TRIGGERING_CHECK"])
+
+        rows = [normalize_check(item) for item in (context.get("recentChecks") or []) if isinstance(item, dict)]
+        rows.sort(key=lambda row: row["ts"])
+        state["raw_checks"] = rows
+        for row in key_checks(rows):
+            _evidence(state, f"chk:{row['id']}", "alertflow_check", "http_check",
+                      row.get("error") or row["status"], row)
+
+        incident = context.get("incident") or {}
+        if incident.get("id"):
+            _evidence(state, f"inc:{incident['id']}", "alertflow_incident", "incident",
+                      incident.get("title") or incident.get("status") or "incident",
+                      {"status": incident.get("status"), "severity": incident.get("severity")})
+            for comment in incident.get("comments") or []:
+                _evidence(state, f"cmt:{incident['id']}:{comment.get('id')}", "alertflow_comment",
+                          "comment", comment.get("body") or "", {"body": comment.get("body")})
+            for alert in incident.get("externalAlerts") or []:
+                _evidence(state, f"ext:{incident['id']}:{alert.get('source')}:{alert.get('alertKey')}",
+                          "alertflow_external_alert", "external_alert",
+                          alert.get("title") or alert.get("status") or "", alert)
+        for inc in context.get("relatedIncidents") or []:
+            if isinstance(inc, dict) and inc.get("id"):
+                _evidence(state, f"inc:{inc['id']}", "alertflow_incident", "incident",
+                          inc.get("title") or inc.get("status") or "incident",
+                          {"status": inc.get("status"), "severity": inc.get("severity")})
+
+        state["source_status"] = status
+        state["coverage"]["gaps"] = list(dict.fromkeys(gaps))
         return state
 
     def _source(self, status: dict, name: str, fn):

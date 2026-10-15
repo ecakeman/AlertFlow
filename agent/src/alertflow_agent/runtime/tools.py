@@ -27,9 +27,9 @@ def run_tool(name: str, args: dict, state: dict, settings, clients: dict) -> dic
         if name == "analyze_check_timeline":
             return _analyze(args, state)
         if name == "get_metrics_series":
-            return _metrics(args, state, clients)
+            return _metrics(args, state, settings, clients)
         if name == "get_incident_detail":
-            return _incident(args, state, clients)
+            return _incident(args, state, settings, clients)
         if name == "get_project_diagnostics":
             return _diagnostics(args, state, settings)
         if name == "recall_episode":
@@ -49,7 +49,24 @@ def _epoch(value) -> int:
     return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp())
 
 
+def _charge_query(state, settings) -> str | None:
+    """给「回头找 AlertFlow 要数据」的工具记一次调用，超限就拒。
+
+    默认上下文已经把 Incident、24h 指标、近期事件和默认检查记录下推了，所以这些
+    工具是**补充**手段（更长时间范围、更久历史、别的 Incident）。给每次 run 一个
+    次数上限，免得模型把预算花在反复翻历史上。返回 None 表示可以继续。
+    """
+    used = int(state.get("query_calls") or 0)
+    if used >= settings.max_query_calls:
+        return "query budget exhausted"
+    state["query_calls"] = used + 1
+    return None
+
+
 def _history(args, state, settings, clients) -> dict:
+    blocked = _charge_query(state, settings)
+    if blocked:
+        return {"status": "invalid_request", "note": blocked, "evidence_ids": []}
     event = state["event"]
     occurred = _epoch(event["occurred_at"])
     now = int(datetime.now(timezone.utc).timestamp())
@@ -87,7 +104,10 @@ def _analyze(args, state) -> dict:
     return {"status": "success" if rows else "empty", "evidence_ids": [f"ana:status@{n}"], "data": {"n": n, "rows": len(rows)}}
 
 
-def _metrics(args, state, clients) -> dict:
+def _metrics(args, state, settings, clients) -> dict:
+    blocked = _charge_query(state, settings)
+    if blocked:
+        return {"status": "invalid_request", "note": blocked, "evidence_ids": []}
     span = args.get("range") or ""
     if span not in {"1h", "6h", "24h", "7d", "30d"}:
         return {"status": "invalid_request", "note": "range", "evidence_ids": []}
@@ -112,7 +132,10 @@ def _metrics(args, state, clients) -> dict:
     return {"status": "success" if series else "empty", "evidence_ids": [ident], "data": {"points": len(series), "stats": stats}}
 
 
-def _incident(args, state, clients) -> dict:
+def _incident(args, state, settings, clients) -> dict:
+    blocked = _charge_query(state, settings)
+    if blocked:
+        return {"status": "invalid_request", "note": blocked, "evidence_ids": []}
     try:
         ident = int(args.get("incident_id"))
     except (TypeError, ValueError):
@@ -221,7 +244,7 @@ def _delegate(args, state, settings, clients) -> dict:
             return {"status": "error", "note": "subagent failed", "evidence_ids": []}
         if review.get("tool") != "get_incident_detail":
             break
-        _incident({"incident_id": review.get("incident_id")}, child, clients)
+        _incident({"incident_id": review.get("incident_id")}, child, settings, clients)
     n = state["guard"]["subagent_runs"]
     ident = f"rev:{n}"
     _add(state, ident, "subagent_review", ident, "history_review", review.get("suggestion") or "review", review, ["LLM summary, cite the underlying evidence"])

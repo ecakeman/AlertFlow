@@ -7,7 +7,13 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from alertflow_agent.runtime.verify import cited
-from alertflow_agent.schemas.events import WebhookBody
+from alertflow_agent.schemas.events import (
+    TEST_MESSAGE_TYPE,
+    AgentInbound,
+    WebhookBody,
+    normalize_event,
+    sanitize_context,
+)
 
 
 def _bearer(header: str) -> str | None:
@@ -49,30 +55,19 @@ def create_app(settings, store, runner) -> FastAPI:
         if not _auth(request.headers.get("authorization", ""), settings.agent_webhook_token):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         raw = await request.body()
-        if len(raw) > 64 * 1024:
+        if len(raw) > settings.webhook_max_bytes:
             return JSONResponse({"error": "body too large"}, status_code=413)
         try:
             payload = json.loads(raw)
-            body = WebhookBody.model_validate(payload)
         except Exception:
             return JSONResponse({"error": "invalid request body"}, status_code=400)
-        problem = body.problem()
-        if problem:
-            return JSONResponse({"error": problem}, status_code=400)
-        event = body.model_dump(mode="json")
-        if not event.get("service_url"):
-            event["service_url"] = event.get("url") or ""
-        if not event.get("service_name"):
-            event["service_name"] = event.get("service") or event["service_id"]
-        if body.event == "warning" and not settings.agent_enable_warning_runs:
-            return {"run_id": None, "action": "ignored"}
-        if body.event == "incident_resolve":
-            return _resolve(store, body, event, settings)
-        row = _row(event, "baseline" if body.event == "warning" else "agent")
-        existing = store.insert_run(row)
-        if existing:
-            return JSONResponse({"run_id": existing["id"], "action": "duplicate"}, status_code=200)
-        return JSONResponse({"run_id": row["id"], "action": "started"}, status_code=202)
+        if not isinstance(payload, dict):
+            return JSONResponse({"error": "invalid request body"}, status_code=400)
+        # v2 是带默认上下文的信封；v1 是早期不带上下文的默认载荷。两条都在，
+        # 直到确认线上不再有 v1 的发送方。
+        if str(payload.get("schema_version") or "") == "v2":
+            return _ingest_v2(payload, store, settings)
+        return _ingest_v1(payload, store, settings)
 
     @app.get("/api/v1/runs")
     def list_runs(request: Request):
@@ -164,10 +159,62 @@ def _api(request: Request, settings) -> bool:
     return _auth(request.headers.get("authorization", ""), settings.agent_api_token)
 
 
-def _row(event: dict, mode: str) -> dict:
+def _ingest_v1(payload: dict, store, settings):
+    """v1：早期默认 webhook，没有下推上下文，Agent 自己去拉。"""
+    try:
+        body = WebhookBody.model_validate(payload)
+    except Exception:
+        return JSONResponse({"error": "invalid request body"}, status_code=400)
+    problem = body.problem()
+    if problem:
+        return JSONResponse({"error": problem}, status_code=400)
+    event = normalize_event(body.model_dump(mode="json"))
+    if body.event == "warning" and not settings.agent_enable_warning_runs:
+        return {"run_id": None, "action": "ignored"}
+    if body.event == "incident_resolve":
+        return _resolve(store, event, body.event_id, settings)
+    row = _row(event, "baseline" if body.event == "warning" else "agent", dedupe=event["event_id"])
+    existing = store.insert_run(row)
+    if existing:
+        return JSONResponse({"run_id": existing["id"], "action": "duplicate"}, status_code=200)
+    return JSONResponse({"run_id": row["id"], "action": "started"}, status_code=202)
+
+
+def _ingest_v2(payload: dict, store, settings):
+    """v2：带默认上下文的信封。幂等键用 message_id。"""
+    try:
+        envelope = AgentInbound.model_validate(payload)
+    except Exception:
+        return JSONResponse({"error": "invalid request body"}, status_code=400)
+    problem = envelope.problem()
+    if problem:
+        return JSONResponse({"error": problem}, status_code=400)
+    if envelope.message_type == TEST_MESSAGE_TYPE:
+        # 连通性/鉴权自测：不建 run，免得留下一堆没有事件的空诊断。
+        return {"message_id": envelope.message_id, "action": "ignored"}
+    event = normalize_event(envelope.payload.get("event") or {})
+    if not event.get("event_id"):
+        event["event_id"] = envelope.message_id
+    context = envelope.payload.get("diagnostic_context")
+    if isinstance(context, dict):
+        # 上下文随 run 一起持久化在 input_event 里，run 开始时再取出来放进 state；
+        # 它不进 state["event"]，免得被当成事件字段喂给模型。
+        event["diagnostic_context"] = sanitize_context(context)
+    if event.get("event") == "warning" and not settings.agent_enable_warning_runs:
+        return {"message_id": envelope.message_id, "action": "ignored"}
+    if event.get("event") == "incident_resolve":
+        return _resolve(store, event, envelope.message_id, settings)
+    row = _row(event, "baseline" if event.get("event") == "warning" else "agent", dedupe=envelope.message_id)
+    existing = store.insert_run(row)
+    if existing:
+        return JSONResponse({"run_id": existing["id"], "action": "duplicate"}, status_code=200)
+    return JSONResponse({"run_id": row["id"], "action": "started"}, status_code=202)
+
+
+def _row(event: dict, mode: str, dedupe: str | None = None) -> dict:
     return {
         "id": str(uuid.uuid4()),
-        "dedupe_key": event["event_id"],
+        "dedupe_key": dedupe or event["event_id"],
         "incident_id": event.get("incident_id"),
         "service_id": event["service_id"],
         "event_type": event["event"],
@@ -186,12 +233,13 @@ def _id_for(store, key: str) -> str:
     raise KeyError(key)
 
 
-def _resolve(store, body, event, settings):
-    found = store.find_incident(body.incident_id) if body.incident_id else None
+def _resolve(store, event: dict, event_id: str, settings):
+    incident_id = event.get("incident_id")
+    found = store.find_incident(incident_id) if incident_id else None
     if not found:
         return {"run_id": None, "action": "ignored"}
     action = store.record_resolve(
-        found["id"], body.event_id, event.get("resolved_at"), settings.agent_revise_on_resolve,
+        found["id"], event_id, event.get("resolved_at"), settings.agent_revise_on_resolve,
     )
     code = 202 if action in {"revise", "recorded", "resolved"} else 200
     return JSONResponse({"run_id": found["id"], "action": action}, status_code=code)
