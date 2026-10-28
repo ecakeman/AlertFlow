@@ -13,6 +13,7 @@ func (c *Config) Clone() *Config {
 	}
 	cp.Services = make([]Service, len(c.Services))
 	copy(cp.Services, c.Services)
+	// Diagnostics is strings and an int, so this copy owns it.
 	for i := range c.Services {
 		if es := c.Services[i].Check.ExpectedStatus; es != nil {
 			cp.Services[i].Check.ExpectedStatus = append([]int(nil), es...)

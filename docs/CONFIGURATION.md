@@ -58,6 +58,10 @@ Each entry defines one monitored endpoint.
   chart:
     type: line # line | bars
   layout: { x: 0, y: 0, w: 3, h: 4 } # grid position (12 columns) and size
+  diagnostics: # optional application snapshot; omit url to skip collection
+    url: http://fault-lab:8090/diagnostics/v1/snapshot # http(s) URL
+    token_env: DIAGNOSTICS_TOKEN # env var holding the bearer token; the token is not stored here
+    interval: 60 # seconds between pulls (min 15). 0 or omitted uses 60
 ```
 
 ### Field notes
@@ -74,6 +78,10 @@ Each entry defines one monitored endpoint.
   Attempts are clamped to `1..10` and each delay to `0..300` seconds.
 - **`icon`** is optional. With no icon, the UI renders a generated procedural
   icon; uploading or generating one stores a `<id>.webp` and sets this field.
+- **`diagnostics`** is optional. An empty or omitted `url` does not start a
+  collector. `token_env` is the name of an environment variable. The service
+  form does not edit this block, and saving a service from the form leaves it
+  in place.
 
 ### `widget.mode`
 

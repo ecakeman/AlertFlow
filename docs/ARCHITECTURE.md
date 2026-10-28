@@ -87,6 +87,8 @@ One `check()` does, in order:
 
 The scheduler stops there. It does not call `OnTransition` and it does not send notifications. `published_at` stays NULL in the server process. Claiming an outbox row uses `FOR UPDATE SKIP LOCKED` on `outbox_events` only. That is not a lock on a service, and `runMu` is not a lock across processes.
 
+`internal/diagnostics` polls a service's optional `diagnostics.url` on its own interval. A failed pull updates `runtime_source_state` only. A successful pull writes Timeline rows for degraded or unhealthy status, for `recent_error`, `recent_change`, and `slow_operation`, and one recovery row when a bad status returns to healthy or unknown. It does not call `event.Decide` and it does not open an incident. The agent still reads its own diagnostics file directly.
+
 `ALERTFLOW_ROLE=publisher` is a second process of the same binary. It claims one due outbox row at a time, in `id` order, and writes it to the Kafka topic `alert-events` with the service id as the key. `published_at` is set only after the broker ack, and only when that process still holds the lease. Run one publisher. The database commit and the Kafka ack are not one atomic action: a crash after the ack and before `published_at` can publish the same event again.
 
 `ALERTFLOW_ROLE=consumer` reads that topic. One message updates the incident, `processed_events`, `service_runtime_state`, and `pending` `notification_deliveries` in one PostgreSQL transaction. The Kafka offset is committed after that transaction commits. This process does not call `Dispatcher.Notify`. More consumer replicas than the topic's three partitions do not add parallelism.

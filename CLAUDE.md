@@ -56,7 +56,7 @@ invent a test command.
   — keep `CGO_ENABLED=0`; schema via **goose** PostgreSQL migrations in `db/migrations/*.sql`, embedded and
   run on `Open`), `event` (`monitor.check.completed` payload and `Decide`), `publish` (outbox to Kafka), `consume` (Kafka to incidents and pending deliveries), `query` (the read-composition layer above), `cache` (optional Redis read cache), `auth` (bcrypt + session tokens; cookies are set by the api layer), `monitor` (HTTP
   checker + goroutine-per-service ticker scheduler; `Sync` reconciles on config change; also reads the
-  TLS cert off HTTPS responses; it does not call `incident`), `incident` (opens/resolves
+  TLS cert off HTTPS responses; it does not call `incident`), `diagnostics` (optional per-service application snapshot poll; writes timeline and source state, does not open incidents), `incident` (opens/resolves
   outage incidents from online↔offline transitions; imports `db`, never `monitor`, to avoid a
   cycle), `notify` (the diagnostic agent webhook; `Dispatcher.Test` sends that one registered sender), `image` (WebP
   validate/store), `archive` (export/import zip), `logger` (slog JSON setup), `api` (the `Server` owns

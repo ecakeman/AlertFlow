@@ -22,6 +22,7 @@ import (
 	"github.com/ecakeman/alertflow/internal/cache"
 	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/db"
+	"github.com/ecakeman/alertflow/internal/diagnostics"
 	"github.com/ecakeman/alertflow/internal/monitor"
 	"github.com/ecakeman/alertflow/internal/notify"
 	"github.com/ecakeman/alertflow/internal/query"
@@ -43,6 +44,7 @@ type Server struct {
 	cfg        *config.Config
 	database   *db.DB
 	sched      *monitor.Scheduler
+	diag       *diagnostics.Collector
 	dispatcher *notify.Dispatcher
 	// queries is the single composition layer for reads. Handlers and the
 	// diagnostic-context builder both go through it; it holds a live config
@@ -90,6 +92,7 @@ func New(configDir string) (*Server, error) {
 		cfg:                cfg,
 		database:           database,
 		sched:              monitor.New(database),
+		diag:               diagnostics.New(database),
 		dispatcher:         dispatcher,
 		webFS:              web.FS(),
 		logins:             newLoginLimiter(),
@@ -125,6 +128,7 @@ func New(configDir string) (*Server, error) {
 	s.newEngine()
 
 	s.sched.Sync(cfg.Services)
+	s.diag.Sync(cfg.Services)
 	go s.retentionLoop()
 	return s, nil
 }
@@ -153,6 +157,9 @@ func (s *Server) newEngine() *gin.Engine {
 func (s *Server) Close() {
 	close(s.stop)
 	s.scheduler().Stop()
+	if s.diag != nil {
+		s.diag.Stop()
+	}
 	_ = s.redis.Close()
 	s.mu.Lock()
 	s.database.Close()
@@ -380,7 +387,12 @@ func (s *Server) updateConfig(fn func(*config.Config) error) error {
 		return err
 	}
 	s.cfg = clone
-	s.sched.Sync(clone.Services)
+	if s.sched != nil {
+		s.sched.Sync(clone.Services)
+	}
+	if s.diag != nil {
+		s.diag.Sync(clone.Services)
+	}
 	return nil
 }
 
@@ -401,9 +413,15 @@ func (s *Server) switchConfigDir(dir string) error {
 	s.configDir = dir
 	s.cfg = cfg
 	sched := s.sched
+	diag := s.diag
 	s.mu.Unlock()
 
-	sched.Sync(cfg.Services)
+	if sched != nil {
+		sched.Sync(cfg.Services)
+	}
+	if diag != nil {
+		diag.Sync(cfg.Services)
+	}
 	_ = state.Save(state.State{ConfigDir: dir})
 	return nil
 }

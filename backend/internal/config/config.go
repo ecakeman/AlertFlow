@@ -52,6 +52,11 @@ const (
 	// layer's fallbacks cannot drift from what new configs get.
 	DefaultWarningPeriodHours = 24
 	maxWarningPeriodHours     = 24 * 365
+
+	// DefaultDiagnosticsInterval is the poll period for a service that has a
+	// diagnostics URL and no interval of its own.
+	DefaultDiagnosticsInterval = 60
+	minDiagnosticsInterval     = 15
 )
 
 // DefaultRetryDelays are the waits, in seconds, before each retry: the first
@@ -82,11 +87,11 @@ type Settings struct {
 // the UI rather than hand-edited in .env. AlertFlow never calls these endpoints
 // itself — it only hands the config to the Agent, which fetches it once per run.
 type AgentSettings struct {
-	BaseURL  string         `yaml:"base_url,omitempty"`  // Agent API base, e.g. http://agent:8000
-	APIToken string         `yaml:"api_token,omitempty"` // Agent API bearer (AGENT_API_TOKEN)
-	LLM      ModelEndpoint  `yaml:"llm,omitempty"`
-	Embed    ModelEndpoint  `yaml:"embed,omitempty"`
-	Rerank   ModelEndpoint  `yaml:"rerank,omitempty"`
+	BaseURL  string        `yaml:"base_url,omitempty"`  // Agent API base, e.g. http://agent:8000
+	APIToken string        `yaml:"api_token,omitempty"` // Agent API bearer (AGENT_API_TOKEN)
+	LLM      ModelEndpoint `yaml:"llm,omitempty"`
+	Embed    ModelEndpoint `yaml:"embed,omitempty"`
+	Rerank   ModelEndpoint `yaml:"rerank,omitempty"`
 	// MemoryEnabled toggles the Agent's long-term memory (episodic recall).
 	MemoryEnabled *bool `yaml:"memory_enabled,omitempty"`
 	// ContextBudgetTokens caps a single prompt's context (separate from the
@@ -131,14 +136,24 @@ type CheckDefaults struct {
 
 // Service is a single monitored endpoint.
 type Service struct {
-	ID     string       `yaml:"id"`
-	Name   string       `yaml:"name"`
-	URL    string       `yaml:"url"`
-	Icon   string       `yaml:"icon,omitempty"`
-	Check  ServiceCheck `yaml:"check"`
-	Widget Widget       `yaml:"widget"`
-	Chart  Chart        `yaml:"chart"`
-	Layout Layout       `yaml:"layout"`
+	ID          string             `yaml:"id"`
+	Name        string             `yaml:"name"`
+	URL         string             `yaml:"url"`
+	Icon        string             `yaml:"icon,omitempty"`
+	Check       ServiceCheck       `yaml:"check"`
+	Widget      Widget             `yaml:"widget"`
+	Chart       Chart              `yaml:"chart"`
+	Layout      Layout             `yaml:"layout"`
+	Diagnostics ServiceDiagnostics `yaml:"diagnostics,omitempty"`
+}
+
+// ServiceDiagnostics is an optional application-diagnostics snapshot. An empty
+// URL means this service is not collected. TokenEnv names an environment
+// variable; the token itself is never stored here.
+type ServiceDiagnostics struct {
+	URL      string `yaml:"url,omitempty"`
+	TokenEnv string `yaml:"token_env,omitempty"`
+	Interval int    `yaml:"interval,omitempty"`
 }
 
 // ServiceCheck configures a service's HTTP health check.
@@ -338,6 +353,21 @@ func (s *Service) Validate() error {
 		if d > maxRetryDelay {
 			s.Check.RetryDelays[i] = maxRetryDelay
 		}
+	}
+	s.Diagnostics.URL = strings.TrimSpace(s.Diagnostics.URL)
+	s.Diagnostics.TokenEnv = strings.TrimSpace(s.Diagnostics.TokenEnv)
+	if s.Diagnostics.URL == "" {
+		return nil
+	}
+	diag, err := url.Parse(s.Diagnostics.URL)
+	if err != nil || (diag.Scheme != "http" && diag.Scheme != "https") || diag.Host == "" {
+		return fmt.Errorf("diagnostics url must be a valid http(s) URL")
+	}
+	if s.Diagnostics.Interval == 0 {
+		s.Diagnostics.Interval = DefaultDiagnosticsInterval
+	}
+	if s.Diagnostics.Interval < minDiagnosticsInterval {
+		s.Diagnostics.Interval = minDiagnosticsInterval
 	}
 	return nil
 }

@@ -33,7 +33,8 @@ Phase 0 验收通过后才能改核心代码。一次只做一个阶段。
 - `notification_deliveries.status` 允许 `pending`、`running`、`retry_wait`、`succeeded`、`dead`、`cancelled`（`00012`）。
 - `insertDeliveriesTx` 只给启用的 `agent_webhook` 插入任务（`backend/internal/db/apply.go`）。`ClaimDeliveries` 只领取这种渠道。检查真正打开或解决故障时，同一事务写 `runtime_events`，键是 `incident:{id}:opened` 和 `incident:{id}:resolved`。手动创建走 `CreateManualIncident`，不经过 Kafka。
 - 前端集成表单只创建 `agent_webhook`。历史四种渠道仍可列出和删除。
-- 手动创建在一个事务里写 Incident、Timeline 和可用 Agent 的调查任务（`backend/internal/db/timeline.go`）。只改标题或开始时间不写 Timeline。首次解决写解决事件，不建新任务。
+- `POST /api/incidents` 在一个事务里写 Incident、Timeline 和可用 Agent 的调查任务（`backend/internal/db/timeline.go`）。只改标题或开始时间不写 Timeline。首次解决写解决事件，不建新任务。
+- `server` 对配置了 `diagnostics.url` 的服务按间隔拉取应用诊断。失败只更新 `runtime_source_state`。成功时把异常项和恢复写进 `runtime_events`，`source` 为 `application_diagnostics`。不调用 `event.Decide`，不建 Incident。Agent 仍用 `DIAGNOSTICS_FILE` 直连。
 - `CheckNow` 在没有常驻 worker 时会造一个临时 worker 做一次性检查（`backend/internal/monitor/scheduler.go`）。
 - Agent 任务今天经 `agent_webhook` 发到 Agent 的 webhook。结果经 `POST /webhooks/agent` 回来。Agent 只读查询走 `/internal/agent/v1/...`。Agent 自己的回调出站表是 `agent_callback_outbox`（`agent/schema.sql`），靠 `message_id` 唯一。
 - 检查与 Outbox 同一事务。Publisher 在 broker ack 之后才标记已发布。Consumer 在一个事务里写 `processed_events`、Incident、运行状态和投递任务，提交之后才提交 Kafka offset。这些边界在 V2 里保持。

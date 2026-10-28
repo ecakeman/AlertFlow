@@ -141,18 +141,17 @@ func (s *Server) handleDeleteService(c *gin.Context) error {
 	if s.sched != nil {
 		s.sched.Release(id)
 	}
+	if s.diag != nil {
+		s.diag.Release(id)
+	}
 	if err := s.database.DeleteServiceRecords(id); err != nil {
 		slog.Error("delete service history", "service", id, "error", err)
-		if s.sched != nil {
-			s.sched.Sync(s.cfg.Services)
-		}
+		s.restoreRuntime()
 		return fail(http.StatusInternalServerError, "could not delete service history")
 	}
 	if err := image.Delete(config.ImagesPath(s.configDir), id); err != nil {
 		slog.Error("delete service image", "service", id, "error", err)
-		if s.sched != nil {
-			s.sched.Sync(s.cfg.Services)
-		}
+		s.restoreRuntime()
 		return fail(http.StatusInternalServerError, "could not delete service image")
 	}
 	next := s.cfg.Clone()
@@ -165,16 +164,21 @@ func (s *Server) handleDeleteService(c *gin.Context) error {
 	next.Services = kept
 	if err := config.Save(s.configDir, next); err != nil {
 		slog.Error("delete service config", "service", id, "error", err)
-		if s.sched != nil {
-			s.sched.Sync(s.cfg.Services)
-		}
+		s.restoreRuntime()
 		return fail(http.StatusInternalServerError, "could not delete service")
 	}
 	s.cfg = next
-	if s.sched != nil {
-		s.sched.Sync(next.Services)
-	}
+	s.restoreRuntime()
 	return writeEmpty(c, http.StatusNoContent)
+}
+
+func (s *Server) restoreRuntime() {
+	if s.sched != nil {
+		s.sched.Sync(s.cfg.Services)
+	}
+	if s.diag != nil {
+		s.diag.Sync(s.cfg.Services)
+	}
 }
 
 type layoutItem struct {

@@ -27,6 +27,10 @@ type timelineEvent struct {
 	ObservedAt int64
 	IncidentID int64
 	Origin     string
+	// Source defaults to the incident source. Details, when set, replaces the
+	// origin object.
+	Source  string
+	Details json.RawMessage
 }
 
 func incidentOpenedKey(id int64) string {
@@ -38,18 +42,30 @@ func incidentResolvedKey(id int64) string {
 }
 
 func insertTimelineTx(tx *sql.Tx, ev timelineEvent, now int64) error {
-	details, err := json.Marshal(map[string]string{"origin": ev.Origin})
-	if err != nil {
-		return err
+	source := ev.Source
+	if source == "" {
+		source = timelineSourceIncident
 	}
-	_, err = tx.Exec(
+	details := ev.Details
+	if len(details) == 0 {
+		raw, err := json.Marshal(map[string]string{"origin": ev.Origin})
+		if err != nil {
+			return err
+		}
+		details = raw
+	}
+	var incidentID any
+	if ev.IncidentID != 0 {
+		incidentID = ev.IncidentID
+	}
+	_, err := tx.Exec(
 		`INSERT INTO runtime_events (
 			event_key, service_id, source, event_type, severity, title, summary,
 			occurred_at, observed_at, recorded_at, incident_id, details
 		 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		 ON CONFLICT (event_key) DO NOTHING`,
-		ev.Key, ev.ServiceID, timelineSourceIncident, ev.EventType, ev.Severity, ev.Title, ev.Summary,
-		ev.OccurredAt, ev.ObservedAt, now, ev.IncidentID, string(details),
+		ev.Key, ev.ServiceID, source, ev.EventType, ev.Severity, ev.Title, ev.Summary,
+		ev.OccurredAt, ev.ObservedAt, now, incidentID, string(details),
 	)
 	return err
 }

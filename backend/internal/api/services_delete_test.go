@@ -102,3 +102,49 @@ func TestDeleteServiceKeepsConfigWhenCleanupFails(t *testing.T) {
 		t.Fatal("config dropped the service after cleanup failed")
 	}
 }
+
+func TestUpdateServiceKeepsDiagnostics(t *testing.T) {
+	database := db.OpenTest(t)
+	dir := t.TempDir()
+	cfg := &config.Config{Services: []config.Service{{
+		ID: "svc", Name: "API", URL: "https://example.com",
+		Check: config.ServiceCheck{Interval: 3600, Timeout: 1, RetryAttempts: 1},
+		Diagnostics: config.ServiceDiagnostics{
+			URL: "https://diag.example/snapshot", TokenEnv: "DIAGNOSTICS_TOKEN", Interval: 60,
+		},
+	}}}
+	if err := config.Save(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sched := monitor.New(database)
+	t.Cleanup(sched.Stop)
+	s := &Server{configDir: dir, cfg: loaded, database: database, sched: sched}
+	attachQuery(s)
+	app := s.newEngine()
+	user, err := database.CreateUser("admin", "hash", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const token = "session-token"
+	now := time.Now().Unix()
+	if err := database.CreateSession(token, user.ID, now, now+3600); err != nil {
+		t.Fatal(err)
+	}
+	status, body := integrationRequest(t, app, http.MethodPut, "/api/services/svc", token,
+		`{"name":"Renamed","url":"https://example.com","interval":3600}`)
+	if status != http.StatusOK {
+		t.Fatalf("update = %d %s", status, body)
+	}
+	onDisk, err := config.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := onDisk.Find("svc")
+	if svc == nil || svc.Name != "Renamed" || svc.Diagnostics.URL != "https://diag.example/snapshot" || svc.Diagnostics.TokenEnv != "DIAGNOSTICS_TOKEN" {
+		t.Fatalf("service = %+v", svc)
+	}
+}

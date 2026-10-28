@@ -244,6 +244,32 @@ func TestCloneIsolatesUptimeExcludedServices(t *testing.T) {
 	}
 }
 
+func TestDiagnosticsURLValidation(t *testing.T) {
+	cfg := Default()
+	cfg.Services = []Service{{
+		ID: "svc", Name: "Svc", URL: "https://example.com",
+		Diagnostics: ServiceDiagnostics{URL: "ftp://example.com/snap"},
+	}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("ftp diagnostics url was accepted")
+	}
+	cfg.Services[0].Diagnostics.URL = "https://example.com/snap"
+	cfg.Services[0].Diagnostics.Interval = 5
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Services[0].Diagnostics.Interval != minDiagnosticsInterval {
+		t.Fatalf("interval = %d", cfg.Services[0].Diagnostics.Interval)
+	}
+	cfg.Services[0].Diagnostics = ServiceDiagnostics{}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Services[0].Diagnostics.Interval != 0 || cfg.Services[0].Diagnostics.URL != "" {
+		t.Fatalf("empty diagnostics filled in: %+v", cfg.Services[0].Diagnostics)
+	}
+}
+
 func equalInts(a, b []int) bool {
 	if len(a) != len(b) {
 		return false
