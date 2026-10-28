@@ -1,7 +1,6 @@
-// Package notify delivers incident notifications to configured integrations
-// (Telegram, Slack, email, custom webhook). A Dispatcher loads the enabled
-// integrations for an event and fans the message out to each channel's Sender,
-// recording every attempt in the notification log.
+// Package notify delivers incident notifications to the diagnostic agent.
+// Telegram, Slack, email and generic webhook senders are retired. A Dispatcher
+// only sends a test through one registered sender.
 package notify
 
 import (
@@ -107,6 +106,13 @@ func (m Message) eventTime() time.Time {
 		return m.OccurredAt
 	}
 	return m.StartedAt
+}
+
+func severityOf(event Event) string {
+	if event == EventWarning {
+		return "warning"
+	}
+	return "outage"
 }
 
 // Sender delivers a message to one channel. config is the integration's stored

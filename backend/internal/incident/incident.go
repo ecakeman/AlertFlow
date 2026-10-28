@@ -1,17 +1,15 @@
 // Package incident derives outage incidents from service status transitions.
 // The check scheduler does not call it. The Kafka consumer applies the same
 // rule through event.Decide inside one database transaction and does not call
-// OnTransition, because OnTransition also sends notifications.
+// OnTransition.
 package incident
 
 import (
 	"context"
 	"log/slog"
-	"time"
 
 	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/db"
-	"github.com/ecakeman/alertflow/internal/notify"
 )
 
 // InitialStatus seeds a worker's "previous status" when it starts. If the
@@ -46,8 +44,8 @@ type Outcome struct {
 // ongoing one, and a →warning that had nothing to resolve fires a warning
 // notification instead. It is a no-op when the status is unchanged, which is
 // what stops a service that keeps blipping from notifying every cycle.
-// dispatcher may be nil (notifications are then skipped).
-func OnTransition(ctx context.Context, database *db.DB, dispatcher *notify.Dispatcher, svc config.Service, previous string, cur Outcome, ts int64) {
+// External fan-out is retired; this function only records the incident.
+func OnTransition(ctx context.Context, database *db.DB, svc config.Service, previous string, cur Outcome, ts int64) {
 	if previous == cur.Status {
 		return
 	}
@@ -60,7 +58,6 @@ func OnTransition(ctx context.Context, database *db.DB, dispatcher *notify.Dispa
 			return
 		}
 		slog.Info("incident: opened", "service", svc.ID, "incident", inc.ID)
-		fire(dispatcher, notify.EventIncidentStart, svc, inc)
 	case db.StatusOnline, db.StatusWarning:
 		inc, err := database.ResolveOngoingIncident(svc.ID, ts)
 		if err != nil {
@@ -71,13 +68,11 @@ func OnTransition(ctx context.Context, database *db.DB, dispatcher *notify.Dispa
 			// Coming back from an outage — even via a warning — is a recovery.
 			// One message per event: the resolve already says we are back.
 			slog.Info("incident: resolved", "service", svc.ID, "incident", inc.ID)
-			fire(dispatcher, notify.EventIncidentResolve, svc, inc)
 			return
 		}
 		if cur.Status == db.StatusWarning {
 			slog.Info("monitor: check recovered on retry", "service", svc.ID,
 				"attempts", cur.Attempts, "first_error", cur.Error)
-			fireWarning(dispatcher, svc, cur, ts)
 			// Recorded already-resolved so it shows up in the incident feed
 			// (e.g. a service's "Recent incidents") without ever touching the
 			// one-ongoing-incident-per-service invariant above.
@@ -86,43 +81,4 @@ func OnTransition(ctx context.Context, database *db.DB, dispatcher *notify.Dispa
 			}
 		}
 	}
-}
-
-// fireWarning dispatches a warning notification. It cannot reuse fire: there is
-// no incident to reference.
-func fireWarning(dispatcher *notify.Dispatcher, svc config.Service, cur Outcome, ts int64) {
-	if dispatcher == nil {
-		return
-	}
-	msg := notify.Message{
-		Event:       notify.EventWarning,
-		ServiceID:   svc.ID,
-		ServiceName: svc.Name,
-		ServiceURL:  svc.URL,
-		StartedAt:   time.Unix(ts, 0),
-		Attempts:    cur.Attempts,
-		Error:       cur.Error,
-	}
-	go dispatcher.Notify(context.Background(), msg)
-}
-
-// fire builds a notification message and dispatches it without blocking the
-// caller (the scheduler's check goroutine).
-func fire(dispatcher *notify.Dispatcher, event notify.Event, svc config.Service, inc *db.Incident) {
-	if dispatcher == nil || inc == nil {
-		return
-	}
-	msg := notify.Message{
-		Event:       event,
-		IncidentID:  inc.ID,
-		ServiceID:   svc.ID,
-		ServiceName: svc.Name,
-		ServiceURL:  svc.URL,
-		StartedAt:   time.Unix(inc.StartedAt, 0),
-	}
-	if inc.ResolvedAt != nil {
-		t := time.Unix(*inc.ResolvedAt, 0)
-		msg.ResolvedAt = &t
-	}
-	go dispatcher.Notify(context.Background(), msg)
 }

@@ -34,33 +34,33 @@ func TestOnTransition(t *testing.T) {
 	ctx := context.Background()
 
 	// No change: no incident created.
-	OnTransition(ctx, database, nil, svc, db.StatusOnline, Outcome{Status: db.StatusOnline}, 100)
+	OnTransition(ctx, database, svc, db.StatusOnline, Outcome{Status: db.StatusOnline}, 100)
 	if list, _ := database.ListIncidents("svc", "", "", 0, 0); len(list) != 0 {
 		t.Fatalf("no-transition created %d incidents, want 0", len(list))
 	}
 
 	// Down: opens exactly one ongoing incident.
-	OnTransition(ctx, database, nil, svc, db.StatusOnline, Outcome{Status: db.StatusOffline}, 200)
+	OnTransition(ctx, database, svc, db.StatusOnline, Outcome{Status: db.StatusOffline}, 200)
 	ongoing, _ := database.GetOngoingIncident("svc")
 	if ongoing == nil || ongoing.StartedAt != 200 {
 		t.Fatalf("down should open an incident at ts 200, got %+v", ongoing)
 	}
 
 	// Still down: no new incident.
-	OnTransition(ctx, database, nil, svc, db.StatusOffline, Outcome{Status: db.StatusOffline}, 250)
+	OnTransition(ctx, database, svc, db.StatusOffline, Outcome{Status: db.StatusOffline}, 250)
 	if list, _ := database.ListIncidents("svc", "", "", 0, 0); len(list) != 1 {
 		t.Fatalf("still-down created extra incidents: %d", len(list))
 	}
 
 	// Recover: resolves it.
-	OnTransition(ctx, database, nil, svc, db.StatusOffline, Outcome{Status: db.StatusOnline}, 300)
+	OnTransition(ctx, database, svc, db.StatusOffline, Outcome{Status: db.StatusOnline}, 300)
 	if ongoing, _ := database.GetOngoingIncident("svc"); ongoing != nil {
 		t.Fatalf("recover should resolve the incident, still ongoing: %+v", ongoing)
 	}
 
 	// A second down→up cycle creates a distinct incident.
-	OnTransition(ctx, database, nil, svc, db.StatusOnline, Outcome{Status: db.StatusOffline}, 400)
-	OnTransition(ctx, database, nil, svc, db.StatusOffline, Outcome{Status: db.StatusOnline}, 500)
+	OnTransition(ctx, database, svc, db.StatusOnline, Outcome{Status: db.StatusOffline}, 400)
+	OnTransition(ctx, database, svc, db.StatusOffline, Outcome{Status: db.StatusOnline}, 500)
 	all, _ := database.ListIncidents("svc", "", "", 0, 0)
 	if len(all) != 2 {
 		t.Fatalf("expected 2 incidents after two cycles, got %d", len(all))
@@ -106,7 +106,7 @@ func TestOnTransitionMatrix(t *testing.T) {
 				}
 			}
 
-			OnTransition(context.Background(), database, nil, svc, tt.prev,
+			OnTransition(context.Background(), database, svc, tt.prev,
 				Outcome{Status: tt.current, Attempts: 2, Error: "boom"}, 300)
 
 			ongoing, _ := database.GetOngoingIncident("svc")
@@ -128,7 +128,7 @@ func TestOnTransitionRecordsWarningEvent(t *testing.T) {
 	database := openDB(t)
 	svc := config.Service{ID: "svc", Name: "Svc", URL: "https://svc.example"}
 
-	OnTransition(context.Background(), database, nil, svc, db.StatusOnline,
+	OnTransition(context.Background(), database, svc, db.StatusOnline,
 		Outcome{Status: db.StatusWarning, Attempts: 2, Error: "boom"}, 500)
 
 	list, err := database.ListIncidents("svc", "", "", 0, 0)

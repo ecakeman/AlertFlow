@@ -15,6 +15,13 @@ import (
 	"github.com/ecakeman/alertflow/internal/query"
 )
 
+// webhookConfig is the stored shape of an agent_webhook integration.
+type webhookConfig struct {
+	URL     string            `json:"url"`
+	Method  string            `json:"method"`
+	Headers map[string]string `json:"headers"`
+}
+
 // AgentWebhookType is the integration type reserved for the diagnostic Agent.
 // It is deliberately distinct from "webhook": a generic webhook must never
 // receive the internal diagnostic context, and only this type does.

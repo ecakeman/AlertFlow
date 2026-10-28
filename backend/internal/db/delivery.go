@@ -295,7 +295,10 @@ func (db *DB) RetryDeadDelivery(id, now int64) error {
 	return ErrNotRetryable
 }
 
-const retiredRunningReason = "running delivery left in place; an old worker may still send"
+const (
+	retiredCancelReason  = "retired channel cancelled after old delivery workers were drained"
+	retiredRunningReason = "running delivery left in place; an old worker may still send"
+)
 
 // RetiredDeliveryResult is what one drain of the retired channels changed.
 type RetiredDeliveryResult struct {
@@ -314,9 +317,24 @@ func (db *DB) CancelRetiredDeliveries(now int64) (RetiredDeliveryResult, error) 
 		return RetiredDeliveryResult{}, err
 	}
 	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`INSERT INTO retired_delivery_audits (
+			delivery_id, event_id, integration_id, integration_type, status, reason, created_at
+		 )
+		 SELECT d.id, d.event_id, d.integration_id, i.type, d.status, $2, $1
+		 FROM notification_deliveries d
+		 JOIN integrations i ON i.id = d.integration_id
+		 WHERE i.type IN ('telegram', 'slack', 'email', 'webhook')
+		   AND d.status IN ('pending', 'retry_wait')
+		 ON CONFLICT (delivery_id) DO NOTHING`,
+		now, retiredCancelReason,
+	); err != nil {
+		return RetiredDeliveryResult{}, err
+	}
 	res, err := tx.Exec(
 		`UPDATE notification_deliveries AS d
 		 SET status = 'cancelled',
+		     last_error = $2,
 		     lease_owner = NULL,
 		     lease_until = NULL,
 		     updated_at = $1
@@ -324,7 +342,7 @@ func (db *DB) CancelRetiredDeliveries(now int64) (RetiredDeliveryResult, error) 
 		 WHERE i.id = d.integration_id
 		   AND i.type IN ('telegram', 'slack', 'email', 'webhook')
 		   AND d.status IN ('pending', 'retry_wait')`,
-		now,
+		now, retiredCancelReason,
 	)
 	if err != nil {
 		return RetiredDeliveryResult{}, err
@@ -334,8 +352,10 @@ func (db *DB) CancelRetiredDeliveries(now int64) (RetiredDeliveryResult, error) 
 		return RetiredDeliveryResult{}, err
 	}
 	res, err = tx.Exec(
-		`INSERT INTO retired_delivery_audits (delivery_id, status, reason, created_at)
-		 SELECT d.id, d.status, $2, $1
+		`INSERT INTO retired_delivery_audits (
+			delivery_id, event_id, integration_id, integration_type, status, reason, created_at
+		 )
+		 SELECT d.id, d.event_id, d.integration_id, i.type, d.status, $2, $1
 		 FROM notification_deliveries d
 		 JOIN integrations i ON i.id = d.integration_id
 		 WHERE i.type IN ('telegram', 'slack', 'email', 'webhook')

@@ -2,7 +2,6 @@ package notify
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,7 +11,7 @@ import (
 // SendTimeout is the limit for one HTTP notification attempt.
 const SendTimeout = 15 * time.Second
 
-// httpClient is shared by the HTTP-based senders (telegram, slack, webhook).
+// httpClient is shared by the agent webhook sender.
 var httpClient = &http.Client{Timeout: SendTimeout}
 
 // StatusError is an HTTP response that was not successful.
@@ -34,19 +33,6 @@ func (e *StatusError) Permanent() bool {
 	default:
 		return e.Code >= 400 && e.Code < 500
 	}
-}
-
-// postJSON POSTs a JSON body and treats any non-2xx response as an error.
-func postJSON(ctx context.Context, url string, headers map[string]string, body []byte) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	return doRequest(req)
 }
 
 // doRequest sends req and returns an error for transport failures or non-2xx.

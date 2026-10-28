@@ -1,5 +1,5 @@
 // Package deliver sends one notification_deliveries row at a time.
-// It does not call Dispatcher.Notify, which would fan out to every channel.
+// The only sender is the diagnostic agent webhook.
 // A crash after the remote service accepts the request and before PostgreSQL
 // records success can send the same task again. That is at-least-once delivery.
 package deliver

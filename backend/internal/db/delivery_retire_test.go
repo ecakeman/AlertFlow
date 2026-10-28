@@ -94,8 +94,12 @@ func TestCancelRetiredDeliveriesLeavesRunning(t *testing.T) {
 	if statusOf("running-slack") != "running" || statusOf("pending-agent") != "pending" {
 		t.Fatalf("running=%s agent=%s", statusOf("running-slack"), statusOf("pending-agent"))
 	}
+	var reason string
+	if err := database.QueryRow(`SELECT last_error FROM notification_deliveries WHERE event_id = 'pending-slack'`).Scan(&reason); err != nil || reason == "" {
+		t.Fatalf("cancel reason = %q, %v", reason, err)
+	}
 	var audits int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM retired_delivery_audits`).Scan(&audits); err != nil || audits != 1 {
+	if err := database.QueryRow(`SELECT COUNT(*) FROM retired_delivery_audits WHERE reason <> ''`).Scan(&audits); err != nil || audits != 3 {
 		t.Fatalf("audits = %d, %v", audits, err)
 	}
 
@@ -111,5 +115,11 @@ func TestCancelRetiredDeliveriesLeavesRunning(t *testing.T) {
 	}
 	if err := database.RetryDeadDelivery(id, now); !errors.Is(err, ErrChannelRetired) {
 		t.Fatalf("retry dead retired = %v", err)
+	}
+	if err := database.DeleteIntegration(slack.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM retired_delivery_audits WHERE integration_id = $1`, slack.ID).Scan(&audits); err != nil || audits != 3 {
+		t.Fatalf("audits after delete = %d, %v", audits, err)
 	}
 }
