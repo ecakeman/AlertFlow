@@ -22,6 +22,7 @@ follow the pointer instead of re-deriving behaviour from the code.
 | [docs/API.md](docs/API.md) | Every endpoint + object shape (services, metrics, incidents, integrations) |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every `config.yaml` field, `widget.mode`, `layout` grid semantics |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Running both dev servers, building the single binary |
+| [docs/v2/CONTRACT.md](docs/v2/CONTRACT.md) | V2 implementation contract: phase order, notification retirement, Timeline, gRPC, and the 2026-10-28 baseline |
 | [README.md](README.md) | User-facing install/usage |
 
 **When you change behaviour, update the matching doc in the same change** — these files are the
