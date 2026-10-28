@@ -177,7 +177,7 @@ func (db *DB) UpdateIncident(id int64, title string, startedAt int64, resolvedAt
 	if !prev.Valid && resolvedAt != nil {
 		if err := insertTimelineTx(tx, timelineEvent{
 			Key: incidentResolvedKey(id), ServiceID: serviceID, EventType: timelineResolved,
-			Severity: "info", Title: "Incident resolved", OccurredAt: *resolvedAt,
+			Severity: "info", Title: "Incident resolved", OccurredAt: *resolvedAt, ObservedAt: now,
 			IncidentID: id, Origin: "manual",
 		}, now); err != nil {
 			return nil, err
@@ -195,17 +195,24 @@ func (db *DB) DeleteIncident(id int64) error {
 	return err
 }
 
-// DeleteServiceIncidents removes a service's incidents and its timeline rows.
-func (db *DB) DeleteServiceIncidents(serviceID string) error {
+// DeleteServiceRecords removes one service's checks, certificate snapshot,
+// timeline, runtime state, unpublished outbox rows and incidents. The caller
+// stops the checker before this and removes the service from config only after
+// it commits.
+func (db *DB) DeleteServiceRecords(serviceID string) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	for _, stmt := range []string{
+		`DELETE FROM checks WHERE service_id = $1`,
+		`DELETE FROM service_tls WHERE service_id = $1`,
 		`DELETE FROM runtime_events WHERE service_id = $1`,
 		`DELETE FROM runtime_source_state WHERE service_id = $1`,
 		`DELETE FROM runtime_object_states WHERE service_id = $1`,
+		`DELETE FROM service_runtime_state WHERE service_id = $1`,
+		`DELETE FROM outbox_events WHERE published_at IS NULL AND payload->>'service_id' = $1`,
 		`DELETE FROM incidents WHERE service_id = $1`,
 	} {
 		if _, err := tx.Exec(stmt, serviceID); err != nil {

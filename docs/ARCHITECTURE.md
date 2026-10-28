@@ -32,8 +32,12 @@ Why the split matters:
 - A service is deleted from `config.yaml`, but its incidents stay in PostgreSQL.
   DTO conversion therefore resolves names defensively (`toIncidentDTO` falls back
   to `"(deleted service)"`). Deleting a service explicitly cascades:
-  `handleDeleteService` calls `DeleteServiceHistory`, `DeleteServiceTLS` and
-  `DeleteServiceIncidents`.
+  `handleDeleteService` first stops that service's checker and waits for the
+  current cycle to finish. It then deletes checks, the TLS snapshot, timeline
+  rows, runtime state, unpublished outbox rows and incidents in one transaction.
+  The service leaves `config.yaml` only after that commit. A cleanup error is
+  logged and returned, and the config is left in place. An image delete error
+  is handled the same way, before the config write.
 - Integration secrets are deliberately **not** in `config.yaml` — that file is
   exposed verbatim by `GET /api/config` (the raw YAML editor) and is what people
   screenshot and commit.

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestManualIncidentTimelineAndTasks(t *testing.T) {
@@ -22,6 +23,7 @@ func TestManualIncidentTimelineAndTasks(t *testing.T) {
 		t.Fatal(err)
 	}
 	resolved := int64(2500)
+	before := time.Now().Unix()
 	inc, err := database.CreateManualIncident(ManualIncident{
 		ServiceID: "svc", ServiceName: "API", ServiceURL: "https://example.com",
 		StartedAt: 2000, ResolvedAt: &resolved,
@@ -34,6 +36,28 @@ func TestManualIncidentTimelineAndTasks(t *testing.T) {
 	}
 	if n := countRows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE incident_id = $1`, inc.ID); n != 2 {
 		t.Fatalf("timeline = %d, want 2", n)
+	}
+	rows, err := database.Query(`SELECT event_type, occurred_at, observed_at, recorded_at FROM runtime_events WHERE incident_id = $1 ORDER BY occurred_at`, inc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var kind string
+		var occurred, observed, recorded int64
+		if err := rows.Scan(&kind, &occurred, &observed, &recorded); err != nil {
+			t.Fatal(err)
+		}
+		want := int64(2000)
+		if kind == "incident.resolved" {
+			want = resolved
+		}
+		if occurred != want || observed < before || recorded < before || observed == occurred {
+			t.Fatalf("%s times occurred=%d observed=%d recorded=%d", kind, occurred, observed, recorded)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE incident_id = $1 AND integration_id = $2`, inc.ID, good.ID); n != 1 {
 		t.Fatalf("agent tasks = %d", n)
@@ -101,7 +125,7 @@ func TestDeleteServiceRemovesTimeline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := database.DeleteServiceIncidents("svc"); err != nil {
+	if err := database.DeleteServiceRecords("svc"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.GetIncident(inc.ID); !errors.Is(err, ErrNotFound) {

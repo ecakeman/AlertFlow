@@ -176,7 +176,7 @@ func applyCheckEventTx(tx *sql.Tx, ev event.CheckCompleted) error {
 		}
 		if err := insertTimelineTx(tx, timelineEvent{
 			Key: key, ServiceID: ev.ServiceID, EventType: evType, Severity: severity,
-			Title: title, Summary: ev.ServiceName, OccurredAt: ev.OccurredAt,
+			Title: title, Summary: ev.ServiceName, OccurredAt: ev.OccurredAt, ObservedAt: ev.OccurredAt,
 			IncidentID: *incidentID, Origin: "check",
 		}, now); err != nil {
 			return err

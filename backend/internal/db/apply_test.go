@@ -33,6 +33,13 @@ func TestApplyCheckEventTransitions(t *testing.T) {
 	if err != nil || ongoing == nil {
 		t.Fatalf("ongoing = %+v, %v", ongoing, err)
 	}
+	var occurred, observed, recorded int64
+	if err := database.QueryRow(`SELECT occurred_at, observed_at, recorded_at FROM runtime_events WHERE incident_id = $1`, ongoing.ID).Scan(&occurred, &observed, &recorded); err != nil {
+		t.Fatal(err)
+	}
+	if occurred != 1000 || observed != 1000 || recorded < occurred {
+		t.Fatalf("check times occurred=%d observed=%d recorded=%d", occurred, observed, recorded)
+	}
 	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE event_id = $1 AND status = 'pending' AND event_type = 'incident_start'`, down.EventID); n != 2 {
 		t.Fatalf("start deliveries = %d, want 2", n)
 	}

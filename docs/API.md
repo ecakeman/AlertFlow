@@ -25,7 +25,7 @@ Errors use `{ "error": "message" }` with an appropriate status code.
 | `GET /api/services`              | user  | All services with live status + metrics.              |
 | `POST /api/services`             | admin | Add `{ name, url, interval, mode }`.                  |
 | `PUT /api/services/{id}`         | admin | Edit `{ name?, url?, interval?, mode? }`.             |
-| `DELETE /api/services/{id}`      | admin | Remove the service, its image and history.            |
+| `DELETE /api/services/{id}`      | admin | Stop the checker, delete runtime rows, then remove the service and its image. Cleanup failure leaves the service in config. |
 | `PATCH /api/services/layout`     | admin | Bulk-save grid layout `[{ id, x, y, w, h, mode?, chart? }]`. `mode`/`chart` apply only when set; `x/y/w/h` always do. |
 | `POST /api/services/{id}/check`  | admin | Run a check immediately; returns updated metrics.     |
 | `GET /api/services/{id}/metrics` | user  | Aggregates, time series, uptime windows + TLS (`?range=1h\|6h\|24h\|7d\|30d\|365d`, default `24h`; unknown values fall back to `24h`). |

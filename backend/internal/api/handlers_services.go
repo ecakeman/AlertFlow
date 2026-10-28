@@ -3,10 +3,12 @@ package api
 import (
 	"errors"
 	"fmt"
-	"github.com/gin-gonic/gin"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/gin-gonic/gin"
 
 	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/db"
@@ -127,30 +129,51 @@ func (s *Server) handleUpdateService(c *gin.Context) error {
 	return writeJSON(c, http.StatusOK, toServiceDTO(status.Service, status.Metrics))
 }
 
-// DELETE /api/services/:id → remove a service, its image and its history.
+// DELETE /api/services/:id → stop checks, remove runtime rows, then drop the
+// service from config. Config stays when runtime cleanup fails.
 func (s *Server) handleDeleteService(c *gin.Context) error {
 	id := c.Param("id")
-	err := s.updateConfig(func(cfg *config.Config) error {
-		idx := -1
-		for i := range cfg.Services {
-			if cfg.Services[i].ID == id {
-				idx = i
-				break
-			}
-		}
-		if idx == -1 {
-			return errServiceNotFound
-		}
-		cfg.Services = append(cfg.Services[:idx], cfg.Services[idx+1:]...)
-		return nil
-	})
-	if err != nil {
-		return configErr(err)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cfg.Find(id) == nil {
+		return configErr(errServiceNotFound)
 	}
-	_ = image.Delete(config.ImagesPath(s.dir()), id)
-	_ = s.conn().DeleteServiceHistory(id)
-	_ = s.conn().DeleteServiceTLS(id)
-	_ = s.conn().DeleteServiceIncidents(id)
+	if s.sched != nil {
+		s.sched.Release(id)
+	}
+	if err := s.database.DeleteServiceRecords(id); err != nil {
+		slog.Error("delete service history", "service", id, "error", err)
+		if s.sched != nil {
+			s.sched.Sync(s.cfg.Services)
+		}
+		return fail(http.StatusInternalServerError, "could not delete service history")
+	}
+	if err := image.Delete(config.ImagesPath(s.configDir), id); err != nil {
+		slog.Error("delete service image", "service", id, "error", err)
+		if s.sched != nil {
+			s.sched.Sync(s.cfg.Services)
+		}
+		return fail(http.StatusInternalServerError, "could not delete service image")
+	}
+	next := s.cfg.Clone()
+	kept := make([]config.Service, 0, len(next.Services))
+	for _, svc := range next.Services {
+		if svc.ID != id {
+			kept = append(kept, svc)
+		}
+	}
+	next.Services = kept
+	if err := config.Save(s.configDir, next); err != nil {
+		slog.Error("delete service config", "service", id, "error", err)
+		if s.sched != nil {
+			s.sched.Sync(s.cfg.Services)
+		}
+		return fail(http.StatusInternalServerError, "could not delete service")
+	}
+	s.cfg = next
+	if s.sched != nil {
+		s.sched.Sync(next.Services)
+	}
 	return writeEmpty(c, http.StatusNoContent)
 }
 

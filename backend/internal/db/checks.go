@@ -293,9 +293,3 @@ func (db *DB) DeleteOlderThan(cutoff int64) (int64, error) {
 	}
 	return res.RowsAffected()
 }
-
-// DeleteServiceHistory removes all checks for a service (used when it's deleted).
-func (db *DB) DeleteServiceHistory(serviceID string) error {
-	_, err := db.Exec(`DELETE FROM checks WHERE service_id = $1`, serviceID)
-	return err
-}

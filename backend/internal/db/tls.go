@@ -50,9 +50,3 @@ func (db *DB) GetServiceTLS(serviceID string) (*ServiceTLS, error) {
 	}
 	return &t, nil
 }
-
-// DeleteServiceTLS removes the cert snapshot for a service.
-func (db *DB) DeleteServiceTLS(serviceID string) error {
-	_, err := db.Exec(`DELETE FROM service_tls WHERE service_id = $1`, serviceID)
-	return err
-}

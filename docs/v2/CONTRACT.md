@@ -120,11 +120,13 @@ Phase 2 新增 `runtime_events`、`runtime_source_state`、`runtime_object_state
 
 Agent 目标有效指：存在启用的 `agent_webhook`，且 URL 可用。没有这样的目标时仍提交 Incident 和 Timeline，不插入会一直重试的任务。每个启用的 `agent_webhook` 各一条任务。
 
-幂等键按 Incident 固定：`incident:{id}:opened` 与 `incident:{id}:resolved`。投递继续用 `(event_id, integration_id)` 唯一约束，`event_id` 与打开事件键相同。另一次 HTTP 创建是另一条 Incident。服务上已有进行中故障时，现有唯一索引拒绝第二次创建。
+幂等键按 Incident 固定：`incident:{id}:opened` 与 `incident:{id}:resolved`。`occurred_at` 是故障发生时间。`observed_at` 是系统观察到这次事件的时间：检查路径用检查时间，手动补录用写入时的当前时间。`recorded_at` 是落库时间。投递继续用 `(event_id, integration_id)` 唯一约束，`event_id` 与打开事件键相同。另一次 HTTP 创建是另一条 Incident。服务上已有进行中故障时，现有唯一索引拒绝第二次创建。
 
 `PUT` 只改标题或开始时间：不写 Timeline，不建任务。`PUT` 把尚未解决的 Incident 标成已解决：在该次更新的事务里写解决事件，不建任务。评论不写 Timeline，不建任务。删除不建任务。Timeline 行保留，`incident_id` 按 `ON DELETE SET NULL` 置空。
 
 Kubernetes、应用诊断、Prometheus、Loki 在本轮不调用 `event.Decide`，也不直接开关 Incident。
+
+删除服务时先停掉它的检查协程，再在一个事务里删除检查、TLS、Timeline、运行状态、未发布 outbox 和 Incident。事务成功后才从 `config.yaml` 去掉该服务。清理失败会记日志并返回错误，配置保持不变。
 
 ## 6. gRPC 契约
 

@@ -24,6 +24,7 @@ type timelineEvent struct {
 	Title      string
 	Summary    string
 	OccurredAt int64
+	ObservedAt int64
 	IncidentID int64
 	Origin     string
 }
@@ -45,10 +46,10 @@ func insertTimelineTx(tx *sql.Tx, ev timelineEvent, now int64) error {
 		`INSERT INTO runtime_events (
 			event_key, service_id, source, event_type, severity, title, summary,
 			occurred_at, observed_at, recorded_at, incident_id, details
-		 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, $11)
+		 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		 ON CONFLICT (event_key) DO NOTHING`,
 		ev.Key, ev.ServiceID, timelineSourceIncident, ev.EventType, ev.Severity, ev.Title, ev.Summary,
-		ev.OccurredAt, now, ev.IncidentID, string(details),
+		ev.OccurredAt, ev.ObservedAt, now, ev.IncidentID, string(details),
 	)
 	return err
 }
@@ -89,7 +90,7 @@ func (db *DB) CreateManualIncident(in ManualIncident) (*Incident, error) {
 	if err := insertTimelineTx(tx, timelineEvent{
 		Key: incidentOpenedKey(id), ServiceID: in.ServiceID, EventType: timelineOpened,
 		Severity: "error", Title: "Incident opened", Summary: in.ServiceName,
-		OccurredAt: in.StartedAt, IncidentID: id, Origin: "manual",
+		OccurredAt: in.StartedAt, ObservedAt: now, IncidentID: id, Origin: "manual",
 	}, now); err != nil {
 		return nil, err
 	}
@@ -103,7 +104,7 @@ func (db *DB) CreateManualIncident(in ManualIncident) (*Incident, error) {
 		if err := insertTimelineTx(tx, timelineEvent{
 			Key: incidentResolvedKey(id), ServiceID: in.ServiceID, EventType: timelineResolved,
 			Severity: "info", Title: "Incident resolved", Summary: in.ServiceName,
-			OccurredAt: *in.ResolvedAt, IncidentID: id, Origin: "manual",
+			OccurredAt: *in.ResolvedAt, ObservedAt: now, IncidentID: id, Origin: "manual",
 		}, now); err != nil {
 			return nil, err
 		}

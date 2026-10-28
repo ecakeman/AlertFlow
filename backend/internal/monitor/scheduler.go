@@ -40,6 +40,7 @@ type worker struct {
 	svc        config.Service
 	lastStatus string
 	cancel     context.CancelFunc
+	done       chan struct{}
 
 	// runMu serialises whole cycles. Without it a manual CheckNow and the
 	// ticker can overlap for the length of a retry ladder, and the slower one
@@ -106,14 +107,31 @@ func (s *Scheduler) Sync(services []config.Service) {
 // startWorker launches (and registers) a worker for svc. Caller holds the lock.
 func (s *Scheduler) startWorker(svc config.Service) {
 	ctx, cancel := context.WithCancel(context.Background())
-	w := &worker{svc: svc, cancel: cancel, lastStatus: seedStatus(s.db, svc.ID)}
+	w := &worker{svc: svc, cancel: cancel, done: make(chan struct{}), lastStatus: seedStatus(s.db, svc.ID)}
 	warnIfLadderExceedsInterval(svc)
 	s.workers[svc.ID] = w
 	s.wg.Add(1)
 	go func() {
+		defer close(w.done)
 		defer s.wg.Done()
 		s.run(ctx, w)
 	}()
+}
+
+// Release stops the worker for id and waits until that goroutine has left its
+// current cycle. The service can then be removed without a late check writing
+// a new row.
+func (s *Scheduler) Release(id string) {
+	s.mu.Lock()
+	w := s.workers[id]
+	if w != nil {
+		delete(s.workers, id)
+		w.cancel()
+	}
+	s.mu.Unlock()
+	if w != nil && w.done != nil {
+		<-w.done
+	}
 }
 
 // run performs an immediate check, then repeats on the service's interval.
