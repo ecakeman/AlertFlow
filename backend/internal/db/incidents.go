@@ -148,13 +148,42 @@ func (db *DB) UpdateIncident(id int64, title string, startedAt int64, resolvedAt
 	if resolvedAt != nil {
 		status = "resolved"
 	}
-	_, err := db.Exec(
-		`UPDATE incidents SET title = $1, started_at = $2, resolved_at = $3, status = $4, updated_at = $5 WHERE id = $6`,
-		nullStr(title), startedAt, resolvedAt, status, time.Now().Unix(), id)
+	tx, err := db.Begin()
 	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var serviceID string
+	var prev sql.NullInt64
+	err = tx.QueryRow(
+		`SELECT service_id, resolved_at FROM incidents WHERE id = $1 FOR UPDATE`, id,
+	).Scan(&serviceID, &prev)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().Unix()
+	if _, err := tx.Exec(
+		`UPDATE incidents SET title = $1, started_at = $2, resolved_at = $3, status = $4, updated_at = $5 WHERE id = $6`,
+		nullStr(title), startedAt, resolvedAt, status, now, id,
+	); err != nil {
 		if isUniqueViolation(err) {
 			return nil, ErrOngoingExists
 		}
+		return nil, err
+	}
+	if !prev.Valid && resolvedAt != nil {
+		if err := insertTimelineTx(tx, timelineEvent{
+			Key: incidentResolvedKey(id), ServiceID: serviceID, EventType: timelineResolved,
+			Severity: "info", Title: "Incident resolved", OccurredAt: *resolvedAt,
+			IncidentID: id, Origin: "manual",
+		}, now); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return db.GetIncident(id)
@@ -166,10 +195,24 @@ func (db *DB) DeleteIncident(id int64) error {
 	return err
 }
 
-// DeleteServiceIncidents removes all incidents for a service (comments cascade).
+// DeleteServiceIncidents removes a service's incidents and its timeline rows.
 func (db *DB) DeleteServiceIncidents(serviceID string) error {
-	_, err := db.Exec(`DELETE FROM incidents WHERE service_id = $1`, serviceID)
-	return err
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, stmt := range []string{
+		`DELETE FROM runtime_events WHERE service_id = $1`,
+		`DELETE FROM runtime_source_state WHERE service_id = $1`,
+		`DELETE FROM runtime_object_states WHERE service_id = $1`,
+		`DELETE FROM incidents WHERE service_id = $1`,
+	} {
+		if _, err := tx.Exec(stmt, serviceID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // incidentFilter builds the WHERE clause shared by ListIncidents and

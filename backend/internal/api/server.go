@@ -437,6 +437,12 @@ func (s *Server) runRetention() {
 	} else if n > 0 {
 		slog.Info("retention: removed old checks", "count", n)
 	}
+	timelineCutoff := time.Now().Add(-time.Duration(db.TimelineRetentionDays()) * 24 * time.Hour).Unix()
+	if n, err := database.DeleteTimelineBefore(timelineCutoff); err != nil {
+		slog.Error("retention: delete timeline", "error", err)
+	} else if n > 0 {
+		slog.Info("retention: removed old timeline events", "count", n)
+	}
 	if err := database.DeleteExpiredSessions(time.Now().Unix()); err != nil {
 		slog.Error("retention: delete sessions", "error", err)
 	}

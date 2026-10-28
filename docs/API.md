@@ -44,7 +44,7 @@ transitions; these endpoints cover reading them plus the manual/edit path. See
 | ----------------------------------- | ----- | ------------------------------------------------------------------ |
 | `GET /api/incidents`                | user  | A page of incidents, newest first, plus the total matching the filter — `{ incidents, total }`. Filters: `?status=ongoing\|resolved`, `?severity=outage\|warning`, `?serviceId=`; paging: `?limit=` 1–200 (default 20), `?offset=`. |
 | `GET /api/incidents/{id}`           | user  | One incident **with its comments**. |
-| `POST /api/incidents`               | admin | Log one manually `{ serviceId, title?, startedAt?, resolvedAt? }`.¹ |
+| `POST /api/incidents`               | admin | Log one manually `{ serviceId, title?, startedAt?, resolvedAt? }`. Same transaction writes the timeline open event, a resolve event when `resolvedAt` is set, and one investigation task per usable `agent_webhook`.¹ |
 | `PUT /api/incidents/{id}`           | admin | Edit `{ title?, startedAt?, resolvedAt? }`; setting `resolvedAt` resolves it.² |
 | `DELETE /api/incidents/{id}`        | admin | Delete the incident (comments cascade).                            |
 | `POST /api/incidents/{id}/comments` | user³ | Add a comment `{ body }`.                                          |

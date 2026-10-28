@@ -29,6 +29,8 @@ type DeliverySnapshot struct {
 	Attempts    int    `json:"attempts,omitempty"`
 	Error       string `json:"error,omitempty"`
 	CheckID     int64  `json:"checkId,omitempty"`
+	// Source marks a manually created investigation. Check-driven tasks omit it.
+	Source string `json:"source,omitempty"`
 	// Chat is set only for a chat_requested delivery: a read-only question for
 	// the diagnostic agent. It rides the notification delivery table so it
 	// inherits the same leases, retries and dead-lettering.
@@ -163,6 +165,23 @@ func applyCheckEventTx(tx *sql.Tx, ev event.CheckCompleted) error {
 		kind = "warning"
 	}
 
+	if kind == "incident_start" || kind == "incident_resolve" {
+		evType, title, severity := timelineOpened, "Incident opened", "error"
+		if kind == "incident_resolve" {
+			evType, title, severity = timelineResolved, "Incident resolved", "info"
+		}
+		key := incidentOpenedKey(*incidentID)
+		if kind == "incident_resolve" {
+			key = incidentResolvedKey(*incidentID)
+		}
+		if err := insertTimelineTx(tx, timelineEvent{
+			Key: key, ServiceID: ev.ServiceID, EventType: evType, Severity: severity,
+			Title: title, Summary: ev.ServiceName, OccurredAt: ev.OccurredAt,
+			IncidentID: *incidentID, Origin: "check",
+		}, now); err != nil {
+			return err
+		}
+	}
 	if kind != "" {
 		if err := insertDeliveriesTx(tx, subject, kind, incidentID, resolvedAt, now); err != nil {
 			return err

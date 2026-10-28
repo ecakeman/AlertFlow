@@ -57,10 +57,8 @@ invent a test command.
   run on `Open`), `event` (`monitor.check.completed` payload and `Decide`), `publish` (outbox to Kafka), `consume` (Kafka to incidents and pending deliveries), `query` (the read-composition layer above), `cache` (optional Redis read cache), `auth` (bcrypt + session tokens; cookies are set by the api layer), `monitor` (HTTP
   checker + goroutine-per-service ticker scheduler; `Sync` reconciles on config change; also reads the
   TLS cert off HTTPS responses; it does not call `incident`), `incident` (opens/resolves
-  outage incidents from online↔offline transitions; imports `db`+`notify`, never `monitor`, to avoid a
-  cycle), `notify` (incident-start/resolve notifications; a `Dispatcher` fans out to per-type `Sender`s
-  — telegram/slack/email/webhook, registered via `init()`, plus `agent_webhook`, registered at startup
-  because it needs the query layer), `image` (WebP
+  outage incidents from online↔offline transitions; imports `db`, never `monitor`, to avoid a
+  cycle), `notify` (the diagnostic agent webhook; `Dispatcher.Test` sends that one registered sender), `image` (WebP
   validate/store), `archive` (export/import zip), `logger` (slog JSON setup), `api` (the `Server` owns
   config+db+scheduler and applies edits copy-on-write under a lock; **Gin** app with per-route
   auth/admin middleware, a central `ErrorHandler` rendering `{ "error": ... }`, and a native SPA

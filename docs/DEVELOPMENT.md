@@ -90,7 +90,7 @@ backend/
     auth/                # bcrypt + session tokens
     monitor/             # HTTP checker (+TLS cert) + per-service ticker scheduler
     incident/            # opens/resolves incidents from status transitions
-    notify/              # Dispatcher + telegram/slack/email/webhook senders
+    notify/              # agent webhook sender and test dispatch
     image/               # WebP validate/store/serve
     archive/             # export/import zip (validate → backup → apply)
     logger/              # slog JSON logger setup

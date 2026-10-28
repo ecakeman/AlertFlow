@@ -94,7 +94,8 @@ func (s *Server) handleCreateIncident(c *gin.Context) error {
 	if err := decode(c, &in); err != nil {
 		return err
 	}
-	if s.config().Find(in.ServiceID) == nil {
+	svc := s.config().Find(in.ServiceID)
+	if svc == nil {
 		return fail(http.StatusBadRequest, "unknown service")
 	}
 	started, err := parseTime(in.StartedAt, time.Now())
@@ -109,23 +110,24 @@ func (s *Server) handleCreateIncident(c *gin.Context) error {
 	if u := userLocal(c); u != nil {
 		createdBy = &u.ID
 	}
-	inc, err := s.conn().CreateIncident(in.ServiceID, "manual", started.Unix(), title, createdBy)
-	if err != nil {
-		if errors.Is(err, db.ErrOngoingExists) {
-			return fail(http.StatusBadRequest, err.Error())
-		}
-		return fail(http.StatusInternalServerError, "could not create incident")
-	}
-	// A manually created incident may already be resolved (logging a past outage).
+	var resolvedAt *int64
 	if in.ResolvedAt != nil {
 		resolved, perr := parseTime(in.ResolvedAt, time.Now())
 		if perr != nil {
 			return fail(http.StatusBadRequest, "invalid resolvedAt")
 		}
-		inc, err = s.conn().ResolveIncident(inc.ID, resolved.Unix())
-		if err != nil {
-			return fail(http.StatusInternalServerError, "could not resolve incident")
+		unix := resolved.Unix()
+		resolvedAt = &unix
+	}
+	inc, err := s.conn().CreateManualIncident(db.ManualIncident{
+		ServiceID: svc.ID, ServiceName: svc.Name, ServiceURL: svc.URL,
+		Title: title, StartedAt: started.Unix(), ResolvedAt: resolvedAt, CreatedBy: createdBy,
+	})
+	if err != nil {
+		if errors.Is(err, db.ErrOngoingExists) {
+			return fail(http.StatusBadRequest, err.Error())
 		}
+		return fail(http.StatusInternalServerError, "could not create incident")
 	}
 	return writeJSON(c, http.StatusCreated, toIncidentDTO(*inc, s.serviceName(inc.ServiceID)))
 }

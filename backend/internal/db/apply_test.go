@@ -94,6 +94,15 @@ func TestApplyCheckEventTransitions(t *testing.T) {
 	if warnSnap.OccurredAt != 1200 || warnSnap.StartedAt != 0 || warnSnap.ResolvedAt != nil {
 		t.Fatalf("warning snapshot = %+v", warnSnap)
 	}
+	if n := countRows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'incident.opened' AND incident_id = $1`, ongoing.ID); n != 1 {
+		t.Fatalf("open timeline = %d", n)
+	}
+	if n := countRows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'incident.resolved'`); n != 1 {
+		t.Fatalf("resolve timeline = %d", n)
+	}
+	if n := countRows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE service_id = 'other'`); n != 0 {
+		t.Fatalf("warning timeline = %d", n)
+	}
 }
 
 func TestApplyCheckEventDoesNotRewind(t *testing.T) {

@@ -28,12 +28,12 @@ Phase 0 验收通过后才能改核心代码。一次只做一个阶段。
 
 - 角色有 `server`、`publisher`、`consumer`、`delivery`，以及一次性的 `retire-deliveries`（`backend/cmd/alertflow/main.go`）。`api.New` 会 `sched.Sync` 并启动周期调度（`backend/internal/api/server.go`）。`retire-deliveries` 不在启动时运行。
 - HTTP 是 Gin v1.10.1。`HandleMethodNotAllowed` 为 false，错误方法进入 `serveSPA`。模块声明 Go 1.25.7。没有 gRPC，没有 client-go。Redis 只是可降级读缓存。
-- Goose 迁移嵌入二进制，在 `db.Open` 时自动执行，并有 advisory lock。已有 `00001`–`00012`。下一号是 `00013`。`00011` 已删除 `external_alerts`。`00012` 只增加 `cancelled` 和 `retired_delivery_audits`。不要改已应用的迁移。
-- `integrations.type` 仍允许 `telegram`、`slack`、`email`、`webhook`、`agent_webhook`（`00010`）。创建、更新和测试只接受 `agent_webhook`。
+- Goose 迁移嵌入二进制，在 `db.Open` 时自动执行，并有 advisory lock。已有 `00001`–`00014`。下一号是 `00015`。`00013` 让退役审计在投递行删除后仍然保留，并记录取消原因。`00014` 新增 Timeline 三张表。不要改已应用的迁移。
+- `integrations.type` 仍允许 `telegram`、`slack`、`email`、`webhook`、`agent_webhook`（`00010`）。创建、更新和测试只接受 `agent_webhook`。这四种外发渠道没有发送器，`Dispatcher.Notify` 已删除。
 - `notification_deliveries.status` 允许 `pending`、`running`、`retry_wait`、`succeeded`、`dead`、`cancelled`（`00012`）。
-- `insertDeliveriesTx` 只给启用的 `agent_webhook` 插入任务（`backend/internal/db/apply.go`）。`ClaimDeliveries` 只领取这种渠道，也不再把退役渠道扫成 `dead`（`backend/internal/db/delivery.go`）。
+- `insertDeliveriesTx` 只给启用的 `agent_webhook` 插入任务（`backend/internal/db/apply.go`）。`ClaimDeliveries` 只领取这种渠道。检查真正打开或解决故障时，同一事务写 `runtime_events`，键是 `incident:{id}:opened` 和 `incident:{id}:resolved`。手动创建走 `CreateManualIncident`，不经过 Kafka。
 - 前端集成表单只创建 `agent_webhook`。历史四种渠道仍可列出和删除。
-- 手动创建和更新 Incident 直接写库，不经过 Kafka，也不建投递任务（`backend/internal/api/handlers_incidents.go`）。
+- 手动创建在一个事务里写 Incident、Timeline 和可用 Agent 的调查任务（`backend/internal/db/timeline.go`）。只改标题或开始时间不写 Timeline。首次解决写解决事件，不建新任务。
 - `CheckNow` 在没有常驻 worker 时会造一个临时 worker 做一次性检查（`backend/internal/monitor/scheduler.go`）。
 - Agent 任务今天经 `agent_webhook` 发到 Agent 的 webhook。结果经 `POST /webhooks/agent` 回来。Agent 只读查询走 `/internal/agent/v1/...`。Agent 自己的回调出站表是 `agent_callback_outbox`（`agent/schema.sql`），靠 `message_id` 唯一。
 - 检查与 Outbox 同一事务。Publisher 在 broker ack 之后才标记已发布。Consumer 在一个事务里写 `processed_events`、Incident、运行状态和投递任务，提交之后才提交 Kafka offset。这些边界在 V2 里保持。
@@ -104,9 +104,9 @@ Phase 1.5 停用 `telegram`、`slack`、`email`、`webhook`。`agent_webhook` �
 3. 确认没有旧 Worker 之后，把这些渠道上的 `pending` 和 `retry_wait` 标成 `cancelled`。
 4. `running` 只有在能证明没有旧 Worker 还会发出请求时才标成 `cancelled`。证明不了就写入审计表，行保持 `running`。
 
-`cancelled` 不能伪装成 `dead` 或 `succeeded`。`00012` 只增加 `cancelled` 和 `retired_delivery_audits`。Goose 会在每次 `db.Open` 时自动迁移，所以 `Up` 里不批量修改已有行。排空旧 Worker 之后，用 `ALERTFLOW_ROLE=retire-deliveries` 跑一次：它把这四种渠道上的 `pending` 和 `retry_wait` 标成 `cancelled`，`running` 保持原状并写一行审计。再跑一次不会重复写审计。历史 `integrations` 行保留，不 DROP。
+`cancelled` 不能伪装成 `dead` 或 `succeeded`。`00012` 只增加 `cancelled` 和 `retired_delivery_audits`。Goose 会在每次 `db.Open` 时自动迁移，所以 `Up` 里不批量修改已有行。排空旧 Worker 之后，用 `ALERTFLOW_ROLE=retire-deliveries` 跑一次：它把这四种渠道上的 `pending` 和 `retry_wait` 标成 `cancelled`，`last_error` 和 `retired_delivery_audits` 都记下原因；`running` 保持原状并写一行审计。审计表不引用投递行的外键，删除集成或导入归档不会带走这些记录。再跑一次不会重复写审计。历史 `integrations` 行保留，不 DROP。
 
-Timeline 迁移顺延为 `00013`。
+Timeline 迁移是 `00014`。`00013` 补了取消原因，并让审计记录不随投递行级联删除。
 
 归档导出仍包含历史渠道。导入这四种类型时只保留记录，不重新入队。创建、更新和测试发送 API，以及集成表单里的这四种类型，在 Phase 1.5 去掉。`agent_webhook` 的创建、更新和投递保持。
 

@@ -146,7 +146,7 @@ after the check transaction commits.
 
 ## 4. Incident lifecycle
 
-**The principle: an incident is derived from a check transition, never from a stored status by itself.** The check scheduler does not apply that change. It only stores the check and an outbox event. The consumer applies check transitions with `event.Decide` inside one database transaction. It does not call `OnTransition`, because that function also sends notifications. **An incident stays open while the HTTP status is `offline`, and closes when a check recovers.** `warning` still counts as HTTP up. HTTP is the only source that opens or closes an incident.
+**The principle: an incident is derived from a check transition, never from a stored status by itself.** The check scheduler does not apply that change. It only stores the check and an outbox event. The consumer applies check transitions with `event.Decide` inside one database transaction. It does not call `OnTransition`. When that transaction actually opens or resolves an outage, it also writes one `runtime_events` row (`incident:{id}:opened` or `incident:{id}:resolved`). A warning check and a repeated open do not. **An incident stays open while the HTTP status is `offline`, and closes when a check recovers.** `warning` still counts as HTTP up. HTTP is the only source that opens or closes an incident. A manual incident is written by `POST /api/incidents` in its own transaction, with the same timeline keys and one `incident_start` task per usable `agent_webhook`.
 
 | prev ↓ / current → | `online` | `warning` | `offline` |
 | --- | --- | --- | --- |
@@ -261,27 +261,15 @@ deliberately stateless.
 
 The check scheduler does not import `incident`. `incident` still must not import
 `monitor`. Hence everything arrives as arguments:
-`OnTransition(ctx, db, dispatcher, svc, prev, Outcome{...}, ts)` — `Outcome`
-carries the attempt count and first-failure reason so a warning notification can
-explain itself without importing `monitor`. It depends only on
-`db` + `notify`, which also makes it trivially testable — tests pass `nil` as the
-dispatcher.
+`OnTransition(ctx, db, svc, prev, Outcome{...}, ts)` — `Outcome`
+carries the attempt count and first-failure reason. It depends only on `db`.
 
 ## 5. Notifications
 
 Three events: incident start, incident resolve, and `warning` (a check that
 recovered on a retry). Nothing else notifies.
 
-`incident.fire()` / `fireWarning()` build a `notify.Message` and call
-`go dispatcher.Notify(...)` — **deliberately in a goroutine**, so a slow SMTP
-server can't stall the check loop.
-
-`internal/notify/dispatcher.go` still fans a message out to every enabled
-integration. The check path and the consumer do not call it. `Dispatcher.Test`
-remains the immediate "send test" API. Automatic delivery is the `delivery`
-role: one `notification_deliveries` row, one `Sender`, then a `notification_log`
-row for that attempt. `notification_deliveries` is the queue. `notification_log`
-is the attempt history. A lost lease does not write a success log.
+`incident.OnTransition` still records an incident when called, and it no longer fans notifications out. The check path and the consumer do not call it. `Dispatcher.Test` remains the immediate "send test" API and only reaches a registered sender. The only registered sender is `agent_webhook`. Automatic delivery is the `delivery` role: one `notification_deliveries` row, one `Sender`, then a `notification_log` row for that attempt.
 
 Warnings are opt-in per channel and off by default: they are frequent by design,
 and a channel that pages a human wants outages only. A warning has no incident,
@@ -290,12 +278,7 @@ rebuilt `notification_log` because SQLite could not alter that `CHECK` or
 `NOT NULL`. The current PostgreSQL schema declares the nullable column and the
 `warning` event in `migrations/00001_init.sql`; it does not replay that rebuild.
 
-Senders live one-per-file (`telegram.go`, `slack.go`, `email.go`, `webhook.go`)
-and self-register via `init()` into the `senders` map. **To add a channel type:**
-add the file with an `init()` registration, add the type to the CHECK constraint
-in a *new* migration, add its secret keys to `secretFields` and required keys to
-`requiredFields` in `handlers_integrations.go`, and add the form fields in
-`IntegrationFormDialog.vue`.
+The agent sender is registered at startup because it needs the query layer. Telegram, Slack, email and generic webhook no longer have senders.
 
 ### Secret handling
 
