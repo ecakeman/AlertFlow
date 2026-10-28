@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -46,7 +47,12 @@ type group struct {
 	factory informers.SharedInformerFactory
 	cancel  context.CancelFunc
 	done    chan struct{}
+	synced  bool
 }
+
+// cacheSyncTimeout is how long the initial list/watch may take before the
+// source is marked unavailable. The wait runs off the config loop.
+const cacheSyncTimeout = 15 * time.Second
 
 // Observer collects one cluster. A nil client means collection is off or the
 // connection failed; Sync then only records unavailable.
@@ -60,6 +66,8 @@ type Observer struct {
 	mu        sync.Mutex
 	targets   []target
 	groups    map[string]*group
+	// syncTimeout bounds one cache-sync attempt. Zero uses cacheSyncTimeout.
+	syncTimeout time.Duration
 }
 
 func New(database *db.DB, present func(string) bool) *Observer {
@@ -110,7 +118,7 @@ func (o *Observer) Sync(services []config.Service) {
 			msg = o.connErr.Error()
 		}
 		for _, item := range next {
-			_ = o.db.SetKubernetesSource(item.ServiceID, "unavailable", clip(msg))
+			_ = o.db.SetKubernetesSource(item.ServiceID, "unavailable", clip(msg), o.allow(item.ServiceID))
 		}
 		return
 	}
@@ -189,22 +197,83 @@ func (o *Observer) startNamespace(ns string) {
 	})
 	pods.SetWatchErrorHandler(func(_ *cache.Reflector, err error) { o.onWatchError(ns, err) })
 	deploys.SetWatchErrorHandler(func(_ *cache.Reflector, err error) { o.onWatchError(ns, err) })
-	ready := make(chan struct{})
 	go func() {
 		defer close(g.done)
 		factory.Start(ctx.Done())
-		factory.WaitForCacheSync(ctx.Done())
-		if ctx.Err() == nil {
-			o.reconcileNamespace(ns)
-		}
-		close(ready)
+		o.syncThenReconcile(ctx, ns, factory)
 		<-ctx.Done()
 		factory.Shutdown()
 	}()
-	<-ready
+}
+
+func (o *Observer) cacheSyncTimeout() time.Duration {
+	if o.syncTimeout > 0 {
+		return o.syncTimeout
+	}
+	return cacheSyncTimeout
+}
+
+// syncThenReconcile waits for the informer cache off the config loop. A timed
+// out or forbidden sync marks the source unavailable and tries again until the
+// namespace context is cancelled.
+func (o *Observer) syncThenReconcile(ctx context.Context, ns string, factory informers.SharedInformerFactory) {
+	for ctx.Err() == nil {
+		if o.awaitCache(ctx, factory) {
+			o.listNamespace(ns)
+			o.markSynced(ns)
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		o.markNamespace(ns, "unavailable", "kubernetes cache sync timed out")
+	}
+}
+
+func (o *Observer) awaitCache(ctx context.Context, factory informers.SharedInformerFactory) bool {
+	waitCtx, cancel := context.WithTimeout(ctx, o.cacheSyncTimeout())
+	defer cancel()
+	result := factory.WaitForCacheSync(waitCtx.Done())
+	if ctx.Err() != nil || len(result) == 0 {
+		return false
+	}
+	for _, ok := range result {
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (o *Observer) markSynced(ns string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if g := o.groups[ns]; g != nil {
+		g.synced = true
+	}
+}
+
+func (o *Observer) namespaceSynced(ns string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	g := o.groups[ns]
+	return g != nil && g.synced
+}
+
+func (o *Observer) markNamespace(ns, status, msg string) {
+	for _, item := range o.current(ns) {
+		_ = o.db.SetKubernetesSource(item.ServiceID, status, clip(msg), o.allow(item.ServiceID))
+	}
 }
 
 func (o *Observer) reconcileNamespace(ns string) {
+	if !o.namespaceSynced(ns) {
+		return
+	}
+	o.listNamespace(ns)
+}
+
+func (o *Observer) listNamespace(ns string) {
 	g := o.group(ns)
 	if g == nil {
 		return
@@ -246,7 +315,7 @@ func (o *Observer) reconcileNamespace(ns string) {
 	for _, item := range o.current(ns) {
 		_ = o.db.DeactivateUnseenKubernetes(item.ServiceID, item.ClusterID, ns, "Pod", seenPod[item.ServiceID], 0, o.allow(item.ServiceID))
 		_ = o.db.DeactivateUnseenKubernetes(item.ServiceID, item.ClusterID, ns, "Deployment", seenDeploy[item.ServiceID], 0, o.allow(item.ServiceID))
-		_ = o.db.SetKubernetesSource(item.ServiceID, "ok", "")
+		_ = o.db.SetKubernetesSource(item.ServiceID, "ok", "", o.allow(item.ServiceID))
 	}
 }
 
@@ -405,12 +474,16 @@ func (o *Observer) involved(ev *corev1.Event) (workload, kind string, uid types.
 }
 
 func (o *Observer) onWatchError(ns string, err error) {
-	if err == nil || (!apierrors.IsResourceExpired(err) && !apierrors.IsGone(err)) {
+	if err == nil {
 		return
 	}
-	slog.Warn("kubernetes: watch expired", "namespace", ns)
-	for _, item := range o.current(ns) {
-		_ = o.db.SetKubernetesSource(item.ServiceID, "gap", "watch expired")
+	switch {
+	case apierrors.IsResourceExpired(err) || apierrors.IsGone(err):
+		slog.Warn("kubernetes: watch expired", "namespace", ns)
+		o.markNamespace(ns, "gap", "watch expired")
+	case apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err):
+		slog.Warn("kubernetes: permission denied", "namespace", ns)
+		o.markNamespace(ns, "unavailable", "kubernetes permission denied")
 	}
 }
 

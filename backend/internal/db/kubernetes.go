@@ -167,8 +167,9 @@ func (db *DB) ApplyKubernetesNotice(note KubernetesNotice, present func() bool) 
 	return tx.Commit()
 }
 
-// SetKubernetesSource records collector health for one service.
-func (db *DB) SetKubernetesSource(serviceID, status, errText string) error {
+// SetKubernetesSource records collector health for one service. present runs
+// after the service lock. A false result returns ErrServiceGone and writes nothing.
+func (db *DB) SetKubernetesSource(serviceID, status, errText string, present func() bool) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -176,6 +177,9 @@ func (db *DB) SetKubernetesSource(serviceID, status, errText string) error {
 	defer tx.Rollback()
 	if err := lockService(tx, serviceID); err != nil {
 		return err
+	}
+	if present != nil && !present() {
+		return ErrServiceGone
 	}
 	now := time.Now().Unix()
 	if err := upsertKubernetesSource(tx, serviceID, status, errText, now, status == "ok"); err != nil {
@@ -206,7 +210,7 @@ func (db *DB) DeactivateUnseenKubernetes(serviceID, clusterID, namespace, kind s
 		observedAt = now
 	}
 	rows, err := tx.Query(
-		`SELECT resource_uid, resource_name, fingerprint FROM runtime_object_states
+		`SELECT resource_uid, resource_name, fingerprint, resource_version FROM runtime_object_states
 		 WHERE service_id = $1 AND cluster_id = $2 AND namespace = $3 AND resource_kind = $4
 		   AND active AND NOT (resource_uid = ANY($5::text[]))`,
 		serviceID, clusterID, namespace, kind, seen,
@@ -215,11 +219,11 @@ func (db *DB) DeactivateUnseenKubernetes(serviceID, clusterID, namespace, kind s
 		return err
 	}
 	defer rows.Close()
-	type gone struct{ uid, name, fingerprint string }
+	type gone struct{ uid, name, fingerprint, version string }
 	var missing []gone
 	for rows.Next() {
 		var item gone
-		if err := rows.Scan(&item.uid, &item.name, &item.fingerprint); err != nil {
+		if err := rows.Scan(&item.uid, &item.name, &item.fingerprint, &item.version); err != nil {
 			return err
 		}
 		missing = append(missing, item)
@@ -230,7 +234,7 @@ func (db *DB) DeactivateUnseenKubernetes(serviceID, clusterID, namespace, kind s
 	for _, item := range missing {
 		obj := KubernetesObject{
 			ServiceID: serviceID, ClusterID: clusterID, Namespace: namespace, Kind: kind,
-			Name: item.name, UID: item.uid, Fingerprint: item.fingerprint, Active: false,
+			Name: item.name, UID: item.uid, Fingerprint: item.fingerprint, ResourceVersion: item.version, Active: false,
 			ObservedAt: observedAt, Severity: "warning", Summary: item.name + " is gone",
 			Snapshot: json.RawMessage(`{"active":false}`),
 		}
@@ -277,9 +281,16 @@ func writeKubernetesTimeline(tx *sql.Tx, obj KubernetesObject, eventType, severi
 	}
 	key := fmt.Sprintf("kubernetes:%s:%s:first_seen", obj.ClusterID, obj.UID)
 	if accuracy != "first_seen" {
-		key = fmt.Sprintf("kubernetes:%s:%s:%s", obj.ClusterID, obj.UID, obj.Fingerprint)
+		// resourceVersion identifies one object version. A later return to the
+		// same fingerprint is a new transition; a replay of this version is not.
+		version := obj.ResourceVersion
+		if version == "" {
+			version = "0"
+		}
 		if !obj.Active {
-			key = fmt.Sprintf("kubernetes:%s:%s:inactive", obj.ClusterID, obj.UID)
+			key = fmt.Sprintf("kubernetes:%s:%s:inactive:%s", obj.ClusterID, obj.UID, version)
+		} else {
+			key = fmt.Sprintf("kubernetes:%s:%s:%s", obj.ClusterID, obj.UID, version)
 		}
 	}
 	details, err := json.Marshal(map[string]string{"time_accuracy": accuracy})

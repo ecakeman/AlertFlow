@@ -1,14 +1,20 @@
 package kubernetes
 
 import (
+	"errors"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
 
 	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/db"
@@ -17,7 +23,7 @@ import (
 func TestFakeClientRecordsMappedChangesOnly(t *testing.T) {
 	replicas := int32(2)
 	deploy := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "lab", UID: types.UID("deploy-1")},
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "lab", UID: types.UID("deploy-1"), ResourceVersion: "1"},
 		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
 		Status:     appsv1.DeploymentStatus{ObservedGeneration: 1, Replicas: 2, ReadyReplicas: 2, AvailableReplicas: 2, UpdatedReplicas: 2},
 	}
@@ -43,7 +49,7 @@ func TestFakeClientRecordsMappedChangesOnly(t *testing.T) {
 	obs.client = client
 	obs.Sync([]config.Service{mapped()})
 	t.Cleanup(obs.Close)
-
+	waitSynced(t, obs, "lab")
 	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'kubernetes.pod.first_seen'`); n != 1 {
 		t.Fatalf("pod first_seen = %d", n)
 	}
@@ -57,6 +63,7 @@ func TestFakeClientRecordsMappedChangesOnly(t *testing.T) {
 		t.Fatalf("warning events = %d", n)
 	}
 
+	pod.ResourceVersion = "2"
 	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
 	obs.observePod(pod, true)
 	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'kubernetes.pod.changed' AND severity = 'warning'`); n != 1 {
@@ -67,12 +74,14 @@ func TestFakeClientRecordsMappedChangesOnly(t *testing.T) {
 		t.Fatalf("repeated not ready = %d", n)
 	}
 
+	pod.ResourceVersion = "3"
 	pod.Status.ContainerStatuses[0].RestartCount = 3
 	obs.observePod(pod, true)
 	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'kubernetes.pod.changed'`); n != 2 {
 		t.Fatalf("restart changes = %d", n)
 	}
 
+	deploy.ResourceVersion = "2"
 	deploy.Status.AvailableReplicas = 1
 	obs.observeDeployment(deploy, true)
 	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'kubernetes.deployment.changed'`); n != 1 {
@@ -88,15 +97,18 @@ func TestFakeClientRecordsMappedChangesOnly(t *testing.T) {
 	again.client = client
 	again.Sync([]config.Service{mapped()})
 	t.Cleanup(again.Close)
+	waitSynced(t, again, "lab")
 	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'kubernetes.pod.first_seen'`); n != 1 {
 		t.Fatalf("restart rewrote first_seen = %d", n)
 	}
 
+	pod.ResourceVersion = "4"
 	pod.Status.ContainerStatuses[0].RestartCount = 4
 	restarted := New(database, func(string) bool { return true })
 	restarted.client = client
 	restarted.Sync([]config.Service{mapped()})
 	t.Cleanup(restarted.Close)
+	waitSynced(t, restarted, "lab")
 	var accuracy string
 	if err := database.QueryRow(
 		`SELECT details->>'time_accuracy' FROM runtime_events
@@ -174,6 +186,99 @@ func readyPod(name, uid, rsUID string) *corev1.Pod {
 			}},
 		},
 	}
+}
+
+func TestCacheSyncTimeoutDoesNotBlockReloadOrClose(t *testing.T) {
+	database := db.OpenTest(t)
+	client := fake.NewClientset()
+	client.PrependReactor("*", "*", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewServiceUnavailable("unreachable")
+	})
+	client.PrependWatchReactor("*", func(clienttesting.Action) (bool, watch.Interface, error) {
+		return true, nil, apierrors.NewServiceUnavailable("unreachable")
+	})
+	obs := New(database, func(string) bool { return true })
+	obs.client = client
+	obs.syncTimeout = 200 * time.Millisecond
+	started := time.Now()
+	obs.Sync([]config.Service{mapped()})
+	if time.Since(started) > time.Second {
+		t.Fatal("sync waited for the cache")
+	}
+	waitSource(t, database, "unavailable")
+	started = time.Now()
+	obs.Close()
+	if time.Since(started) > 2*time.Second {
+		t.Fatal("close waited on the cache sync")
+	}
+}
+
+func TestPermissionErrorMarksUnavailable(t *testing.T) {
+	database := db.OpenTest(t)
+	client := fake.NewClientset()
+	denied := apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "lab", errors.New("forbidden"))
+	client.PrependReactor("*", "*", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, denied
+	})
+	client.PrependWatchReactor("*", func(clienttesting.Action) (bool, watch.Interface, error) {
+		return true, nil, denied
+	})
+	obs := New(database, func(string) bool { return true })
+	obs.client = client
+	obs.syncTimeout = 200 * time.Millisecond
+	obs.Sync([]config.Service{mapped()})
+	t.Cleanup(obs.Close)
+	waitSource(t, database, "unavailable")
+}
+
+func TestCloseWhileCacheSyncIsPending(t *testing.T) {
+	database := db.OpenTest(t)
+	client := fake.NewClientset()
+	client.PrependReactor("*", "*", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewServiceUnavailable("unreachable")
+	})
+	obs := New(database, func(string) bool { return true })
+	obs.client = client
+	obs.syncTimeout = 30 * time.Second
+	obs.Sync([]config.Service{mapped()})
+	started := time.Now()
+	obs.Close()
+	if time.Since(started) > 2*time.Second {
+		t.Fatal("close blocked on cache sync")
+	}
+	var n int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM runtime_source_state`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("shutdown wrote source rows = %d", n)
+	}
+}
+
+func waitSynced(t *testing.T, obs *Observer, ns string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if obs.namespaceSynced(ns) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("cache did not sync")
+}
+
+func waitSource(t *testing.T, database *db.DB, status string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var got string
+	for time.Now().Before(deadline) {
+		err := database.QueryRow(`SELECT status FROM runtime_source_state WHERE service_id = 'svc' AND source = 'kubernetes'`).Scan(&got)
+		if err == nil && got == status {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("status = %q, want %s", got, status)
 }
 
 func rows(t *testing.T, database *db.DB, query string) int {
