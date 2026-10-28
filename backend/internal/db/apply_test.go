@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ecakeman/alertflow/internal/event"
 )
@@ -179,6 +180,37 @@ func TestApplyCheckEventRollsBack(t *testing.T) {
 	}
 	if n := countRows(t, database, `SELECT COUNT(*) FROM service_runtime_state`); n != 0 {
 		t.Fatalf("runtime state = %d", n)
+	}
+}
+
+func TestApplyCheckEventSkipsARetiredService(t *testing.T) {
+	database := OpenTest(t)
+	old := newEvent(t, "svc", StatusOffline, 10, 1_000)
+	if err := database.DeleteServiceRecords("svc"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.ApplyCheckEvent(old); err != nil {
+		t.Fatal(err)
+	}
+	if n := countRows(t, database, `SELECT COUNT(*) FROM incidents`); n != 0 {
+		t.Fatalf("incidents = %d", n)
+	}
+	if n := countRows(t, database, `SELECT COUNT(*) FROM service_runtime_state`); n != 0 {
+		t.Fatalf("runtime = %d", n)
+	}
+	if n := countRows(t, database, `SELECT COUNT(*) FROM processed_events`); n != 1 {
+		t.Fatalf("processed = %d", n)
+	}
+	if err := database.ApplyCheckEvent(old); !errors.Is(err, ErrAlreadyProcessed) {
+		t.Fatalf("replay = %v", err)
+	}
+
+	fresh := newEvent(t, "svc", StatusOffline, 11, time.Now().Unix()+60)
+	if err := database.ApplyCheckEvent(fresh); err != nil {
+		t.Fatal(err)
+	}
+	if n := countRows(t, database, `SELECT COUNT(*) FROM incidents WHERE service_id = 'svc'`); n != 1 {
+		t.Fatalf("incident after the service returns = %d", n)
 	}
 }
 

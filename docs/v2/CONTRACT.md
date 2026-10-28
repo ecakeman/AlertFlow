@@ -26,7 +26,7 @@ Phase 0 验收通过后才能改核心代码。一次只做一个阶段。
 
 审计对象是上面的基线提交，不是目标架构。
 
-- 角色有 `server`、`monitor`、`publisher`、`consumer`、`delivery`，以及一次性的 `retire-deliveries`（`backend/cmd/alertflow/main.go`）。`monitor` 每秒重读配置并跑周期检查和诊断采集。`api.New` 不 `Sync`。`POST /api/services/:id/check` 仍是一次性 `CheckNow`。删除服务先改 `config.yaml`，再在 `pg_advisory_xact_lock` 里删运行数据；检查和诊断拿到同一把锁后重读文件，服务已不在就不写。`retire-deliveries` 不在启动时运行。
+- 角色有 `server`、`monitor`、`publisher`、`consumer`、`delivery`，以及一次性的 `retire-deliveries`（`backend/cmd/alertflow/main.go`）。`monitor` 每秒重读配置并跑周期检查和诊断采集。`api.New` 不 `Sync`。`POST /api/services/:id/check` 仍是一次性 `CheckNow`。删除服务先改 `config.yaml`，再在 `pg_advisory_xact_lock` 里写 `retired_services` 并删运行数据。检查和诊断拿到同一把锁后重读文件，服务已不在就不写。TLS 快照和检查在同一个事务里。Publisher 在发送前看 `retired_services`，Consumer 对不晚于 `retired_at` 的事件只记 `processed_events`，不再建 Incident 或运行状态。`retire-deliveries` 不在启动时运行。
 - HTTP 是 Gin v1.10.1。`HandleMethodNotAllowed` 为 false，错误方法进入 `serveSPA`。模块声明 Go 1.25.7。没有 gRPC，没有 client-go。Redis 只是可降级读缓存。
 - Goose 迁移嵌入二进制，在 `db.Open` 时自动执行，并有 advisory lock。已有 `00001`–`00014`。下一号是 `00015`。`00013` 让退役审计在投递行删除后仍然保留，并记录取消原因。`00014` 新增 Timeline 三张表。不要改已应用的迁移。
 - `integrations.type` 仍允许 `telegram`、`slack`、`email`、`webhook`、`agent_webhook`（`00010`）。创建、更新和测试只接受 `agent_webhook`。这四种外发渠道没有发送器，`Dispatcher.Notify` 已删除。

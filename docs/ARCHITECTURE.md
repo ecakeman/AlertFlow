@@ -75,8 +75,10 @@ Consequences to respect:
 service, each on its own `interval` ticker. The process re-reads the config
 directory every second and `Sync`s. A failed read keeps the last good snapshot.
 `server` does not start these loops. `POST /api/services/:id/check` still runs
-one `CheckNow` in the API process. Unchanged workers keep running, changed ones
-restart, removed ones stop (`sameCheck` decides).
+one `CheckNow` in the API process. Unchanged workers keep running. A changed
+URL or interval cancels the old worker and waits until it has left the current
+cycle before the new one starts. Removed workers stop the same way (`sameCheck`
+decides).
 
 One `check()` does, in order:
 
@@ -85,17 +87,16 @@ One `check()` does, in order:
 3. `runCycle(...)` — the retry ladder (below). One cycle, one row.
 4. **Bail if the worker was cancelled mid-flight** (`parent.Err() != nil`) —
    otherwise a config edit or shutdown would record a bogus `offline`.
-5. `RecordCheckAndOutbox(...)` — in one transaction, append the check (stamped with the cycle's **start**) and an unpublished `monitor.check.completed` outbox row whose payload carries that check id. If this fails, stop: do not write TLS and do not move `lastStatus`.
-6. `storeTLS(...)` — upsert the cert snapshot (HTTPS only, offline cycles only).
-7. Update `w.lastStatus`, which the next cycle uses only to decide whether to retry.
+5. `RecordCheckAndOutbox(...)` — in one transaction, append the check (stamped with the cycle's **start**), an unpublished `monitor.check.completed` outbox row whose payload carries that check id, and the cert snapshot when this cycle has one. The cert write uses the same service lock and presence check. If this fails, stop: do not move `lastStatus`.
+6. Update `w.lastStatus`, which the next cycle uses only to decide whether to retry.
 
 The scheduler stops there. It does not call `OnTransition` and it does not send notifications. `published_at` stays NULL in the monitor process. Claiming an outbox row uses `FOR UPDATE SKIP LOCKED` on `outbox_events` only. That is not a lock on a service. `RecordCheckAndOutbox`, diagnostics apply and `DeleteServiceRecords` take `pg_advisory_xact_lock` keyed by the service id. After that lock, a check or diagnostics write re-reads `config.yaml` and skips the insert when the service is gone. When `REDIS_URL` is set, the monitor process invalidates that service's cached reads after a check commits. A Redis failure is logged and the check still writes.
 
 The monitor process also runs `internal/diagnostics`, which polls a service's optional `diagnostics.url` on its own interval. Kinds match the agent: `component_health`, `dependency_health`, `resource`, `saturation`, `recent_error`, `recent_change`, and `slow_operation`. The first four require `status` (`healthy`, `degraded`, `unhealthy`, or `unknown`). `degraded` is severity `warning` and `unhealthy` is `error`; `healthy` and `unknown` do not write a row. A later `healthy` or `unknown` after `degraded` or `unhealthy` writes one recovery row at severity `info`. `recent_error` is `error`, `slow_operation` is `warning`, and `recent_change` is `info`. A failed pull updates `runtime_source_state` only. Replacing or removing a collector waits until the previous loop has left its current poll. It does not call `event.Decide` and it does not open an incident. The agent still reads its own diagnostics file directly.
 
-`ALERTFLOW_ROLE=publisher` is a second process of the same binary. It claims one due outbox row at a time, in `id` order, and writes it to the Kafka topic `alert-events` with the service id as the key. `published_at` is set only after the broker ack, and only when that process still holds the lease. Run one publisher. The database commit and the Kafka ack are not one atomic action: a crash after the ack and before `published_at` can publish the same event again.
+`ALERTFLOW_ROLE=publisher` is a second process of the same binary. It claims one due outbox row at a time, in `id` order, and writes it to the Kafka topic `alert-events` with the service id as the key. `published_at` is set only after the broker ack, and only when that process still holds the lease. Before the send, the publisher reads `retired_services`. An event whose `occurred_at` is at or before that service's `retired_at` is not sent. Run one publisher. The database commit and the Kafka ack are not one atomic action: a crash after the ack and before `published_at` can publish the same event again.
 
-`ALERTFLOW_ROLE=consumer` reads that topic. One message updates the incident, `processed_events`, `service_runtime_state`, and `pending` `notification_deliveries` in one PostgreSQL transaction. The Kafka offset is committed after that transaction commits. This process does not call `Dispatcher.Notify`. More consumer replicas than the topic's three partitions do not add parallelism.
+`ALERTFLOW_ROLE=consumer` reads that topic. One message updates the incident, `processed_events`, `service_runtime_state`, and `pending` `notification_deliveries` in one PostgreSQL transaction. That transaction takes the service lock and, when the event is older than `retired_services.retired_at`, only records `processed_events`. It does not recreate incidents or runtime state. A check recorded after the service is added again is newer than `retired_at` and is applied. The Kafka offset is committed after that transaction commits. This process does not call `Dispatcher.Notify`. More consumer replicas than the topic's three partitions do not add parallelism.
 
 The default webhook body keeps `status` as `down`, `recovered`, or `warning` and adds `schema_version`, `event_id`, `service_id`, and the occurrence timestamps. `event_id` is `<event>:<incident_id>` when the snapshot has an incident, otherwise `delivery:<notification_deliveries.id>`. `check_id` is copied from the check event. `GET /internal/agent/v1/...` repeats the incident, metrics, and check reads and requires `ALERTFLOW_AGENT_TOKEN`. An unknown `/internal/` path returns JSON, not the SPA.
 

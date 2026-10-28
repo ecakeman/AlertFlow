@@ -23,7 +23,9 @@ func TestWriteWaitsForTheServiceLockThenDrops(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := database.RecordCheckAndOutboxPresent(ev, func() bool { return false })
+		_, err := database.RecordCheckAndOutboxPresent(ev, func() bool { return false }, &ServiceTLS{
+			CheckedAt: ev.OccurredAt, Issuer: "ca", Subject: "example",
+		})
 		done <- err
 	}()
 	select {
@@ -45,6 +47,9 @@ func TestWriteWaitsForTheServiceLockThenDrops(t *testing.T) {
 	var n int
 	if err := database.QueryRow(`SELECT COUNT(*) FROM checks`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("checks = %d, %v", n, err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM service_tls`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("tls rows = %d, %v", n, err)
 	}
 }
 

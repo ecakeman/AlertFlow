@@ -35,14 +35,14 @@ var ErrServiceGone = errors.New("service is no longer configured")
 // transaction. The event payload's check_id is the id returned by that insert.
 // A failure, including Commit, leaves neither row behind.
 func (db *DB) RecordCheckAndOutbox(ev event.CheckCompleted) (int64, error) {
-	return db.RecordCheckAndOutboxPresent(ev, nil)
+	return db.RecordCheckAndOutboxPresent(ev, nil, nil)
 }
 
 // RecordCheckAndOutboxPresent is RecordCheckAndOutbox with a presence check.
 // present runs after the service lock and before the insert. A false result
 // rolls the transaction back and returns ErrServiceGone. A nil present always
-// writes.
-func (db *DB) RecordCheckAndOutboxPresent(ev event.CheckCompleted, present func() bool) (int64, error) {
+// writes. cert, when set, is stored in the same transaction as the check.
+func (db *DB) RecordCheckAndOutboxPresent(ev event.CheckCompleted, present func() bool, cert *ServiceTLS) (int64, error) {
 	if ev.EventID == "" || ev.EventType == "" || ev.ServiceID == "" {
 		return 0, fmt.Errorf("record check: event is missing id, type, or service")
 	}
@@ -90,10 +90,41 @@ func (db *DB) RecordCheckAndOutboxPresent(ev event.CheckCompleted, present func(
 	if err != nil {
 		return 0, err
 	}
+	if cert != nil {
+		if err := upsertServiceTLSTx(tx, ev.ServiceID, cert); err != nil {
+			return 0, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return checkID, nil
+}
+
+// ServiceRetired reports whether an event at occurredAt belongs to a service
+// that was already deleted. A later check, after the service is added again,
+// has a newer timestamp and is not retired.
+func (db *DB) ServiceRetired(serviceID string, occurredAt int64) (bool, error) {
+	var retiredAt int64
+	err := db.QueryRow(`SELECT retired_at FROM retired_services WHERE service_id = $1`, serviceID).Scan(&retiredAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return occurredAt <= retiredAt, nil
+}
+
+// ForgetLeasedOutbox deletes a claimed row that must not be published.
+// A row already removed by service deletion is not an error.
+func (db *DB) ForgetLeasedOutbox(id int64, owner string, now int64) error {
+	_, err := db.Exec(
+		`DELETE FROM outbox_events
+		 WHERE id = $1 AND published_at IS NULL AND lease_owner = $2 AND lease_until > $3`,
+		id, owner, now,
+	)
+	return err
 }
 
 // lockService takes a transaction-scoped advisory lock for one service.

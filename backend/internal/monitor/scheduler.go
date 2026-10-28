@@ -32,9 +32,16 @@ type Scheduler struct {
 	// service lock. A false result drops the check instead of inserting it.
 	Configured func(serviceID string) bool
 
-	mu      sync.Mutex
-	workers map[string]*worker
-	wg      sync.WaitGroup
+	// beforeStore, when set, runs after a cycle finishes and before it is
+	// written. Tests use it to hold the old worker open across a config change.
+	beforeStore func()
+
+	// lifecycle serialises Sync, Release and Stop so a cancelled worker is
+	// waited on before another one is started or the call returns.
+	lifecycle sync.Mutex
+	mu        sync.Mutex
+	workers   map[string]*worker
+	wg        sync.WaitGroup
 }
 
 // worker holds a service's check state. svc and lastStatus are guarded by mu,
@@ -82,11 +89,16 @@ func New(database *db.DB) *Scheduler {
 
 // Sync reconciles running workers with services: unchanged workers keep running,
 // changed ones restart (picking up new interval/url), removed ones stop.
+// A replaced or removed worker is cancelled and waited on before the new one
+// starts, so the old URL or interval cannot write after the replacement.
 func (s *Scheduler) Sync(services []config.Service) {
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	wanted := make(map[string]bool, len(services))
+	var restart []config.Service
+	var wait []*worker
 	for _, svc := range services {
 		wanted[svc.ID] = true
 		if existing, ok := s.workers[svc.ID]; ok {
@@ -97,6 +109,10 @@ func (s *Scheduler) Sync(services []config.Service) {
 				continue
 			}
 			existing.cancel()
+			delete(s.workers, svc.ID)
+			wait = append(wait, existing)
+			restart = append(restart, svc)
+			continue
 		}
 		s.startWorker(svc)
 	}
@@ -104,8 +120,23 @@ func (s *Scheduler) Sync(services []config.Service) {
 		if !wanted[id] {
 			w.cancel()
 			delete(s.workers, id)
+			wait = append(wait, w)
 		}
 	}
+	s.mu.Unlock()
+	for _, w := range wait {
+		<-w.done
+	}
+	if len(restart) == 0 {
+		return
+	}
+	s.mu.Lock()
+	for _, svc := range restart {
+		if _, ok := s.workers[svc.ID]; !ok {
+			s.startWorker(svc)
+		}
+	}
+	s.mu.Unlock()
 }
 
 // startWorker launches (and registers) a worker for svc. Caller holds the lock.
@@ -126,6 +157,8 @@ func (s *Scheduler) startWorker(svc config.Service) {
 // current cycle. The service can then be removed without a late check writing
 // a new row.
 func (s *Scheduler) Release(id string) {
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
 	s.mu.Lock()
 	w := s.workers[id]
 	if w != nil {
@@ -178,15 +211,23 @@ func (s *Scheduler) check(parent context.Context, w *worker) {
 	if parent.Err() != nil {
 		return
 	}
-	s.finishCycle(w, svc, cyc, start.Unix())
+	s.finishCycle(parent, w, svc, cyc, start.Unix())
 }
 
-// finishCycle persists the cycle and, only after that transaction commits,
-// updates the cert snapshot and lastStatus. lastStatus only feeds the next
-// cycle's retry ladder. A database error leaves lastStatus unchanged and does
-// not continue into the success path. HTTP failures are already classified
+// finishCycle persists the cycle, including the cert snapshot, in one
+// transaction. lastStatus only feeds the next cycle's retry ladder. A database
+// error leaves lastStatus unchanged. HTTP failures are already classified
 // inside cyc (online, warning, or offline) before this runs.
-func (s *Scheduler) finishCycle(w *worker, svc config.Service, cyc cycleResult, now int64) {
+func (s *Scheduler) finishCycle(parent context.Context, w *worker, svc config.Service, cyc cycleResult, now int64) {
+	if parent.Err() != nil {
+		return
+	}
+	if s.beforeStore != nil {
+		s.beforeStore()
+	}
+	if parent.Err() != nil {
+		return
+	}
 	ev, err := event.NewCheckCompleted(svc.ID, svc.Name, svc.URL, now, cyc.Status, cyc.LatencyMs, cyc.StatusCode, cyc.Error, cyc.Attempts)
 	if err != nil {
 		slog.Error("monitor: build check event failed", "service", svc.ID, "error", err)
@@ -196,14 +237,13 @@ func (s *Scheduler) finishCycle(w *worker, svc config.Service, cyc cycleResult, 
 	if s.Configured != nil {
 		present = func() bool { return s.Configured(svc.ID) }
 	}
-	if _, err := s.db.RecordCheckAndOutboxPresent(ev, present); err != nil {
+	if _, err := s.db.RecordCheckAndOutboxPresent(ev, present, tlsSnapshot(svc, cyc.Result, now)); err != nil {
 		if errors.Is(err, db.ErrServiceGone) {
 			return
 		}
 		slog.Error("monitor: store check failed", "service", svc.ID, "error", err)
 		return
 	}
-	s.storeTLS(svc, cyc.Result, now)
 	// Only after the row is durable: invalidating on a check that failed to
 	// store would drop a cache entry that is still correct.
 	if s.OnCheckStored != nil {
@@ -338,25 +378,20 @@ func warnIfLadderExceedsInterval(svc config.Service) {
 	}
 }
 
-// storeTLS records the current certificate snapshot for HTTPS services. A
-// successful handshake stores the cert; an HTTPS check that failed before a
-// cert could be read stores the error so the UI can surface it. Plain-HTTP
-// services are skipped entirely.
-func (s *Scheduler) storeTLS(svc config.Service, res Result, now int64) {
+// tlsSnapshot is the cert row that belongs in the same transaction as the
+// check. A nil result means this cycle does not touch service_tls. Plain HTTP
+// is skipped. A warning keeps the previous cert.
+func tlsSnapshot(svc config.Service, res Result, now int64) *db.ServiceTLS {
 	if res.TLS != nil {
-		if err := s.db.UpsertServiceTLS(svc.ID, now, res.TLS.NotBefore.Unix(), res.TLS.NotAfter.Unix(),
-			res.TLS.Issuer, res.TLS.Subject, ""); err != nil {
-			slog.Error("monitor: store tls failed", "service", svc.ID, "error", err)
+		return &db.ServiceTLS{
+			CheckedAt: now, ValidFrom: res.TLS.NotBefore.Unix(), ValidUntil: res.TLS.NotAfter.Unix(),
+			Issuer: res.TLS.Issuer, Subject: res.TLS.Subject,
 		}
-		return
 	}
-	// Only a fully failed cycle may replace the stored cert with an error: a
-	// warning means the service answered, and blanking its cert would be a lie.
 	if res.Status == db.StatusOffline && strings.HasPrefix(svc.URL, "https://") {
-		if err := s.db.UpsertServiceTLS(svc.ID, now, 0, 0, "", "", res.Error); err != nil {
-			slog.Error("monitor: store tls failed", "service", svc.ID, "error", err)
-		}
+		return &db.ServiceTLS{CheckedAt: now, Error: res.Error}
 	}
+	return nil
 }
 
 // CheckNow runs a check for svc immediately and synchronously. It reuses the
@@ -375,6 +410,8 @@ func (s *Scheduler) CheckNow(svc config.Service) {
 
 // Stop cancels all workers and waits for them to finish.
 func (s *Scheduler) Stop() {
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
 	s.mu.Lock()
 	for _, w := range s.workers {
 		w.cancel()

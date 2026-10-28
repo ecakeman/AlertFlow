@@ -5,6 +5,7 @@ package publish
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -152,6 +153,7 @@ func (p *Publisher) publishOne(ctx context.Context, row db.OutboxEvent) error {
 		EventType     string `json:"event_type"`
 		SchemaVersion int    `json:"schema_version"`
 		ServiceID     string `json:"service_id"`
+		OccurredAt    int64  `json:"occurred_at"`
 	}
 	if err := json.Unmarshal(row.Payload, &body); err != nil {
 		return p.fail(row, err)
@@ -162,11 +164,23 @@ func (p *Publisher) publishOne(ctx context.Context, row db.OutboxEvent) error {
 	if body.EventType != event.TypeCheckCompleted {
 		return p.fail(row, fmt.Errorf("unsupported event %s", body.EventType))
 	}
+	retired, err := p.DB.ServiceRetired(body.ServiceID, body.OccurredAt)
+	if err != nil {
+		return p.fail(row, err)
+	}
+	if retired {
+		now := time.Now().Unix()
+		if err := p.DB.ForgetLeasedOutbox(row.ID, p.Owner, now); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		slog.Info("publisher skipped a retired service", "service", body.ServiceID, "event", row.EventID)
+		return nil
+	}
 	key := row.MessageKey
 	if key == "" {
 		key = body.ServiceID
 	}
-	err := p.writer.WriteMessages(ctx, kafka.Message{
+	err = p.writer.WriteMessages(ctx, kafka.Message{
 		Key:   []byte(key),
 		Value: row.Payload,
 		Headers: []kafka.Header{{

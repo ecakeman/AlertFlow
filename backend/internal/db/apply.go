@@ -72,8 +72,18 @@ func (db *DB) ApplyCheckEvent(ev event.CheckCompleted) error {
 
 func applyCheckEventTx(tx *sql.Tx, ev event.CheckCompleted) error {
 	now := time.Now().Unix()
+	if err := lockService(tx, ev.ServiceID); err != nil {
+		return err
+	}
+	retired, err := serviceRetiredTx(tx, ev.ServiceID, ev.OccurredAt)
+	if err != nil {
+		return err
+	}
+	if retired {
+		return rememberProcessed(tx, ev, now)
+	}
 	var processedID int64
-	err := tx.QueryRow(
+	err = tx.QueryRow(
 		`INSERT INTO processed_events (consumer_name, event_id, event_type, processed_at)
 		 VALUES ($1, $2, $3, $4)
 		 ON CONFLICT (consumer_name, event_id) DO NOTHING
@@ -193,6 +203,35 @@ func applyCheckEventTx(tx *sql.Tx, ev event.CheckCompleted) error {
 		 WHERE service_id = $1`,
 		ev.ServiceID, ev.Status, ev.EventID, ev.CheckID, ev.OccurredAt, now,
 	)
+	return err
+}
+
+func serviceRetiredTx(tx *sql.Tx, serviceID string, occurredAt int64) (bool, error) {
+	var retiredAt int64
+	err := tx.QueryRow(`SELECT retired_at FROM retired_services WHERE service_id = $1`, serviceID).Scan(&retiredAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return occurredAt <= retiredAt, nil
+}
+
+// rememberProcessed records the event and writes nothing else. A redelivery
+// then hits the processed_events conflict instead of recreating runtime rows.
+func rememberProcessed(tx *sql.Tx, ev event.CheckCompleted, now int64) error {
+	var id int64
+	err := tx.QueryRow(
+		`INSERT INTO processed_events (consumer_name, event_id, event_type, processed_at)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (consumer_name, event_id) DO NOTHING
+		 RETURNING id`,
+		ConsumerName, ev.EventID, ev.EventType, now,
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrAlreadyProcessed
+	}
 	return err
 }
 

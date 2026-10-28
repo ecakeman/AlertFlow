@@ -20,7 +20,16 @@ type ServiceTLS struct {
 
 // UpsertServiceTLS records (or replaces) the current cert snapshot for a service.
 func (db *DB) UpsertServiceTLS(serviceID string, checkedAt, validFrom, validUntil int64, issuer, subject, errMsg string) error {
-	_, err := db.Exec(`
+	return upsertServiceTLSTx(db, serviceID, &ServiceTLS{
+		CheckedAt: checkedAt, ValidFrom: validFrom, ValidUntil: validUntil,
+		Issuer: issuer, Subject: subject, Error: errMsg,
+	})
+}
+
+func upsertServiceTLSTx(tx interface {
+	Exec(string, ...any) (sql.Result, error)
+}, serviceID string, cert *ServiceTLS) error {
+	_, err := tx.Exec(`
 		INSERT INTO service_tls (service_id, checked_at, valid_from, valid_until, issuer, subject, error)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (service_id) DO UPDATE SET
@@ -30,7 +39,7 @@ func (db *DB) UpsertServiceTLS(serviceID string, checkedAt, validFrom, validUnti
 			issuer      = excluded.issuer,
 			subject     = excluded.subject,
 			error       = excluded.error`,
-		serviceID, checkedAt, validFrom, validUntil, issuer, subject, errMsg,
+		serviceID, cert.CheckedAt, cert.ValidFrom, cert.ValidUntil, cert.Issuer, cert.Subject, cert.Error,
 	)
 	return err
 }

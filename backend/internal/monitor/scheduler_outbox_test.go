@@ -32,7 +32,7 @@ func TestFinishCycleFailureLeavesStatusAndSkipsNotify(t *testing.T) {
 		svc:        config.Service{ID: "svc", Name: "Svc", URL: "http://svc", Check: config.ServiceCheck{Interval: 60, Timeout: 5, RetryAttempts: 1}},
 		lastStatus: db.StatusOnline,
 	}
-	sched.finishCycle(w, w.svc, cycleResult{
+	sched.finishCycle(context.Background(), w, w.svc, cycleResult{
 		Result:   Result{Status: "bogus"},
 		Attempts: 1,
 	}, 1000)
@@ -149,7 +149,7 @@ func TestFinishCycleStoresOfflineAndWarningWithoutIncident(t *testing.T) {
 				svc:        config.Service{ID: "svc", Name: "Svc", URL: "https://svc/health", Check: config.ServiceCheck{Interval: 60, Timeout: 5, RetryAttempts: 1}},
 				lastStatus: db.StatusOnline,
 			}
-			sched.finishCycle(w, w.svc, cycleResult{
+			sched.finishCycle(context.Background(), w, w.svc, cycleResult{
 				Result:   Result{Status: status, Error: "connection timeout"},
 				Attempts: 2,
 			}, 1700)
