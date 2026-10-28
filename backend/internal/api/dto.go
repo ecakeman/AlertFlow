@@ -252,7 +252,7 @@ func toAgentSettingsDTO(a config.AgentSettings) agentSettingsDTO {
 		Rerank: modelEndpointDTO{
 			BaseURL: a.Rerank.BaseURL, APIKey: maskSecret(a.Rerank.APIKey), Model: a.Rerank.Model, Style: a.Rerank.Style,
 		},
-		MemoryEnabled: memory,
+		MemoryEnabled:       memory,
 		ContextBudgetTokens: a.ContextBudgetTokens,
 	}
 }

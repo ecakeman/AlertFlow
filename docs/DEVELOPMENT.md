@@ -94,7 +94,7 @@ backend/
     image/               # WebP validate/store/serve
     archive/             # export/import zip (validate → backup → apply)
     logger/              # slog JSON logger setup
-    api/                 # Fiber server, middleware, all handlers
+    api/                 # Gin server, middleware, all handlers
     web/                 # //go:embed dist (exposes web.FS())
 web-ui/
   src/
@@ -120,8 +120,8 @@ Import direction worth remembering: `incident → {db, notify}`. The check sched
   no image dependencies; it only validates and stores the WebP bytes.
 - **Config vs DB**: `config.yaml` is the source of truth for services/settings;
   PostgreSQL holds users, sessions and metrics history. Old SQLite files are not imported.
-- **HTTP** uses [Fiber v3](https://gofiber.io); handlers return `fiber.NewError` for
-  errors (rendered centrally as `{ "error": ... }`) and `c.JSON` for success.
+- **HTTP** uses [Gin](https://github.com/gin-gonic/gin); handlers return `fail(code, msg)` for
+  errors (rendered centrally as `{ "error": ... }`) and `writeJSON` for success.
 - **Migrations** are goose `*.sql` files in `internal/db/migrations`, embedded and
   applied on startup (postgres dialect). Add a new numbered file for schema
   changes; never edit an applied one.

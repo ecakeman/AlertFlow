@@ -3,18 +3,17 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"testing"
 
-	"github.com/gofiber/fiber/v3"
+	"github.com/gin-gonic/gin"
 
 	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/db"
 )
 
-func agentCallbackApp(t *testing.T, token string) (*fiber.App, *db.DB) {
+func agentCallbackApp(t *testing.T, token string) (*gin.Engine, *db.DB) {
 	t.Helper()
 	database := db.OpenTest(t)
 	s := &Server{
@@ -25,12 +24,10 @@ func agentCallbackApp(t *testing.T, token string) (*fiber.App, *db.DB) {
 		agentCallbackToken: token,
 	}
 	attachQuery(s)
-	s.app = fiber.New(fiber.Config{BodyLimit: maxBodyBytes, ErrorHandler: errorHandler})
-	s.routes()
-	return s.app, database
+	return s.newEngine(), database
 }
 
-func postAgentCallback(t *testing.T, app *fiber.App, auth, body string) (int, string) {
+func postAgentCallback(t *testing.T, app *gin.Engine, auth, body string) (int, string) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, "/webhooks/agent", strings.NewReader(body))
 	if err != nil {
@@ -40,13 +37,8 @@ func postAgentCallback(t *testing.T, app *fiber.App, auth, body string) (int, st
 	if auth != "" {
 		req.Header.Set("Authorization", auth)
 	}
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatalf("request: %v", err)
-	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, string(data)
+	rec := serve(app, req)
+	return rec.Code, rec.Body.String()
 }
 
 func callbackBody(messageID, messageType, runID string, incidentID int64) string {
@@ -230,14 +222,9 @@ func TestAgentCallbackDoesNotFallThroughToTheSPA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatalf("request: %v", err)
-	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
-	if strings.Contains(string(data), "<html") {
-		t.Fatalf("webhook path served the SPA: %s", data)
+	rec := serve(app, req)
+	if strings.Contains(rec.Body.String(), "<html") {
+		t.Fatalf("webhook path served the SPA: %s", rec.Body.String())
 	}
 }
 

@@ -1,9 +1,9 @@
 package api
 
 import (
+	"github.com/gin-gonic/gin"
+	"net/http"
 	"os"
-
-	"github.com/gofiber/fiber/v3"
 
 	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/image"
@@ -11,14 +11,18 @@ import (
 
 // POST /api/services/:id/image → store a WebP icon (raw body, already optimized
 // client-side). Updates the service's icon in config.yaml.
-func (s *Server) handleUploadImage(c fiber.Ctx) error {
-	id := c.Params("id")
+func (s *Server) handleUploadImage(c *gin.Context) error {
+	id := c.Param("id")
 	if s.config().Find(id) == nil {
-		return fiber.NewError(fiber.StatusNotFound, "service not found")
+		return fail(http.StatusNotFound, "service not found")
 	}
-	name, err := image.Save(config.ImagesPath(s.dir()), id, c.Body())
+	body, err := readBody(c)
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		return err
+	}
+	name, err := image.Save(config.ImagesPath(s.dir()), id, body)
+	if err != nil {
+		return fail(http.StatusBadRequest, err.Error())
 	}
 	if err := s.updateConfig(func(cfg *config.Config) error {
 		if svc := cfg.Find(id); svc != nil {
@@ -26,16 +30,16 @@ func (s *Server) handleUploadImage(c fiber.Ctx) error {
 		}
 		return nil
 	}); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+		return fail(http.StatusInternalServerError, err.Error())
 	}
-	return c.JSON(fiber.Map{"icon": "/images/" + name})
+	return writeJSON(c, http.StatusOK, map[string]any{"icon": "/images/" + name})
 }
 
 // DELETE /api/services/:id/image → remove a service's icon.
-func (s *Server) handleDeleteImage(c fiber.Ctx) error {
-	id := c.Params("id")
+func (s *Server) handleDeleteImage(c *gin.Context) error {
+	id := c.Param("id")
 	if err := image.Delete(config.ImagesPath(s.dir()), id); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		return fail(http.StatusBadRequest, err.Error())
 	}
 	if err := s.updateConfig(func(cfg *config.Config) error {
 		if svc := cfg.Find(id); svc != nil {
@@ -43,26 +47,25 @@ func (s *Server) handleDeleteImage(c fiber.Ctx) error {
 		}
 		return nil
 	}); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+		return fail(http.StatusInternalServerError, err.Error())
 	}
-	return c.SendStatus(fiber.StatusNoContent)
+	return writeEmpty(c, http.StatusNoContent)
 }
 
 // GET /images/:file → serve a stored icon (authenticated).
-func (s *Server) handleServeImage(c fiber.Ctx) error {
+func (s *Server) handleServeImage(c *gin.Context) error {
 	if s.authenticate(c) == nil {
-		return fiber.NewError(fiber.StatusUnauthorized, "authentication required")
+		return fail(http.StatusUnauthorized, "authentication required")
 	}
-	path, err := image.ResolvePath(config.ImagesPath(s.dir()), c.Params("file"))
+	path, err := image.ResolvePath(config.ImagesPath(s.dir()), c.Param("file"))
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid image")
+		return fail(http.StatusBadRequest, "invalid image")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fiber.NewError(fiber.StatusNotFound, "image not found")
+		return fail(http.StatusNotFound, "image not found")
 	}
 	// Icons keep a stable filename across replacement, so revalidate each time.
-	c.Set("Cache-Control", "no-cache")
-	c.Type("webp")
-	return c.Send(data)
+	c.Header("Cache-Control", "no-cache")
+	return writeBytes(c, "image/webp", data)
 }

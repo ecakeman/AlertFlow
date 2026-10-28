@@ -1,22 +1,22 @@
 package api
 
 import (
+	"github.com/gin-gonic/gin"
+	"net/http"
 	"strconv"
 	"strings"
-
-	"github.com/gofiber/fiber/v3"
 
 	"github.com/ecakeman/alertflow/internal/auth"
 	"github.com/ecakeman/alertflow/internal/config"
 )
 
 // GET /api/settings → current settings + active config directory.
-func (s *Server) handleGetSettings(c fiber.Ctx) error {
-	return c.JSON(toSettingsDTO(s.config(), s.dir()))
+func (s *Server) handleGetSettings(c *gin.Context) error {
+	return writeJSON(c, http.StatusOK, toSettingsDTO(s.config(), s.dir()))
 }
 
 // PUT /api/settings → overwrite app settings (not services).
-func (s *Server) handleUpdateSettings(c fiber.Ctx) error {
+func (s *Server) handleUpdateSettings(c *gin.Context) error {
 	var in settingsDTO
 	if err := decode(c, &in); err != nil {
 		return err
@@ -70,13 +70,13 @@ func (s *Server) handleUpdateSettings(c fiber.Ctx) error {
 		return nil
 	})
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		return fail(http.StatusBadRequest, err.Error())
 	}
-	return c.JSON(toSettingsDTO(s.config(), s.dir()))
+	return writeJSON(c, http.StatusOK, toSettingsDTO(s.config(), s.dir()))
 }
 
 // PUT /api/settings/config-path → point the app at a different config folder.
-func (s *Server) handleConfigPath(c fiber.Ctx) error {
+func (s *Server) handleConfigPath(c *gin.Context) error {
 	var in struct {
 		Path string `json:"path"`
 	}
@@ -85,25 +85,25 @@ func (s *Server) handleConfigPath(c fiber.Ctx) error {
 	}
 	dir := strings.TrimSpace(in.Path)
 	if dir == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "path is required")
+		return fail(http.StatusBadRequest, "path is required")
 	}
 	if err := s.switchConfigDir(dir); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "could not use that folder: "+err.Error())
+		return fail(http.StatusBadRequest, "could not use that folder: "+err.Error())
 	}
-	return c.JSON(toSettingsDTO(s.config(), s.dir()))
+	return writeJSON(c, http.StatusOK, toSettingsDTO(s.config(), s.dir()))
 }
 
 // GET /api/config → raw config.yaml text (advanced editor).
-func (s *Server) handleGetRawConfig(c fiber.Ctx) error {
+func (s *Server) handleGetRawConfig(c *gin.Context) error {
 	data, err := config.Marshal(s.config())
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not render config")
+		return fail(http.StatusInternalServerError, "could not render config")
 	}
-	return c.JSON(fiber.Map{"content": string(data)})
+	return writeJSON(c, http.StatusOK, map[string]any{"content": string(data)})
 }
 
 // PUT /api/config → replace config.yaml from raw text (validated).
-func (s *Server) handlePutRawConfig(c fiber.Ctx) error {
+func (s *Server) handlePutRawConfig(c *gin.Context) error {
 	var in struct {
 		Content string `json:"content"`
 	}
@@ -112,32 +112,32 @@ func (s *Server) handlePutRawConfig(c fiber.Ctx) error {
 	}
 	parsed, err := config.Parse([]byte(in.Content))
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		return fail(http.StatusBadRequest, err.Error())
 	}
 	if err := s.updateConfig(func(cfg *config.Config) error {
 		*cfg = *parsed
 		return nil
 	}); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		return fail(http.StatusBadRequest, err.Error())
 	}
-	return c.JSON(fiber.Map{"ok": true})
+	return writeJSON(c, http.StatusOK, map[string]any{"ok": true})
 }
 
 // GET /api/users → all accounts.
-func (s *Server) handleListUsers(c fiber.Ctx) error {
+func (s *Server) handleListUsers(c *gin.Context) error {
 	users, err := s.conn().ListUsers()
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not load users")
+		return fail(http.StatusInternalServerError, "could not load users")
 	}
 	out := make([]userDTO, 0, len(users))
 	for i := range users {
 		out = append(out, toUserDTO(&users[i]))
 	}
-	return c.JSON(out)
+	return writeJSON(c, http.StatusOK, out)
 }
 
 // POST /api/users → create an account.
-func (s *Server) handleCreateUser(c fiber.Ctx) error {
+func (s *Server) handleCreateUser(c *gin.Context) error {
 	var in struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -148,30 +148,30 @@ func (s *Server) handleCreateUser(c fiber.Ctx) error {
 	}
 	username := strings.TrimSpace(in.Username)
 	if username == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "username is required")
+		return fail(http.StatusBadRequest, "username is required")
 	}
 	if !validRole(in.Role) {
-		return fiber.NewError(fiber.StatusBadRequest, "role must be admin or readonly")
+		return fail(http.StatusBadRequest, "role must be admin or readonly")
 	}
 	if len(in.Password) < auth.MinPasswordLen || len(in.Password) > auth.MaxPasswordLen {
-		return fiber.NewError(fiber.StatusBadRequest, "password must be 8–72 characters")
+		return fail(http.StatusBadRequest, "password must be 8–72 characters")
 	}
 	hash, err := auth.HashPassword(in.Password)
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not hash password")
+		return fail(http.StatusInternalServerError, "could not hash password")
 	}
 	u, err := s.conn().CreateUser(username, hash, in.Role)
 	if err != nil {
-		return fiber.NewError(fiber.StatusConflict, "username already exists")
+		return fail(http.StatusConflict, "username already exists")
 	}
-	return c.Status(fiber.StatusCreated).JSON(toUserDTO(u))
+	return writeJSON(c, http.StatusCreated, toUserDTO(u))
 }
 
 // PUT /api/users/:id → change role and/or password.
-func (s *Server) handleUpdateUser(c fiber.Ctx) error {
-	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
+func (s *Server) handleUpdateUser(c *gin.Context) error {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid user id")
+		return fail(http.StatusBadRequest, "invalid user id")
 	}
 	var in struct {
 		Role     string `json:"role"`
@@ -182,16 +182,16 @@ func (s *Server) handleUpdateUser(c fiber.Ctx) error {
 	}
 	target, err := s.conn().GetUserByID(id)
 	if err != nil {
-		return fiber.NewError(fiber.StatusNotFound, "user not found")
+		return fail(http.StatusNotFound, "user not found")
 	}
 	role := target.Role
 	if in.Role != "" {
 		if !validRole(in.Role) {
-			return fiber.NewError(fiber.StatusBadRequest, "role must be admin or readonly")
+			return fail(http.StatusBadRequest, "role must be admin or readonly")
 		}
 		if target.Role == "admin" && in.Role != "admin" {
 			if n, _ := s.countAdmins(); n <= 1 {
-				return fiber.NewError(fiber.StatusBadRequest, "cannot demote the last administrator")
+				return fail(http.StatusBadRequest, "cannot demote the last administrator")
 			}
 		}
 		role = in.Role
@@ -199,42 +199,42 @@ func (s *Server) handleUpdateUser(c fiber.Ctx) error {
 	hash := ""
 	if in.Password != "" {
 		if len(in.Password) < auth.MinPasswordLen || len(in.Password) > auth.MaxPasswordLen {
-			return fiber.NewError(fiber.StatusBadRequest, "password must be 8–72 characters")
+			return fail(http.StatusBadRequest, "password must be 8–72 characters")
 		}
 		hash, err = auth.HashPassword(in.Password)
 		if err != nil {
-			return fiber.NewError(fiber.StatusInternalServerError, "could not hash password")
+			return fail(http.StatusInternalServerError, "could not hash password")
 		}
 	}
 	if err := s.conn().UpdateUser(id, role, hash); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not update user")
+		return fail(http.StatusInternalServerError, "could not update user")
 	}
 	updated, _ := s.conn().GetUserByID(id)
-	return c.JSON(toUserDTO(updated))
+	return writeJSON(c, http.StatusOK, toUserDTO(updated))
 }
 
 // DELETE /api/users/:id → remove an account.
-func (s *Server) handleDeleteUser(c fiber.Ctx) error {
-	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
+func (s *Server) handleDeleteUser(c *gin.Context) error {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid user id")
+		return fail(http.StatusBadRequest, "invalid user id")
 	}
 	if me := userLocal(c); me != nil && me.ID == id {
-		return fiber.NewError(fiber.StatusBadRequest, "you cannot delete your own account")
+		return fail(http.StatusBadRequest, "you cannot delete your own account")
 	}
 	target, err := s.conn().GetUserByID(id)
 	if err != nil {
-		return fiber.NewError(fiber.StatusNotFound, "user not found")
+		return fail(http.StatusNotFound, "user not found")
 	}
 	if target.Role == "admin" {
 		if n, _ := s.countAdmins(); n <= 1 {
-			return fiber.NewError(fiber.StatusBadRequest, "cannot delete the last administrator")
+			return fail(http.StatusBadRequest, "cannot delete the last administrator")
 		}
 	}
 	if err := s.conn().DeleteUser(id); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not delete user")
+		return fail(http.StatusInternalServerError, "could not delete user")
 	}
-	return c.SendStatus(fiber.StatusNoContent)
+	return writeEmpty(c, http.StatusNoContent)
 }
 
 func (s *Server) countAdmins() (int, error) {

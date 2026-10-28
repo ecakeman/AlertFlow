@@ -1,12 +1,12 @@
 package api
 
 import (
-	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/gofiber/fiber/v3"
+	"github.com/gin-gonic/gin"
 
 	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/db"
@@ -57,7 +57,7 @@ func TestAgentRoutesReadWithoutSession(t *testing.T) {
 	}
 }
 
-func agentApp(t *testing.T, token string) *fiber.App {
+func agentApp(t *testing.T, token string) *gin.Engine {
 	t.Helper()
 	database := db.OpenTest(t)
 	s := &Server{
@@ -68,12 +68,16 @@ func agentApp(t *testing.T, token string) *fiber.App {
 		agentToken: token,
 	}
 	attachQuery(s)
-	s.app = fiber.New(fiber.Config{BodyLimit: maxBodyBytes, ErrorHandler: errorHandler})
-	s.routes()
-	return s.app
+	return s.newEngine()
 }
 
-func getAgent(t *testing.T, app *fiber.App, path, auth string) (int, string) {
+func serve(app *gin.Engine, req *http.Request) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	return rec
+}
+
+func getAgent(t *testing.T, app *gin.Engine, path, auth string) (int, string) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, path, nil)
 	if err != nil {
@@ -82,27 +86,17 @@ func getAgent(t *testing.T, app *fiber.App, path, auth string) (int, string) {
 	if auth != "" {
 		req.Header.Set("Authorization", auth)
 	}
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, string(raw)
+	rec := serve(app, req)
+	return rec.Code, rec.Body.String()
 }
 
-func postAgent(t *testing.T, app *fiber.App, path, auth string) (int, string) {
+func postAgent(t *testing.T, app *gin.Engine, path, auth string) (int, string) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, path, strings.NewReader("{}"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("Authorization", auth)
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, string(raw)
+	rec := serve(app, req)
+	return rec.Code, rec.Body.String()
 }

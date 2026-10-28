@@ -27,7 +27,7 @@ Phase 0 验收通过后才能改核心代码。一次只做一个阶段。
 审计对象是上面的基线提交，不是目标架构。
 
 - 角色只有 `server`、`publisher`、`consumer`、`delivery`（`backend/cmd/alertflow/main.go`）。`api.New` 会 `sched.Sync` 并启动周期调度（`backend/internal/api/server.go`）。
-- HTTP 是 Fiber v3.4.0。模块声明 Go 1.25.7。没有 gRPC，没有 client-go。Redis 只是可降级读缓存。
+- HTTP 是 Gin v1.10.1。模块声明 Go 1.25.7。没有 gRPC，没有 client-go。Redis 只是可降级读缓存。
 - Goose 迁移嵌入二进制，在 `db.Open` 时自动执行，并有 advisory lock。已有 `00001`–`00011`。下一号是 `00012`。`00011` 已删除 `external_alerts`。不要改已应用的迁移。
 - `integrations.type` 允许 `telegram`、`slack`、`email`、`webhook`、`agent_webhook`（`00010`）。
 - `notification_deliveries.status` 只允许 `pending`、`running`、`retry_wait`、`succeeded`、`dead`（`00003`）。没有 `cancelled`。

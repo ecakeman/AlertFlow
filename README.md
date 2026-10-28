@@ -202,7 +202,7 @@ always safe.
 
 One static Go binary embeds the built Vue app and serves both the API and the UI.
 
-- **Backend** — Go with [Fiber](https://gofiber.io) and PostgreSQL
+- **Backend** — Go with [Gin](https://github.com/gin-gonic/gin) and PostgreSQL
   ([pgx](https://github.com/jackc/pgx), no CGO) with
   [goose](https://github.com/pressly/goose) migrations, a goroutine‑per‑service
   scheduler for checks, bcrypt + cookie sessions, and structured `slog` logging.

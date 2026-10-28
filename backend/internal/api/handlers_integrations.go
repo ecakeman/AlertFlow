@@ -3,11 +3,11 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"github.com/gin-gonic/gin"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/gofiber/fiber/v3"
 
 	"github.com/ecakeman/alertflow/internal/db"
 	"github.com/ecakeman/alertflow/internal/notify"
@@ -43,50 +43,50 @@ type integrationInput struct {
 }
 
 // GET /api/integrations → all channels (secrets redacted).
-func (s *Server) handleListIntegrations(c fiber.Ctx) error {
+func (s *Server) handleListIntegrations(c *gin.Context) error {
 	list, err := s.conn().ListIntegrations()
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not load integrations")
+		return fail(http.StatusInternalServerError, "could not load integrations")
 	}
 	out := make([]integrationDTO, 0, len(list))
 	for _, in := range list {
 		out = append(out, toIntegrationDTO(in))
 	}
-	return c.JSON(out)
+	return writeJSON(c, http.StatusOK, out)
 }
 
 // POST /api/integrations → create a channel.
-func (s *Server) handleCreateIntegration(c fiber.Ctx) error {
+func (s *Server) handleCreateIntegration(c *gin.Context) error {
 	var in integrationInput
 	if err := decode(c, &in); err != nil {
 		return err
 	}
 	if _, ok := requiredFields[in.Type]; !ok {
-		return fiber.NewError(fiber.StatusBadRequest, "unknown integration type")
+		return fail(http.StatusBadRequest, "unknown integration type")
 	}
 	name := strings.TrimSpace(in.Name)
 	if name == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "name is required")
+		return fail(http.StatusBadRequest, "name is required")
 	}
 	cfg := in.Config
 	if cfg == nil {
 		cfg = map[string]any{}
 	}
 	if err := validateIntegrationConfig(in.Type, cfg); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		return fail(http.StatusBadRequest, err.Error())
 	}
 	raw, _ := json.Marshal(cfg)
 	created, err := s.conn().CreateIntegration(in.Type, name, in.Enabled, in.NotifyWarnings, raw)
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not create integration")
+		return fail(http.StatusInternalServerError, "could not create integration")
 	}
-	return c.Status(fiber.StatusCreated).JSON(toIntegrationDTO(*created))
+	return writeJSON(c, http.StatusCreated, toIntegrationDTO(*created))
 }
 
 // PUT /api/integrations/:id → update a channel. Omitted/blank secret fields keep
 // their stored value. The type may be changed; validation and secret handling
 // then follow the NEW type, since that is what the config will belong to.
-func (s *Server) handleUpdateIntegration(c fiber.Ctx) error {
+func (s *Server) handleUpdateIntegration(c *gin.Context) error {
 	existing, err := s.integrationParam(c)
 	if err != nil {
 		return err
@@ -97,12 +97,12 @@ func (s *Server) handleUpdateIntegration(c fiber.Ctx) error {
 	}
 	name := strings.TrimSpace(in.Name)
 	if name == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "name is required")
+		return fail(http.StatusBadRequest, "name is required")
 	}
 	kind := existing.Type
 	if t := strings.TrimSpace(in.Type); t != "" && t != kind {
 		if _, ok := requiredFields[t]; !ok {
-			return fiber.NewError(fiber.StatusBadRequest, "unknown integration type")
+			return fail(http.StatusBadRequest, "unknown integration type")
 		}
 		kind = t
 	}
@@ -118,30 +118,30 @@ func (s *Server) handleUpdateIntegration(c fiber.Ctx) error {
 		merged[k] = v
 	}
 	if err := validateIntegrationConfig(kind, merged); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		return fail(http.StatusBadRequest, err.Error())
 	}
 	raw, _ := json.Marshal(merged)
 	updated, err := s.conn().UpdateIntegration(existing.ID, kind, name, in.Enabled, in.NotifyWarnings, raw)
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not update integration")
+		return fail(http.StatusInternalServerError, "could not update integration")
 	}
-	return c.JSON(toIntegrationDTO(*updated))
+	return writeJSON(c, http.StatusOK, toIntegrationDTO(*updated))
 }
 
 // DELETE /api/integrations/:id → remove a channel.
-func (s *Server) handleDeleteIntegration(c fiber.Ctx) error {
+func (s *Server) handleDeleteIntegration(c *gin.Context) error {
 	existing, err := s.integrationParam(c)
 	if err != nil {
 		return err
 	}
 	if err := s.conn().DeleteIntegration(existing.ID); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not delete integration")
+		return fail(http.StatusInternalServerError, "could not delete integration")
 	}
-	return c.SendStatus(fiber.StatusNoContent)
+	return writeEmpty(c, http.StatusNoContent)
 }
 
 // POST /api/integrations/:id/test → send one real test notification.
-func (s *Server) handleTestIntegration(c fiber.Ctx) error {
+func (s *Server) handleTestIntegration(c *gin.Context) error {
 	existing, err := s.integrationParam(c)
 	if err != nil {
 		return err
@@ -152,23 +152,23 @@ func (s *Server) handleTestIntegration(c fiber.Ctx) error {
 		ServiceURL:  "https://example.com",
 		StartedAt:   time.Now(),
 	}
-	ctx, cancel := context.WithTimeout(c.Context(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
 	defer cancel()
 	if err := s.dispatch().Test(ctx, *existing, msg); err != nil {
-		return c.JSON(fiber.Map{"ok": false, "error": err.Error()})
+		return writeJSON(c, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"ok": true})
+	return writeJSON(c, http.StatusOK, map[string]any{"ok": true})
 }
 
 // integrationParam parses :id and loads the integration (404 if absent).
-func (s *Server) integrationParam(c fiber.Ctx) (*db.Integration, error) {
-	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
+func (s *Server) integrationParam(c *gin.Context) (*db.Integration, error) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		return nil, fiber.NewError(fiber.StatusBadRequest, "invalid integration id")
+		return nil, fail(http.StatusBadRequest, "invalid integration id")
 	}
 	in, err := s.conn().GetIntegration(id)
 	if err != nil {
-		return nil, fiber.NewError(fiber.StatusNotFound, "integration not found")
+		return nil, fail(http.StatusNotFound, "integration not found")
 	}
 	return in, nil
 }
@@ -185,7 +185,7 @@ func secretSet(kind string) map[string]bool {
 func validateIntegrationConfig(kind string, cfg map[string]any) error {
 	for _, field := range requiredFields[kind] {
 		if v, _ := cfg[field].(string); strings.TrimSpace(v) == "" {
-			return fiber.NewError(fiber.StatusBadRequest, field+" is required")
+			return fail(http.StatusBadRequest, field+" is required")
 		}
 	}
 	return nil

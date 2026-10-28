@@ -1,18 +1,18 @@
 // Command alertflow is the single-binary server: it serves the embedded web UI
-// and the JSON API (Fiber), and runs the monitoring scheduler.
+// and the JSON API (Gin), and runs the monitoring scheduler.
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/gofiber/fiber/v3"
 
 	"github.com/ecakeman/alertflow/internal/api"
 	"github.com/ecakeman/alertflow/internal/config"
@@ -63,9 +63,9 @@ func runServer(addr, configDir string) {
 	}
 	defer srv.Close()
 
-	app := srv.App()
+	httpSrv := &http.Server{Addr: addr, Handler: srv.Handler()}
 	go func() {
-		if err := app.Listen(addr, fiber.ListenConfig{DisableStartupMessage: true}); err != nil {
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server error", "error", err)
 			os.Exit(1)
 		}
@@ -79,7 +79,7 @@ func runServer(addr, configDir string) {
 	slog.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := app.ShutdownWithContext(shutdownCtx); err != nil {
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "error", err)
 	}
 }

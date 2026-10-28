@@ -8,12 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/gin-gonic/gin"
 	"io"
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/gofiber/fiber/v3"
 
 	"github.com/ecakeman/alertflow/internal/db"
 )
@@ -73,7 +72,7 @@ func toAgentChatRequestDTO(row *db.ChatRequestRow) agentChatRequestDTO {
 // The question is stored and handed to the agent over the same durable delivery
 // path as a notification, then answered asynchronously over /webhooks/agent.
 // The page polls GET .../requests/:requestId. Nothing here waits on a model.
-func (s *Server) handleCreateAgentChatRequest(c fiber.Ctx) error {
+func (s *Server) handleCreateAgentChatRequest(c *gin.Context) error {
 	inc, err := s.incidentParam(c)
 	if err != nil {
 		return err
@@ -84,14 +83,14 @@ func (s *Server) handleCreateAgentChatRequest(c fiber.Ctx) error {
 	}
 	message := strings.TrimSpace(in.Message)
 	if message == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "message is required")
+		return fail(http.StatusBadRequest, "message is required")
 	}
 	enabled, err := s.agentChannelEnabled()
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not check the agent channel")
+		return fail(http.StatusInternalServerError, "could not check the agent channel")
 	}
 	if !enabled {
-		return fiber.NewError(fiber.StatusServiceUnavailable, "no agent channel is enabled")
+		return fail(http.StatusServiceUnavailable, "no agent channel is enabled")
 	}
 
 	history := in.History
@@ -100,7 +99,7 @@ func (s *Server) handleCreateAgentChatRequest(c fiber.Ctx) error {
 	}
 	historyJSON, err := json.Marshal(history)
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not encode the request")
+		return fail(http.StatusInternalServerError, "could not encode the request")
 	}
 
 	requestID := strings.TrimSpace(in.RequestID)
@@ -126,7 +125,7 @@ func (s *Server) handleCreateAgentChatRequest(c fiber.Ctx) error {
 	}
 	payload, err := json.Marshal(snapshot)
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not encode the request")
+		return fail(http.StatusInternalServerError, "could not encode the request")
 	}
 
 	now := time.Now().Unix()
@@ -138,7 +137,7 @@ func (s *Server) handleCreateAgentChatRequest(c fiber.Ctx) error {
 		RequestID: requestID, IncidentID: inc.ID, UserID: userID, Message: message,
 	}, payload, now)
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not queue the request")
+		return fail(http.StatusInternalServerError, "could not queue the request")
 	}
 	// A request with no delivery row can never be answered — say so now rather
 	// than leaving the page polling a question nobody will read.
@@ -147,50 +146,50 @@ func (s *Server) handleCreateAgentChatRequest(c fiber.Ctx) error {
 			row, _ = s.conn().GetChatRequest(requestID)
 		}
 	}
-	status := fiber.StatusAccepted
+	status := http.StatusAccepted
 	if !created {
-		status = fiber.StatusOK
+		status = http.StatusOK
 	}
-	return c.Status(status).JSON(toAgentChatRequestDTO(row))
+	return writeJSON(c, status, toAgentChatRequestDTO(row))
 }
 
 // GET /api/incidents/:id/agent-chat/requests/:requestId → one request's state.
-func (s *Server) handleGetAgentChatRequest(c fiber.Ctx) error {
+func (s *Server) handleGetAgentChatRequest(c *gin.Context) error {
 	inc, err := s.incidentParam(c)
 	if err != nil {
 		return err
 	}
-	row, err := s.conn().GetChatRequest(c.Params("requestId"))
+	row, err := s.conn().GetChatRequest(c.Param("requestId"))
 	if errors.Is(err, db.ErrNotFound) {
-		return fiber.NewError(fiber.StatusNotFound, "chat request not found")
+		return fail(http.StatusNotFound, "chat request not found")
 	}
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not load the chat request")
+		return fail(http.StatusInternalServerError, "could not load the chat request")
 	}
 	if row.IncidentID != inc.ID {
 		// The request exists but belongs to another incident: from this
 		// incident's point of view it does not exist.
-		return fiber.NewError(fiber.StatusNotFound, "chat request not found")
+		return fail(http.StatusNotFound, "chat request not found")
 	}
-	return c.JSON(toAgentChatRequestDTO(row))
+	return writeJSON(c, http.StatusOK, toAgentChatRequestDTO(row))
 }
 
 // GET /api/incidents/:id/agent-chat/requests → the incident's recent requests,
 // oldest first, so a page reload restores the conversation.
-func (s *Server) handleListAgentChatRequests(c fiber.Ctx) error {
+func (s *Server) handleListAgentChatRequests(c *gin.Context) error {
 	inc, err := s.incidentParam(c)
 	if err != nil {
 		return err
 	}
 	rows, err := s.conn().ListChatRequests(inc.ID, 20)
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not load the chat requests")
+		return fail(http.StatusInternalServerError, "could not load the chat requests")
 	}
 	out := make([]agentChatRequestDTO, 0, len(rows))
 	for i := len(rows) - 1; i >= 0; i-- {
 		out = append(out, toAgentChatRequestDTO(&rows[i]))
 	}
-	return c.JSON(fiber.Map{"requests": out})
+	return writeJSON(c, http.StatusOK, map[string]any{"requests": out})
 }
 
 // agentChannelEnabled reports whether any agent channel would pick up a queued
@@ -226,28 +225,28 @@ func newChatRequestID() string {
 //
 // Server-side on purpose: the browser never sees AGENT_API_TOKEN, and the Agent
 // answers read-only (evidence + report + long-term memory, no tools, no writes).
-func (s *Server) handleIncidentAgentChat(c fiber.Ctx) error {
+func (s *Server) handleIncidentAgentChat(c *gin.Context) error {
 	inc, err := s.incidentParam(c)
 	if err != nil {
 		return err
 	}
 	if s.agentBaseURL == "" || s.agentAPIToken == "" {
-		return fiber.NewError(fiber.StatusServiceUnavailable, "agent is not configured")
+		return fail(http.StatusServiceUnavailable, "agent is not configured")
 	}
 	var in agentChatRequest
 	if err := decode(c, &in); err != nil {
 		return err
 	}
 	if strings.TrimSpace(in.Message) == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "message is required")
+		return fail(http.StatusBadRequest, "message is required")
 	}
 	history := in.History
 	if len(history) > maxChatHistory {
 		history = history[len(history)-maxChatHistory:]
 	}
-	payload, err := json.Marshal(fiber.Map{"message": in.Message, "history": history})
+	payload, err := json.Marshal(map[string]any{"message": in.Message, "history": history})
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not encode request")
+		return fail(http.StatusInternalServerError, "could not encode request")
 	}
 
 	// An answer is one model call; give it room but not unbounded.
@@ -256,26 +255,26 @@ func (s *Server) handleIncidentAgentChat(c fiber.Ctx) error {
 	url := fmt.Sprintf("%s/api/v1/incidents/%d/chat", s.agentBaseURL, inc.ID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not build request")
+		return fail(http.StatusInternalServerError, "could not build request")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.agentAPIToken)
 
 	resp, err := agentHTTPClient.Do(req)
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadGateway, "agent unreachable")
+		return fail(http.StatusBadGateway, "agent unreachable")
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fiber.NewError(fiber.StatusBadGateway, "agent returned an error")
+		return fail(http.StatusBadGateway, "agent returned an error")
 	}
 	var out struct {
 		Reply       string   `json:"reply"`
 		EvidenceIDs []string `json:"evidence_ids"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
-		return fiber.NewError(fiber.StatusBadGateway, "unexpected agent response")
+		return fail(http.StatusBadGateway, "unexpected agent response")
 	}
-	return c.JSON(fiber.Map{"reply": out.Reply, "evidenceIds": out.EvidenceIDs})
+	return writeJSON(c, http.StatusOK, map[string]any{"reply": out.Reply, "evidenceIds": out.EvidenceIDs})
 }

@@ -1,9 +1,9 @@
 package api
 
 import (
+	"github.com/gin-gonic/gin"
+	"net/http"
 	"time"
-
-	"github.com/gofiber/fiber/v3"
 )
 
 type dashboardStatsDTO struct {
@@ -15,10 +15,10 @@ type dashboardStatsDTO struct {
 // GET /api/dashboard/stats → runtime aggregates the main dashboard's stat
 // tiles need beyond what GET /api/services already carries — currently just
 // the configurable-period warning count. See DashboardSettings.
-func (s *Server) handleDashboardStats(c fiber.Ctx) error {
-	count, err := s.query().DashboardStats(c.Context(), time.Now())
+func (s *Server) handleDashboardStats(c *gin.Context) error {
+	count, err := s.query().DashboardStats(c.Request.Context(), time.Now())
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not load dashboard stats")
+		return fail(http.StatusInternalServerError, "could not load dashboard stats")
 	}
-	return c.JSON(dashboardStatsDTO{WarningServiceCount: count})
+	return writeJSON(c, http.StatusOK, dashboardStatsDTO{WarningServiceCount: count})
 }

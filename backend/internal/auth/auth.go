@@ -1,5 +1,5 @@
 // Package auth provides password hashing (bcrypt) and opaque session tokens.
-// Session cookies themselves are set/cleared by the API layer (Fiber).
+// Session cookies themselves are set/cleared by the API layer (Gin).
 package auth
 
 import (

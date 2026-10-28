@@ -62,7 +62,7 @@ invent a test command.
   — telegram/slack/email/webhook, registered via `init()`, plus `agent_webhook`, registered at startup
   because it needs the query layer), `image` (WebP
   validate/store), `archive` (export/import zip), `logger` (slog JSON setup), `api` (the `Server` owns
-  config+db+scheduler and applies edits copy-on-write under a lock; **Fiber v3** app with per-route
+  config+db+scheduler and applies edits copy-on-write under a lock; **Gin** app with per-route
   auth/admin middleware, a central `ErrorHandler` rendering `{ "error": ... }`, and a native SPA
   catch-all serving the embedded FS — `/api/` and `/webhooks/` never fall through to it), `web` (`//go:embed dist`, exposes `web.FS()`). Entry:
   `cmd/alertflow/main.go` (`ALERTFLOW_ROLE`: `server` listens and runs the scheduler; `publisher`, `consumer`, and `delivery` do not).
@@ -90,7 +90,7 @@ invent a test command.
 - **Route guards are UX only** — the API must enforce roles independently (`auth, admin` middleware).
 - **Reads go through `query`.** `backend/internal/query` is the one place that composes monitoring
   reads (service list, metrics, check paging, incidents, dashboard, and the diagnostic context).
-  Fiber handlers keep auth, input validation and status codes; they do not assemble SQL results.
+  Gin handlers keep auth, input validation and status codes; they do not assemble SQL results.
   `query.Service.Cache` is an optional Redis read cache — always nil-safe, and it only ever caches
   derived views (never incident state or the diagnostic context). Reuse the SQL in `db`; add a
   method there rather than writing a second query.
@@ -128,9 +128,9 @@ invent a test command.
   layout (there is one layout in config.yaml, not one per breakpoint).
 - Frontend types in `src/types` intentionally mirror the API DTOs in `backend/internal/api/dto.go`
   (camelCase); keep them in sync when changing shapes.
-- **Fiber handlers** return `fiber.NewError(code, msg)` for errors (the central `errorHandler` renders
-  them as `{ "error": msg }` — the shape the frontend expects); success via `c.JSON`/`c.Status().JSON`.
-  Read the authed user with `userLocal(c)`, params with `c.Params`, body with `decode(c, &dst)`.
+- **Gin handlers** return `fail(code, msg)` for errors (the `adapt` wrapper renders them as
+  `{ "error": msg }` — the shape the frontend expects); success via `writeJSON`. Read the authed
+  user with `userLocal(c)`, params with `c.Param`, body with `decode(c, &dst)`.
 - **Migrations**: add a new `backend/internal/db/migrations/NNNNN_name.sql` with `-- +goose Up`/`Down`;
   never edit an already-applied migration. Dialect is `postgres`. They are **embedded and run
   automatically inside `db.Open`** on every start (goose skips applied ones) — there is no separate

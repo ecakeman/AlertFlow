@@ -2,10 +2,10 @@ package api
 
 import (
 	"errors"
+	"github.com/gin-gonic/gin"
+	"net/http"
 	"strconv"
 	"time"
-
-	"github.com/gofiber/fiber/v3"
 
 	"github.com/ecakeman/alertflow/internal/db"
 )
@@ -43,37 +43,37 @@ func toDeliveryDTO(row db.DeliveryView) deliveryDTO {
 }
 
 // GET /api/incidents/:id/deliveries → tasks for one incident, without secrets.
-func (s *Server) handleListDeliveries(c fiber.Ctx) error {
+func (s *Server) handleListDeliveries(c *gin.Context) error {
 	inc, err := s.incidentParam(c)
 	if err != nil {
 		return err
 	}
 	rows, err := s.conn().ListDeliveriesByIncident(inc.ID)
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not load deliveries")
+		return fail(http.StatusInternalServerError, "could not load deliveries")
 	}
 	out := make([]deliveryDTO, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, toDeliveryDTO(row))
 	}
-	return c.JSON(out)
+	return writeJSON(c, http.StatusOK, out)
 }
 
 // POST /api/deliveries/:id/retry → start a new attempt round for a dead task.
-func (s *Server) handleRetryDelivery(c fiber.Ctx) error {
-	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
+func (s *Server) handleRetryDelivery(c *gin.Context) error {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid delivery id")
+		return fail(http.StatusBadRequest, "invalid delivery id")
 	}
 	err = s.conn().RetryDeadDelivery(id, time.Now().Unix())
 	if errors.Is(err, db.ErrNotFound) {
-		return fiber.NewError(fiber.StatusNotFound, "delivery not found")
+		return fail(http.StatusNotFound, "delivery not found")
 	}
 	if errors.Is(err, db.ErrNotRetryable) {
-		return fiber.NewError(fiber.StatusBadRequest, "only a dead delivery can be retried")
+		return fail(http.StatusBadRequest, "only a dead delivery can be retried")
 	}
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not retry delivery")
+		return fail(http.StatusInternalServerError, "could not retry delivery")
 	}
-	return c.JSON(fiber.Map{"ok": true})
+	return writeJSON(c, http.StatusOK, map[string]any{"ok": true})
 }

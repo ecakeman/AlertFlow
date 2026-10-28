@@ -3,10 +3,10 @@ package api
 import (
 	"errors"
 	"fmt"
+	"github.com/gin-gonic/gin"
+	"net/http"
 	"strconv"
 	"time"
-
-	"github.com/gofiber/fiber/v3"
 
 	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/db"
@@ -17,16 +17,16 @@ import (
 var errServiceNotFound = errors.New("service not found")
 
 // GET /api/services → all services with current status + metrics.
-func (s *Server) handleListServices(c fiber.Ctx) error {
+func (s *Server) handleListServices(c *gin.Context) error {
 	list, err := s.query().ServiceList()
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not load metrics")
+		return fail(http.StatusInternalServerError, "could not load metrics")
 	}
 	out := make([]serviceDTO, 0, len(list))
 	for _, item := range list {
 		out = append(out, toServiceDTO(item.Service, item.Metrics))
 	}
-	return c.JSON(out)
+	return writeJSON(c, http.StatusOK, out)
 }
 
 type serviceInput struct {
@@ -41,14 +41,14 @@ type serviceInput struct {
 }
 
 // POST /api/services → add a service (persisted to config.yaml).
-func (s *Server) handleCreateService(c fiber.Ctx) error {
+func (s *Server) handleCreateService(c *gin.Context) error {
 	var in serviceInput
 	if err := decode(c, &in); err != nil {
 		return err
 	}
 	id := config.Slugify(in.Name)
 	if id == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "a valid name is required")
+		return fail(http.StatusBadRequest, "a valid name is required")
 	}
 	err := s.updateConfig(func(cfg *config.Config) error {
 		if cfg.Find(id) != nil {
@@ -78,14 +78,14 @@ func (s *Server) handleCreateService(c fiber.Ctx) error {
 		return nil
 	})
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		return fail(http.StatusBadRequest, err.Error())
 	}
-	return c.Status(fiber.StatusCreated).JSON(toServiceDTO(*s.config().Find(id), nil))
+	return writeJSON(c, http.StatusCreated, toServiceDTO(*s.config().Find(id), nil))
 }
 
 // PUT /api/services/:id → edit a service.
-func (s *Server) handleUpdateService(c fiber.Ctx) error {
-	id := c.Params("id")
+func (s *Server) handleUpdateService(c *gin.Context) error {
+	id := c.Param("id")
 	var in serviceInput
 	if err := decode(c, &in); err != nil {
 		return err
@@ -124,12 +124,12 @@ func (s *Server) handleUpdateService(c fiber.Ctx) error {
 	if err != nil {
 		return configErr(err)
 	}
-	return c.JSON(toServiceDTO(status.Service, status.Metrics))
+	return writeJSON(c, http.StatusOK, toServiceDTO(status.Service, status.Metrics))
 }
 
 // DELETE /api/services/:id → remove a service, its image and its history.
-func (s *Server) handleDeleteService(c fiber.Ctx) error {
-	id := c.Params("id")
+func (s *Server) handleDeleteService(c *gin.Context) error {
+	id := c.Param("id")
 	err := s.updateConfig(func(cfg *config.Config) error {
 		idx := -1
 		for i := range cfg.Services {
@@ -151,7 +151,7 @@ func (s *Server) handleDeleteService(c fiber.Ctx) error {
 	_ = s.conn().DeleteServiceHistory(id)
 	_ = s.conn().DeleteServiceTLS(id)
 	_ = s.conn().DeleteServiceIncidents(id)
-	return c.SendStatus(fiber.StatusNoContent)
+	return writeEmpty(c, http.StatusNoContent)
 }
 
 type layoutItem struct {
@@ -167,7 +167,7 @@ type layoutItem struct {
 // PATCH /api/services/layout → bulk-save grid positions, widget modes and chart
 // styles. Mode and chart are only applied when set, so a plain layout save (the
 // common case, on every drag) does not reset them.
-func (s *Server) handleUpdateLayout(c fiber.Ctx) error {
+func (s *Server) handleUpdateLayout(c *gin.Context) error {
 	var items []layoutItem
 	if err := decode(c, &items); err != nil {
 		return err
@@ -189,24 +189,24 @@ func (s *Server) handleUpdateLayout(c fiber.Ctx) error {
 		return nil
 	})
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		return fail(http.StatusBadRequest, err.Error())
 	}
-	return c.JSON(fiber.Map{"ok": true})
+	return writeJSON(c, http.StatusOK, map[string]any{"ok": true})
 }
 
 // POST /api/services/:id/check → run a check immediately.
-func (s *Server) handleCheckNow(c fiber.Ctx) error {
-	id := c.Params("id")
+func (s *Server) handleCheckNow(c *gin.Context) error {
+	id := c.Param("id")
 	svc := s.config().Find(id)
 	if svc == nil {
-		return fiber.NewError(fiber.StatusNotFound, "service not found")
+		return fail(http.StatusNotFound, "service not found")
 	}
 	s.scheduler().CheckNow(*svc)
 	status, err := s.query().ServiceStatusFor(id)
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not load metrics")
+		return fail(http.StatusInternalServerError, "could not load metrics")
 	}
-	return c.JSON(toServiceDTO(status.Service, status.Metrics))
+	return writeJSON(c, http.StatusOK, toServiceDTO(status.Service, status.Metrics))
 }
 
 type metricsResponse struct {
@@ -221,16 +221,16 @@ type metricsResponse struct {
 
 // GET /api/services/:id/metrics?range=1h|6h|24h|7d|30d|365d → aggregates, time
 // series, multi-window uptime and current TLS certificate info.
-func (s *Server) handleServiceMetrics(c fiber.Ctx) error {
-	id := c.Params("id")
-	res, err := s.query().ServiceMetrics(c.Context(), id, c.Query("range"), time.Now())
+func (s *Server) handleServiceMetrics(c *gin.Context) error {
+	id := c.Param("id")
+	res, err := s.query().ServiceMetrics(c.Request.Context(), id, c.Query("range"), time.Now())
 	if errors.Is(err, query.ErrServiceNotFound) {
-		return fiber.NewError(fiber.StatusNotFound, "service not found")
+		return fail(http.StatusNotFound, "service not found")
 	}
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not load metrics")
+		return fail(http.StatusInternalServerError, "could not load metrics")
 	}
-	return c.JSON(metricsResponse{
+	return writeJSON(c, http.StatusOK, metricsResponse{
 		serviceDTO:    toServiceDTO(res.Service, res.Status),
 		Series:        res.Series,
 		From:          res.From,
@@ -245,8 +245,8 @@ func (s *Server) handleServiceMetrics(c fiber.Ctx) error {
 // first, for the service's ping console. Rows come back un-squashed: collapsing
 // runs of successes is a rendering concern, and doing it here would break
 // across page boundaries.
-func (s *Server) handleServiceChecks(c fiber.Ctx) error {
-	id := c.Params("id")
+func (s *Server) handleServiceChecks(c *gin.Context) error {
+	id := c.Param("id")
 	limit := query.DefaultCheckPageSize
 	if v, err := strconv.Atoi(c.Query("limit")); err == nil && v > 0 {
 		limit = v
@@ -255,26 +255,26 @@ func (s *Server) handleServiceChecks(c fiber.Ctx) error {
 	if v, err := strconv.ParseInt(c.Query("before"), 10, 64); err == nil && v > 0 {
 		before = v
 	}
-	page, err := s.query().CheckHistory(c.Context(), id, before, limit)
+	page, err := s.query().CheckHistory(c.Request.Context(), id, before, limit)
 	if errors.Is(err, query.ErrServiceNotFound) {
-		return fiber.NewError(fiber.StatusNotFound, "service not found")
+		return fail(http.StatusNotFound, "service not found")
 	}
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not load checks")
+		return fail(http.StatusInternalServerError, "could not load checks")
 	}
 	out := make([]checkRowDTO, 0, len(page.Checks))
 	for _, r := range page.Checks {
 		out = append(out, toCheckRowDTO(r))
 	}
-	return c.JSON(checksResponse{Checks: out, NextBefore: page.NextBefore})
+	return writeJSON(c, http.StatusOK, checksResponse{Checks: out, NextBefore: page.NextBefore})
 }
 
-// configErr maps a config-update error to a 404 or 400 Fiber error.
+// configErr maps a config-update error to a 404 or 400 HTTP error.
 func configErr(err error) error {
 	if errors.Is(err, errServiceNotFound) {
-		return fiber.NewError(fiber.StatusNotFound, "service not found")
+		return fail(http.StatusNotFound, "service not found")
 	}
-	return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	return fail(http.StatusBadRequest, err.Error())
 }
 
 func defaultSize(mode string) (int, int) {

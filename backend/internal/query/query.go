@@ -1,13 +1,13 @@
 // Package query is the single composition layer for AlertFlow's reads.
 //
-// Every caller — the Fiber handlers, the diagnostic-context builder that seeds
+// Every caller — the Gin handlers, the diagnostic-context builder that seeds
 // an Agent run, and the Agent-facing read endpoints — goes through here, so the
 // same query is not re-derived in three places. It owns query shapes, time
 // windows, pagination bounds and (from the caching phase on) reuse.
 //
 // Two rules keep the seam honest:
 //
-//   - It never imports Fiber or anything HTTP. Handlers keep auth, input
+//   - It never imports Gin or anything HTTP. Handlers keep auth, input
 //     validation and status codes; this package only composes data.
 //   - It reuses the SQL in internal/db rather than re-implementing it. If a
 //     query is missing, add it to internal/db and call it from here.

@@ -2,8 +2,8 @@ package api
 
 import (
 	"encoding/json"
-
-	"github.com/gofiber/fiber/v3"
+	"github.com/gin-gonic/gin"
+	"net/http"
 )
 
 // agentReportDTO is the diagnostic agent's result for an incident, read from
@@ -31,22 +31,22 @@ type agentReportDTO struct {
 // whether or not the agent is online right now. A run that has started but not
 // finished yet is Available=true with no Report — the UI's "still running"
 // state.
-func (s *Server) handleIncidentAgentReport(c fiber.Ctx) error {
+func (s *Server) handleIncidentAgentReport(c *gin.Context) error {
 	inc, err := s.incidentParam(c)
 	if err != nil {
 		return err
 	}
 	if s.agentCallbackToken == "" {
-		return c.JSON(agentReportDTO{Available: false, Reason: "agent not configured"})
+		return writeJSON(c, http.StatusOK, agentReportDTO{Available: false, Reason: "agent not configured"})
 	}
 	rec, err := s.conn().LatestAgentRunForIncident(inc.ID)
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, "could not load the agent report")
+		return fail(http.StatusInternalServerError, "could not load the agent report")
 	}
 	if rec == nil {
-		return c.JSON(agentReportDTO{Available: false, Reason: "no agent run for this incident"})
+		return writeJSON(c, http.StatusOK, agentReportDTO{Available: false, Reason: "no agent run for this incident"})
 	}
-	return c.JSON(agentReportDTO{
+	return writeJSON(c, http.StatusOK, agentReportDTO{
 		Available: true,
 		RunID:     rec.RunID,
 		Status:    rec.Status,

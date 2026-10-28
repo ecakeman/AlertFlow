@@ -1,12 +1,12 @@
 package api
 
 import (
-	"errors"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
-	"github.com/gofiber/fiber/v3"
+	"github.com/gin-gonic/gin"
 
 	"github.com/ecakeman/alertflow/internal/auth"
 	"github.com/ecakeman/alertflow/internal/db"
@@ -15,8 +15,8 @@ import (
 const userLocalKey = "user"
 
 // authenticate resolves the session cookie to a user and slides its expiry.
-func (s *Server) authenticate(c fiber.Ctx) *db.User {
-	token := c.Cookies(auth.CookieName)
+func (s *Server) authenticate(c *gin.Context) *db.User {
+	token := cookieValue(c, auth.CookieName)
 	if token == "" {
 		return nil
 	}
@@ -35,95 +35,73 @@ func (s *Server) authenticate(c fiber.Ctx) *db.User {
 }
 
 // userLocal returns the authenticated user stashed on the context.
-func userLocal(c fiber.Ctx) *db.User {
-	u, _ := c.Locals(userLocalKey).(*db.User)
+func userLocal(c *gin.Context) *db.User {
+	v, ok := c.Get(userLocalKey)
+	if !ok {
+		return nil
+	}
+	u, _ := v.(*db.User)
 	return u
 }
 
 // authMW requires a valid session and stashes the user on the context.
-func (s *Server) authMW(c fiber.Ctx) error {
+func (s *Server) authMW(c *gin.Context) {
 	u := s.authenticate(c)
 	if u == nil {
-		return fiber.NewError(fiber.StatusUnauthorized, "authentication required")
+		writeError(c, fail(http.StatusUnauthorized, "authentication required"))
+		return
 	}
-	c.Locals(userLocalKey, u)
-	return c.Next()
+	c.Set(userLocalKey, u)
 }
 
 // adminMW requires the admin role (runs after authMW).
-func (s *Server) adminMW(c fiber.Ctx) error {
+func (s *Server) adminMW(c *gin.Context) {
 	if u := userLocal(c); u == nil || u.Role != "admin" {
-		return fiber.NewError(fiber.StatusForbidden, "administrator access required")
+		writeError(c, fail(http.StatusForbidden, "administrator access required"))
+		return
 	}
-	return c.Next()
 }
 
 // requestLogger logs API/image requests with method, status and duration.
-func (s *Server) requestLogger(c fiber.Ctx) error {
+func (s *Server) requestLogger(c *gin.Context) {
 	start := time.Now()
-	err := c.Next()
-	p := c.Path()
+	c.Next()
+	p := c.Request.URL.Path
 	if strings.HasPrefix(p, "/api/") || strings.HasPrefix(p, "/images/") {
-		// The error handler sets the final status after this middleware returns,
-		// so derive it from the error to log the real response code.
-		status := c.Response().StatusCode()
-		if err != nil {
-			status = fiber.StatusInternalServerError
-			var fe *fiber.Error
-			if errors.As(err, &fe) {
-				status = fe.Code
-			}
-		}
-		slog.InfoContext(c.Context(), "http request",
-			"method", c.Method(),
+		slog.InfoContext(c.Request.Context(), "http request",
+			"method", c.Request.Method,
 			"path", p,
-			"status", status,
+			"status", c.Writer.Status(),
 			"duration_ms", time.Since(start).Milliseconds(),
-			"ip", c.IP(),
+			"ip", clientIP(c),
 		)
 	}
-	return err
 }
 
-// errorHandler renders errors (and recovered panics) as JSON `{ "error": ... }`,
-// matching the frontend's contract.
-func errorHandler(c fiber.Ctx, err error) error {
-	code := fiber.StatusInternalServerError
-	msg := "internal server error"
-	var fe *fiber.Error
-	if errors.As(err, &fe) {
-		code = fe.Code
-		msg = fe.Message
-	}
-	if code >= 500 {
-		slog.ErrorContext(c.Context(), "request error",
-			"method", c.Method(), "path", c.Path(), "status", code, "error", err.Error())
-	}
-	return c.Status(code).JSON(fiber.Map{"error": msg})
+// recoverJSON turns a panic into the same JSON 500 as any other server error.
+func recoverJSON(c *gin.Context) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			slog.ErrorContext(c.Request.Context(), "panic",
+				"method", c.Request.Method, "path", c.Request.URL.Path, "error", rec)
+			writeError(c, fail(http.StatusInternalServerError, "internal server error"))
+		}
+	}()
+	c.Next()
 }
 
 // setSessionCookie writes the session cookie.
-func setSessionCookie(c fiber.Ctx, token string, expires time.Time) {
-	c.Cookie(&fiber.Cookie{
-		Name:     auth.CookieName,
-		Value:    token,
-		Path:     "/",
-		Expires:  expires,
-		HTTPOnly: true,
-		Secure:   c.Secure(),
-		SameSite: fiber.CookieSameSiteLaxMode,
-	})
+func setSessionCookie(c *gin.Context, token string, expires time.Time) {
+	maxAge := int(time.Until(expires).Seconds())
+	if maxAge < 0 {
+		maxAge = 0
+	}
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(auth.CookieName, token, maxAge, "/", "", c.Request.TLS != nil, true)
 }
 
 // clearSessionCookie expires the session cookie (logout).
-func clearSessionCookie(c fiber.Ctx) {
-	c.Cookie(&fiber.Cookie{
-		Name:     auth.CookieName,
-		Value:    "",
-		Path:     "/",
-		Expires:  time.Now().Add(-time.Hour),
-		HTTPOnly: true,
-		Secure:   c.Secure(),
-		SameSite: fiber.CookieSameSiteLaxMode,
-	})
+func clearSessionCookie(c *gin.Context) {
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(auth.CookieName, "", -1, "/", "", c.Request.TLS != nil, true)
 }
