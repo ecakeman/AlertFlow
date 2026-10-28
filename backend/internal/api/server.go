@@ -137,7 +137,9 @@ func (s *Server) newEngine() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
 	_ = engine.SetTrustedProxies(nil)
-	engine.HandleMethodNotAllowed = true
+	// A known path with the wrong method must reach NoRoute, same as Fiber.
+	// /internal/ checks the agent token before it chooses 405 or 404.
+	engine.HandleMethodNotAllowed = false
 	// Keep Fiber's behaviour: an unmatched path is 404 JSON or the SPA, not a redirect.
 	engine.RedirectTrailingSlash = false
 	engine.RedirectFixedPath = false
@@ -229,11 +231,8 @@ func (s *Server) routes() {
 	// so a missing cookie renders as a 401 body instead of a redirect).
 	app.GET("/images/:file", adapt(s.handleServeImage))
 
-	// SPA fallback — must be registered last. A known path with the wrong method
-	// is JSON 405 and never falls through to the SPA.
-	app.NoMethod(adapt(func(c *gin.Context) error {
-		return fail(http.StatusMethodNotAllowed, "method not allowed")
-	}))
+	// SPA fallback — must be registered last. Wrong methods land here too, so
+	// /api and /webhooks stay JSON 404 and /internal/ still checks the token.
 	app.NoRoute(adapt(s.serveSPA))
 }
 

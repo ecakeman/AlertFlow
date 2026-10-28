@@ -57,6 +57,51 @@ func TestAgentRoutesReadWithoutSession(t *testing.T) {
 	}
 }
 
+func TestWrongMethodKeepsTheOldFallback(t *testing.T) {
+	app := agentApp(t, "agent-secret")
+
+	status, body := requestAgent(t, app, http.MethodDelete, "/api/services", "")
+	if status != http.StatusNotFound || strings.Contains(body, "<html") {
+		t.Fatalf("api wrong method = %d %s", status, body)
+	}
+	status, body = requestAgent(t, app, http.MethodGet, "/webhooks/agent", "")
+	if status != http.StatusNotFound || strings.Contains(body, "<html") {
+		t.Fatalf("webhook wrong method = %d %s", status, body)
+	}
+
+	status, body = postAgent(t, app, "/internal/agent/v1/incidents", "")
+	if status != http.StatusUnauthorized || strings.Contains(body, "<html") {
+		t.Fatalf("internal wrong method without token = %d %s", status, body)
+	}
+	status, body = postAgent(t, app, "/internal/agent/v1/incidents", "Bearer wrong")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("internal wrong method with bad token = %d %s", status, body)
+	}
+	status, body = postAgent(t, app, "/internal/agent/v1/missing", "Bearer agent-secret")
+	if status != http.StatusMethodNotAllowed {
+		t.Fatalf("internal unknown post = %d %s", status, body)
+	}
+
+	unconfigured := agentApp(t, "")
+	status, body = postAgent(t, unconfigured, "/internal/agent/v1/incidents", "")
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("internal wrong method with empty token = %d %s", status, body)
+	}
+}
+
+func requestAgent(t *testing.T, app *gin.Engine, method, path, auth string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(method, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+	rec := serve(app, req)
+	return rec.Code, rec.Body.String()
+}
+
 func agentApp(t *testing.T, token string) *gin.Engine {
 	t.Helper()
 	database := db.OpenTest(t)
