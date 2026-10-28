@@ -159,6 +159,7 @@ func (p *Publisher) publishOne(ctx context.Context, row db.OutboxEvent) error {
 		SchemaVersion int    `json:"schema_version"`
 		ServiceID     string `json:"service_id"`
 		OccurredAt    int64  `json:"occurred_at"`
+		Epoch         *int64 `json:"epoch"`
 	}
 	if err := json.Unmarshal(row.Payload, &body); err != nil {
 		return p.fail(row, err)
@@ -169,7 +170,7 @@ func (p *Publisher) publishOne(ctx context.Context, row db.OutboxEvent) error {
 	if body.EventType != event.TypeCheckCompleted {
 		return p.fail(row, fmt.Errorf("unsupported event %s", body.EventType))
 	}
-	retired, err := p.DB.ServiceRetired(body.ServiceID, body.OccurredAt)
+	retired, err := p.DB.ServiceRetired(body.ServiceID, body.OccurredAt, body.Epoch)
 	if err != nil {
 		return p.fail(row, err)
 	}

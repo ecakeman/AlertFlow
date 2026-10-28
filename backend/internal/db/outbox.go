@@ -57,6 +57,11 @@ func (db *DB) RecordCheckAndOutboxPresent(ev event.CheckCompleted, present func(
 	if present != nil && !present() {
 		return 0, ErrServiceGone
 	}
+	epoch, err := ensureServiceEpoch(tx, ev.ServiceID)
+	if err != nil {
+		return 0, err
+	}
+	ev.Epoch = &epoch
 
 	attempts := ev.Attempts
 	if attempts < 1 {
@@ -101,19 +106,81 @@ func (db *DB) RecordCheckAndOutboxPresent(ev event.CheckCompleted, present func(
 	return checkID, nil
 }
 
-// ServiceRetired reports whether an event at occurredAt belongs to a service
-// that was already deleted. A later check, after the service is added again,
-// has a newer timestamp and is not retired.
-func (db *DB) ServiceRetired(serviceID string, occurredAt int64) (bool, error) {
-	var retiredAt int64
-	err := db.QueryRow(`SELECT retired_at FROM retired_services WHERE service_id = $1`, serviceID).Scan(&retiredAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
+// ServiceRetired reports whether this event belongs to a service life that was
+// already deleted. An event that carries an epoch is retired when that epoch
+// is not newer than the stored one. An older payload, with no epoch, is retired
+// when its occurred_at is not newer than retired_at.
+func (db *DB) ServiceRetired(serviceID string, occurredAt int64, epoch *int64) (bool, error) {
+	retiredAt, retiredEpoch, ok, err := retiredMark(db, serviceID)
+	if err != nil || !ok {
 		return false, err
 	}
-	return occurredAt <= retiredAt, nil
+	return eventIsRetired(occurredAt, epoch, retiredAt, retiredEpoch), nil
+}
+
+func retiredMark(q interface {
+	QueryRow(string, ...any) *sql.Row
+}, serviceID string) (int64, int64, bool, error) {
+	var retiredAt, epoch int64
+	err := q.QueryRow(`SELECT retired_at, epoch FROM retired_services WHERE service_id = $1`, serviceID).Scan(&retiredAt, &epoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, false, nil
+	}
+	if err != nil {
+		return 0, 0, false, err
+	}
+	return retiredAt, epoch, true, nil
+}
+
+func eventIsRetired(occurredAt int64, epoch *int64, retiredAt, retiredEpoch int64) bool {
+	if epoch != nil {
+		return *epoch <= retiredEpoch
+	}
+	return occurredAt <= retiredAt
+}
+
+// epochAtDelete is the life being removed. A missing live row uses the retired
+// epoch, or 0 when the service was never recorded.
+func epochAtDelete(tx *sql.Tx, serviceID string) (int64, error) {
+	var epoch int64
+	err := tx.QueryRow(`SELECT epoch FROM service_epochs WHERE service_id = $1`, serviceID).Scan(&epoch)
+	if err == nil {
+		return epoch, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	err = tx.QueryRow(`SELECT epoch FROM retired_services WHERE service_id = $1`, serviceID).Scan(&epoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return epoch, err
+}
+
+// ensureServiceEpoch returns the life a new check belongs to, creating the row
+// when this is the first check after a delete.
+func ensureServiceEpoch(tx *sql.Tx, serviceID string) (int64, error) {
+	var epoch int64
+	err := tx.QueryRow(`SELECT epoch FROM service_epochs WHERE service_id = $1`, serviceID).Scan(&epoch)
+	if err == nil {
+		return epoch, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	var retired sql.NullInt64
+	err = tx.QueryRow(`SELECT epoch FROM retired_services WHERE service_id = $1`, serviceID).Scan(&retired)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	epoch = 0
+	if retired.Valid {
+		epoch = retired.Int64 + 1
+	}
+	if _, err := tx.Exec(`INSERT INTO service_epochs (service_id, epoch) VALUES ($1, $2)`, serviceID, epoch); err != nil {
+		return 0, err
+	}
+	return epoch, nil
 }
 
 // ForgetLeasedOutbox deletes a claimed row that must not be published.

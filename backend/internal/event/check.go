@@ -22,15 +22,18 @@ type CheckCompleted struct {
 	EventType     string `json:"event_type"`
 	SchemaVersion int    `json:"schema_version"`
 	OccurredAt    int64  `json:"occurred_at"`
-	ServiceID     string `json:"service_id"`
-	ServiceName   string `json:"service_name"`
-	ServiceURL    string `json:"service_url"`
-	CheckID       int64  `json:"check_id"`
-	Status        string `json:"status"`
-	LatencyMs     *int   `json:"latency_ms"`
-	StatusCode    *int   `json:"status_code"`
-	Error         string `json:"error"`
-	Attempts      int    `json:"attempts"`
+	// Epoch is the service life this check belongs to. Nil means the payload
+	// was written before epochs existed; a pointer to 0 is the first life.
+	Epoch       *int64 `json:"epoch,omitempty"`
+	ServiceID   string `json:"service_id"`
+	ServiceName string `json:"service_name"`
+	ServiceURL  string `json:"service_url"`
+	CheckID     int64  `json:"check_id"`
+	Status      string `json:"status"`
+	LatencyMs   *int   `json:"latency_ms"`
+	StatusCode  *int   `json:"status_code"`
+	Error       string `json:"error"`
+	Attempts    int    `json:"attempts"`
 }
 
 // NewCheckCompleted builds a version-1 event. CheckID is filled after the

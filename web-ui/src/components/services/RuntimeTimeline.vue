@@ -25,6 +25,7 @@ const sourceOptions = [
 
 const windowId = ref<(typeof windows)[number]['id']>('24h')
 const source = ref('')
+const range = ref<{ from: string; to: string } | null>(null)
 const page = ref<TimelinePage | null>(null)
 const events = ref<TimelineEvent[]>([])
 const loading = ref(false)
@@ -39,7 +40,10 @@ const notices = computed(() => {
   if (!coverage) return []
   return Object.entries(coverage).flatMap(([name, item]) => {
     if (item.status === 'ok' || item.status === 'empty') return []
-    if (item.status === 'disabled') return [`${sourceLabel(name)}未配置`]
+    if (item.status === 'disabled') {
+      if (item.lastError) return [`${sourceLabel(name)}：${item.lastError}`]
+      return [`${sourceLabel(name)}未配置`]
+    }
     const extra = item.lastError ? `，${item.lastError}` : ''
     return [`${sourceLabel(name)}：${item.status}${extra}`]
   })
@@ -86,12 +90,16 @@ async function load(cursor?: string) {
   else loading.value = true
   error.value = ''
   const selected = windows.find((item) => item.id === windowId.value) ?? windows[1]
-  const to = new Date()
-  const from = new Date(to.getTime() - selected.ms)
+  if (!cursor || !range.value) {
+    const to = new Date()
+    const from = new Date(to.getTime() - selected.ms)
+    range.value = { from: from.toISOString(), to: to.toISOString() }
+  }
+  const { from, to } = range.value
   try {
     const res = await api.serviceTimeline(props.serviceId, {
-      from: from.toISOString(),
-      to: to.toISOString(),
+      from,
+      to,
       sources: source.value || undefined,
       cursor,
       limit: 50,

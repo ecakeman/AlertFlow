@@ -306,7 +306,7 @@ history exists.
 }
 ```
 
-`coverage.status` is the stored collector status, or `disabled` when that source is not configured and has no row, or `empty` when it is configured but has not reported yet. The response does not include the collector cursor.
+`coverage.status` is the stored collector status, or `disabled` when that source is not configured and has no row, or `empty` when it is configured but has not reported yet. A `disabled` row can still carry `lastError`, such as `collection disabled` or `mapping removed`. `title` and `summary` are at most 1024 characters. The response does not include the collector cursor.
 
 ## Check object
 

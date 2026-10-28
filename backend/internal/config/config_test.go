@@ -289,6 +289,17 @@ func TestKubernetesMappingValidation(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	other := cfg.Services[0]
+	other.ID = "other"
+	other.Kubernetes.WorkloadName = "worker"
+	cfg.Services = append(cfg.Services, other)
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Services[1].Kubernetes.WorkloadName = "api"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("duplicate kubernetes mapping was accepted")
+	}
 }
 
 func equalInts(a, b []int) bool {

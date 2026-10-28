@@ -12,37 +12,37 @@ const KubernetesSource = "kubernetes"
 
 // KubernetesObject is one Pod or Deployment observation.
 type KubernetesObject struct {
-	ServiceID        string
-	ClusterID        string
-	Namespace        string
-	Kind             string
-	Name             string
-	UID              string
-	Fingerprint      string
-	Snapshot         json.RawMessage
-	ResourceVersion  string
-	Active           bool
-	Live             bool
-	ObservedAt       int64
-	Severity         string
-	Summary          string
+	ServiceID       string
+	ClusterID       string
+	Namespace       string
+	Kind            string
+	Name            string
+	UID             string
+	Fingerprint     string
+	Snapshot        json.RawMessage
+	ResourceVersion string
+	Active          bool
+	Live            bool
+	ObservedAt      int64
+	Severity        string
+	Summary         string
 }
 
 // KubernetesNotice is one Warning or selected Normal event.
 type KubernetesNotice struct {
-	ServiceID   string
-	ClusterID   string
-	Namespace   string
-	Kind        string
-	Name        string
-	UID         string
-	EventUID    string
-	Count       int32
-	EventType   string
-	Severity    string
-	Title       string
-	Summary     string
-	ObservedAt  int64
+	ServiceID  string
+	ClusterID  string
+	Namespace  string
+	Kind       string
+	Name       string
+	UID        string
+	EventUID   string
+	Count      int32
+	EventType  string
+	Severity   string
+	Title      string
+	Summary    string
+	ObservedAt int64
 }
 
 // ApplyKubernetesObject stores the snapshot and, when the semantic fingerprint
@@ -192,6 +192,16 @@ func (db *DB) SetKubernetesSource(serviceID, status, errText string, present fun
 // Objects stop being active, and the source becomes disabled. Timeline rows stay.
 // This is not an object deletion.
 func (db *DB) ReleaseKubernetesMapping(serviceID, clusterID, namespace string, present func() bool) error {
+	return db.stopKubernetesObservation(serviceID, clusterID, namespace, "mapping removed", present)
+}
+
+// DisableKubernetesCollection closes observation while the mapping remains.
+// Objects stop being active and the source becomes disabled. Timeline rows stay.
+func (db *DB) DisableKubernetesCollection(serviceID, clusterID, namespace string, present func() bool) error {
+	return db.stopKubernetesObservation(serviceID, clusterID, namespace, "collection disabled", present)
+}
+
+func (db *DB) stopKubernetesObservation(serviceID, clusterID, namespace, reason string, present func() bool) error {
 	if serviceID == "" {
 		return fmt.Errorf("kubernetes mapping is missing a service")
 	}
@@ -218,13 +228,13 @@ func (db *DB) ReleaseKubernetesMapping(serviceID, clusterID, namespace string, p
 		`INSERT INTO runtime_source_state (
 			service_id, source, enabled, status, last_attempt_at, last_success_at,
 			last_error_safe, cursor, updated_at
-		 ) VALUES ($1, $2, FALSE, 'disabled', $3, NULL, 'mapping removed', '{}', $3)
+		 ) VALUES ($1, $2, FALSE, 'disabled', $3, NULL, $4, '{}', $3)
 		 ON CONFLICT (service_id, source) DO UPDATE SET
 			enabled = FALSE,
 			status = 'disabled',
-			last_error_safe = 'mapping removed',
+			last_error_safe = EXCLUDED.last_error_safe,
 			updated_at = EXCLUDED.updated_at`,
-		serviceID, KubernetesSource, now,
+		serviceID, KubernetesSource, now, reason,
 	); err != nil {
 		return err
 	}

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -175,6 +176,68 @@ func TestServiceTimelineClampsToRetention(t *testing.T) {
 	}
 	if page.Coverage["kubernetes"].Status != "disabled" {
 		t.Fatalf("coverage = %+v", page.Coverage)
+	}
+}
+
+func TestServiceTimelineClipsStoredText(t *testing.T) {
+	database := db.OpenTest(t)
+	dir := t.TempDir()
+	cfg := &config.Config{Services: []config.Service{{ID: "svc", Name: "API", URL: "https://example.com"}}}
+	if err := config.Save(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{configDir: dir, cfg: loaded, database: database}
+	attachQuery(s)
+	app := s.newEngine()
+	token := "session-token-long"
+	user, err := database.CreateUser("admin", "hash", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	if err := database.CreateSession(token, user.ID, now, now+3600); err != nil {
+		t.Fatal(err)
+	}
+	long := strings.Repeat("长", 1100)
+	if _, err := database.Exec(
+		`INSERT INTO runtime_events (
+			event_key, service_id, source, event_type, severity, title, summary, occurred_at, observed_at, recorded_at, details
+		 ) VALUES ('long', 'svc', 'incident', 'incident.opened', 'error', $1, $1, $2, $2, $2, '{}')`,
+		long, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var stored string
+	if err := database.QueryRow(`SELECT summary FROM runtime_events WHERE event_key = 'long'`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if len([]rune(stored)) != 1100 {
+		t.Fatalf("stored runes = %d", len([]rune(stored)))
+	}
+	from := time.Unix(now-60, 0).UTC().Format(time.RFC3339)
+	to := time.Unix(now+60, 0).UTC().Format(time.RFC3339)
+	status, body := integrationRequest(t, app, http.MethodGet, "/api/services/svc/timeline?from="+url.QueryEscape(from)+"&to="+url.QueryEscape(to), token, "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d %s", status, body)
+	}
+	var page struct {
+		Events []struct {
+			Title   string `json:"title"`
+			Summary string `json:"summary"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal([]byte(body), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Events) != 1 || len([]rune(page.Events[0].Summary)) != 1024 || len([]rune(page.Events[0].Title)) != 1024 {
+		t.Fatalf("events = %+v", page.Events)
+	}
+	if strings.Contains(body, strings.Repeat("长", 1025)) {
+		t.Fatal("response kept the tail")
 	}
 }
 

@@ -180,7 +180,7 @@ func readyPod(name, uid, rsUID string) *corev1.Pod {
 			OwnerReferences: []metav1.OwnerReference{{Kind: "ReplicaSet", Name: "rs", UID: types.UID(rsUID)}},
 		},
 		Status: corev1.PodStatus{
-			Phase: corev1.PodRunning,
+			Phase:      corev1.PodRunning,
 			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
 			ContainerStatuses: []corev1.ContainerStatus{{
 				Name: "app", RestartCount: 1, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
@@ -289,6 +289,58 @@ func TestRemovingTheMappingKeepsTimeline(t *testing.T) {
 	}
 	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'kubernetes.deployment.inactive'`); n != 0 {
 		t.Fatalf("unmapping wrote an inactive event: %d", n)
+	}
+	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'kubernetes.deployment.first_seen'`); n != 1 {
+		t.Fatalf("timeline = %d", n)
+	}
+}
+
+func TestDisabledCollectionClosesTheSource(t *testing.T) {
+	replicas := int32(1)
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "lab", UID: types.UID("deploy-1"), ResourceVersion: "1"},
+		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+	}
+	client := fake.NewClientset(deploy)
+	database := db.OpenTest(t)
+	obs := New(database, func(string) bool { return true })
+	obs.client = client
+	obs.Sync([]config.Service{mapped()})
+	t.Cleanup(obs.Close)
+	waitSynced(t, obs, "lab")
+	waitRows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'kubernetes.deployment.first_seen'`, 1)
+
+	obs.client = nil
+	obs.connErr = nil
+	obs.Sync([]config.Service{mapped()})
+	waitSource(t, database, "disabled")
+	var active bool
+	var reason string
+	if err := database.QueryRow(`SELECT active FROM runtime_object_states WHERE resource_uid = 'deploy-1'`).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active {
+		t.Fatal("object stayed active after collection was disabled")
+	}
+	if err := database.QueryRow(`SELECT last_error_safe FROM runtime_source_state WHERE source = 'kubernetes'`).Scan(&reason); err != nil {
+		t.Fatal(err)
+	}
+	if reason != "collection disabled" {
+		t.Fatalf("reason = %q", reason)
+	}
+	if _, err := database.Exec(`UPDATE runtime_source_state SET updated_at = 1 WHERE source = 'kubernetes'`); err != nil {
+		t.Fatal(err)
+	}
+	obs.Sync([]config.Service{mapped()})
+	var updated int64
+	if err := database.QueryRow(`SELECT updated_at FROM runtime_source_state WHERE source = 'kubernetes'`).Scan(&updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated != 1 {
+		t.Fatalf("unchanged config rewrote the source at %d", updated)
+	}
+	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'kubernetes.deployment.inactive'`); n != 0 {
+		t.Fatalf("disabling wrote an inactive event: %d", n)
 	}
 	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'kubernetes.deployment.first_seen'`); n != 1 {
 		t.Fatalf("timeline = %d", n)

@@ -208,10 +208,21 @@ func (db *DB) DeleteServiceRecords(serviceID string) error {
 	if err := lockService(tx, serviceID); err != nil {
 		return err
 	}
+	epoch, err := epochAtDelete(tx, serviceID)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.Exec(
-		`INSERT INTO retired_services (service_id, retired_at) VALUES ($1, $2)
-		 ON CONFLICT (service_id) DO UPDATE SET retired_at = EXCLUDED.retired_at`,
-		serviceID, time.Now().Unix(),
+		`INSERT INTO retired_services (service_id, retired_at, epoch) VALUES ($1, $2, $3)
+		 ON CONFLICT (service_id) DO UPDATE SET retired_at = EXCLUDED.retired_at, epoch = EXCLUDED.epoch`,
+		serviceID, time.Now().Unix(), epoch,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO service_epochs (service_id, epoch) VALUES ($1, $2)
+		 ON CONFLICT (service_id) DO UPDATE SET epoch = EXCLUDED.epoch`,
+		serviceID, epoch+1,
 	); err != nil {
 		return err
 	}

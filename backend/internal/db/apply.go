@@ -75,7 +75,7 @@ func applyCheckEventTx(tx *sql.Tx, ev event.CheckCompleted) error {
 	if err := lockService(tx, ev.ServiceID); err != nil {
 		return err
 	}
-	retired, err := serviceRetiredTx(tx, ev.ServiceID, ev.OccurredAt)
+	retired, err := serviceRetiredTx(tx, ev.ServiceID, ev.OccurredAt, ev.Epoch)
 	if err != nil {
 		return err
 	}
@@ -206,16 +206,12 @@ func applyCheckEventTx(tx *sql.Tx, ev event.CheckCompleted) error {
 	return err
 }
 
-func serviceRetiredTx(tx *sql.Tx, serviceID string, occurredAt int64) (bool, error) {
-	var retiredAt int64
-	err := tx.QueryRow(`SELECT retired_at FROM retired_services WHERE service_id = $1`, serviceID).Scan(&retiredAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
+func serviceRetiredTx(tx *sql.Tx, serviceID string, occurredAt int64, epoch *int64) (bool, error) {
+	retiredAt, retiredEpoch, ok, err := retiredMark(tx, serviceID)
+	if err != nil || !ok {
 		return false, err
 	}
-	return occurredAt <= retiredAt, nil
+	return eventIsRetired(occurredAt, epoch, retiredAt, retiredEpoch), nil
 }
 
 // rememberProcessed records the event and writes nothing else. A redelivery

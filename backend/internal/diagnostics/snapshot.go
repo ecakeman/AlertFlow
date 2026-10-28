@@ -125,12 +125,20 @@ func parseItem(raw []byte, eventTime time.Time) (Item, bool) {
 		name = name[:200]
 	}
 	item := Item{
-		Kind: in.Kind, Name: name, Status: in.Status, Summary: in.Summary, ObservedAt: observed.UTC(),
+		Kind: in.Kind, Name: name, Status: in.Status, Summary: clipRunes(in.Summary, 1024), ObservedAt: observed.UTC(),
 	}
 	if !eventTime.IsZero() && eventTime.Sub(observed) > 5*time.Minute {
 		item.Stale = true
 	}
 	return item, true
+}
+
+func clipRunes(text string, limit int) string {
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit])
 }
 
 func toString(value any) string {

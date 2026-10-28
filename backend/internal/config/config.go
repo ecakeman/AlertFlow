@@ -320,6 +320,18 @@ func (c *Config) Validate() error {
 		}
 		seen[id] = true
 	}
+	workloads := make(map[string]string)
+	for _, svc := range c.Services {
+		k := svc.Kubernetes
+		if k.ClusterID == "" || k.Namespace == "" || k.WorkloadName == "" {
+			continue
+		}
+		key := k.ClusterID + "\x00" + k.Namespace + "\x00" + k.WorkloadName
+		if other, ok := workloads[key]; ok {
+			return fmt.Errorf("services %q and %q map the same kubernetes workload %s/%s", other, svc.ID, k.Namespace, k.WorkloadName)
+		}
+		workloads[key] = svc.ID
+	}
 	return nil
 }
 

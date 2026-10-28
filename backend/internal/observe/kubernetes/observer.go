@@ -69,6 +69,8 @@ type Observer struct {
 	groups    map[string]*group
 	// syncTimeout bounds one cache-sync attempt. Zero uses cacheSyncTimeout.
 	syncTimeout time.Duration
+	// collectionOff remembers that a disabled collector already closed its sources.
+	collectionOff bool
 }
 
 func New(database *db.DB, present func(string) bool) *Observer {
@@ -111,8 +113,22 @@ func (o *Observer) Sync(services []config.Service) {
 	defer o.lifecycle.Unlock()
 	next := targetsOf(services)
 	if o.client == nil && o.connErr == nil {
+		o.mu.Lock()
+		prev := append([]target(nil), o.targets...)
+		unchanged := o.collectionOff && sameTargets(o.targets, next)
+		o.targets = next
+		o.mu.Unlock()
+		if unchanged {
+			return
+		}
+		o.collectionOff = true
+		for _, item := range next {
+			_ = o.db.DisableKubernetesCollection(item.ServiceID, item.ClusterID, item.Namespace, o.allow(item.ServiceID))
+		}
+		o.releaseTargets(removedTargets(prev, next))
 		return
 	}
+	o.collectionOff = false
 	o.mu.Lock()
 	prev := append([]target(nil), o.targets...)
 	changed := !sameTargets(o.targets, next)

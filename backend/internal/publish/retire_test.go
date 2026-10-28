@@ -2,6 +2,7 @@ package publish
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -86,6 +87,83 @@ func TestPublishCanSendOnceAfterTheRetirementCheck(t *testing.T) {
 		t.Fatalf("processed = %d, %v", n, err)
 	}
 }
+
+func TestSameSecondReaddPublishesTheNewLife(t *testing.T) {
+	database := db.OpenTest(t)
+	ts := time.Now().Unix()
+	old, err := event.NewCheckCompleted("svc", "API", "https://old.example", ts, db.StatusOffline, nil, nil, "down", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.RecordCheckAndOutbox(old); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := database.ClaimOutbox("pub", ts, ts+30, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim old = %v, %v", claimed, err)
+	}
+	if err := database.DeleteServiceRecords("svc"); err != nil {
+		t.Fatal(err)
+	}
+	next, err := event.NewCheckCompleted("svc", "API", "https://new.example", ts, db.StatusOffline, nil, nil, "down", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.RecordCheckAndOutbox(next); err != nil {
+		t.Fatal(err)
+	}
+	again, err := database.ClaimOutbox("pub", ts, ts+30, 1)
+	if err != nil || len(again) != 1 {
+		t.Fatalf("claim new = %v, %v", again, err)
+	}
+	sent := 0
+	p := &Publisher{DB: database, Owner: "pub", writer: countWriter{n: &sent}}
+	if err := p.publishOne(context.Background(), again[0]); err != nil {
+		t.Fatal(err)
+	}
+	if sent != 1 {
+		t.Fatalf("kafka sends = %d", sent)
+	}
+	var fresh event.CheckCompleted
+	if err := json.Unmarshal(again[0].Payload, &fresh); err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Epoch == nil || *fresh.Epoch != 1 {
+		t.Fatalf("epoch = %v", fresh.Epoch)
+	}
+	if err := database.ApplyCheckEvent(fresh); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM incidents`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("incidents = %d, %v", n, err)
+	}
+	var previous event.CheckCompleted
+	if err := json.Unmarshal(claimed[0].Payload, &previous); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.ApplyCheckEvent(previous); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM incidents`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("incidents after the old event = %d, %v", n, err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM service_runtime_state`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("runtime = %d, %v", n, err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM processed_events`).Scan(&n); err != nil || n != 2 {
+		t.Fatalf("processed = %d, %v", n, err)
+	}
+}
+
+type countWriter struct{ n *int }
+
+func (w countWriter) WriteMessages(context.Context, ...kafka.Message) error {
+	*w.n++
+	return nil
+}
+
+func (countWriter) Close() error { return nil }
 
 type lateWriter struct {
 	send func() error

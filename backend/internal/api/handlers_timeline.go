@@ -15,7 +15,10 @@ import (
 	"github.com/ecakeman/alertflow/internal/query"
 )
 
-const timelineDetailsLimit = 4096
+const (
+	timelineDetailsLimit = 4096
+	timelineTextLimit    = 1024
+)
 
 type timelineResourceDTO struct {
 	ClusterID string `json:"clusterId,omitempty"`
@@ -166,7 +169,8 @@ func timelineRequest(c *gin.Context) (query.TimelineRequest, error) {
 func toTimelineEventDTO(ev db.RuntimeEvent) timelineEventDTO {
 	dto := timelineEventDTO{
 		ID: ev.ID, EventKey: ev.EventKey, ServiceID: ev.ServiceID, Source: ev.Source,
-		EventType: ev.EventType, Severity: ev.Severity, Title: ev.Title, Summary: ev.Summary,
+		EventType: ev.EventType, Severity: ev.Severity,
+		Title: clipRunes(ev.Title, timelineTextLimit), Summary: clipRunes(ev.Summary, timelineTextLimit),
 		OccurredAt: iso(ev.OccurredAt), ObservedAt: iso(ev.ObservedAt), RecordedAt: iso(ev.RecordedAt),
 		Details: capDetails(ev.Details),
 	}
@@ -182,6 +186,14 @@ func toTimelineEventDTO(ev db.RuntimeEvent) timelineEventDTO {
 		dto.Resource = &res
 	}
 	return dto
+}
+
+func clipRunes(text string, limit int) string {
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit])
 }
 
 func capDetails(raw json.RawMessage) json.RawMessage {
