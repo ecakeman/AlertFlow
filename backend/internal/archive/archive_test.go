@@ -192,7 +192,7 @@ func TestRoundTripPreservesRetryAndWarningSettings(t *testing.T) {
 
 func TestImportReplacesIntegrationsThatHavePendingDeliveries(t *testing.T) {
 	dir, database := seed(t)
-	channel, err := database.CreateIntegration("webhook", "old", true, false, []byte(`{"url":"http://example.invalid/old"}`))
+	channel, err := database.CreateIntegration(db.AgentWebhookType, "old", true, false, []byte(`{"url":"http://example.invalid/old"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,6 +227,17 @@ func TestImportReplacesIntegrationsThatHavePendingDeliveries(t *testing.T) {
 	}
 	if err := database.QueryRow(`SELECT COUNT(*) FROM notification_deliveries`).Scan(&pending); err != nil || pending != 0 {
 		t.Fatalf("deliveries after import = %d, %v", pending, err)
+	}
+	back, err := event.NewCheckCompleted("svc", "Name", "https://example.com/health", 2000, db.StatusOnline, nil, nil, "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back.CheckID = 2
+	if err := database.ApplyCheckEvent(back); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM notification_deliveries`).Scan(&pending); err != nil || pending != 0 {
+		t.Fatalf("imported webhook was queued: %d, %v", pending, err)
 	}
 	next, err := database.CreateIntegration("webhook", "after", true, false, []byte(`{"url":"http://example.invalid/after"}`))
 	if err != nil {

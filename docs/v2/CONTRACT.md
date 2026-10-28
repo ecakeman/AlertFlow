@@ -26,13 +26,13 @@ Phase 0 验收通过后才能改核心代码。一次只做一个阶段。
 
 审计对象是上面的基线提交，不是目标架构。
 
-- 角色只有 `server`、`publisher`、`consumer`、`delivery`（`backend/cmd/alertflow/main.go`）。`api.New` 会 `sched.Sync` 并启动周期调度（`backend/internal/api/server.go`）。
-- HTTP 是 Gin v1.10.1。模块声明 Go 1.25.7。没有 gRPC，没有 client-go。Redis 只是可降级读缓存。
-- Goose 迁移嵌入二进制，在 `db.Open` 时自动执行，并有 advisory lock。已有 `00001`–`00011`。下一号是 `00012`。`00011` 已删除 `external_alerts`。不要改已应用的迁移。
-- `integrations.type` 允许 `telegram`、`slack`、`email`、`webhook`、`agent_webhook`（`00010`）。
-- `notification_deliveries.status` 只允许 `pending`、`running`、`retry_wait`、`succeeded`、`dead`（`00003`）。没有 `cancelled`。
-- `insertDeliveriesTx` 给每一个启用的集成插入任务（`backend/internal/db/apply.go`）。`ClaimDeliveries` 领取启用集成上到期的 `pending`、`retry_wait` 和过期 `running`（`backend/internal/db/delivery.go`）。
-- 前端 `IntegrationType` 只有四种外发渠道。`agent_webhook` 靠 API 创建，或把已有 webhook 就地改类型（`backend/internal/db/integrations.go`）。
+- 角色有 `server`、`publisher`、`consumer`、`delivery`，以及一次性的 `retire-deliveries`（`backend/cmd/alertflow/main.go`）。`api.New` 会 `sched.Sync` 并启动周期调度（`backend/internal/api/server.go`）。`retire-deliveries` 不在启动时运行。
+- HTTP 是 Gin v1.10.1。`HandleMethodNotAllowed` 为 false，错误方法进入 `serveSPA`。模块声明 Go 1.25.7。没有 gRPC，没有 client-go。Redis 只是可降级读缓存。
+- Goose 迁移嵌入二进制，在 `db.Open` 时自动执行，并有 advisory lock。已有 `00001`–`00012`。下一号是 `00013`。`00011` 已删除 `external_alerts`。`00012` 只增加 `cancelled` 和 `retired_delivery_audits`。不要改已应用的迁移。
+- `integrations.type` 仍允许 `telegram`、`slack`、`email`、`webhook`、`agent_webhook`（`00010`）。创建、更新和测试只接受 `agent_webhook`。
+- `notification_deliveries.status` 允许 `pending`、`running`、`retry_wait`、`succeeded`、`dead`、`cancelled`（`00012`）。
+- `insertDeliveriesTx` 只给启用的 `agent_webhook` 插入任务（`backend/internal/db/apply.go`）。`ClaimDeliveries` 只领取这种渠道，也不再把退役渠道扫成 `dead`（`backend/internal/db/delivery.go`）。
+- 前端集成表单只创建 `agent_webhook`。历史四种渠道仍可列出和删除。
 - 手动创建和更新 Incident 直接写库，不经过 Kafka，也不建投递任务（`backend/internal/api/handlers_incidents.go`）。
 - `CheckNow` 在没有常驻 worker 时会造一个临时 worker 做一次性检查（`backend/internal/monitor/scheduler.go`）。
 - Agent 任务今天经 `agent_webhook` 发到 Agent 的 webhook。结果经 `POST /webhooks/agent` 回来。Agent 只读查询走 `/internal/agent/v1/...`。Agent 自己的回调出站表是 `agent_callback_outbox`（`agent/schema.sql`），靠 `message_id` 唯一。
@@ -104,7 +104,7 @@ Phase 1.5 停用 `telegram`、`slack`、`email`、`webhook`。`agent_webhook` �
 3. 确认没有旧 Worker 之后，把这些渠道上的 `pending` 和 `retry_wait` 标成 `cancelled`。
 4. `running` 只有在能证明没有旧 Worker 还会发出请求时才标成 `cancelled`。证明不了就写入审计表，行保持 `running`。
 
-`cancelled` 不能伪装成 `dead` 或 `succeeded`。`00012` 只增加 `cancelled` 和审计表。Goose 会在每次 `db.Open` 时自动迁移，所以 `Up` 里不批量修改已有行。批量取消是排空之后的一次性步骤。历史 `integrations` 行保留，不 DROP。
+`cancelled` 不能伪装成 `dead` 或 `succeeded`。`00012` 只增加 `cancelled` 和 `retired_delivery_audits`。Goose 会在每次 `db.Open` 时自动迁移，所以 `Up` 里不批量修改已有行。排空旧 Worker 之后，用 `ALERTFLOW_ROLE=retire-deliveries` 跑一次：它把这四种渠道上的 `pending` 和 `retry_wait` 标成 `cancelled`，`running` 保持原状并写一行审计。再跑一次不会重复写审计。历史 `integrations` 行保留，不 DROP。
 
 Timeline 迁移顺延为 `00013`。
 

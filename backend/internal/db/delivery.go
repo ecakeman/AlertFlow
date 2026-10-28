@@ -12,6 +12,9 @@ var ErrLeaseLost = errors.New("delivery lease lost")
 // ErrNotRetryable means the delivery is not in the dead state.
 var ErrNotRetryable = errors.New("delivery is not dead")
 
+// ErrChannelRetired means the delivery belongs to a channel that no longer sends.
+var ErrChannelRetired = errors.New("notification channel is retired")
+
 // ClaimedDelivery is one task leased to a worker. Config is the integration
 // secret and must not be written back onto the delivery payload.
 type ClaimedDelivery struct {
@@ -44,11 +47,13 @@ type DeliveryView struct {
 
 const exhaustedReason = "attempt limit reached before the delivery finished"
 
-// ClaimDeliveries leases up to limit due tasks. Disabled integrations are left
-// alone so they can be sent after the channel is enabled again. Expired running
-// leases are claimable until maxAttempts. A task already at that limit is marked
-// dead in this transaction and is not claimed again. That transition writes no
-// notification_log row.
+// ClaimDeliveries leases up to limit due tasks for agent_webhook only. Telegram,
+// Slack, email and generic webhook rows are left untouched: they are not claimed,
+// retried, or swept to dead, even when the integration is enabled again.
+// Disabled agent channels are left alone so they can be sent after the channel
+// is enabled again. Expired running leases are claimable until maxAttempts. A
+// task already at that limit is marked dead in this transaction and is not
+// claimed again. That transition writes no notification_log row.
 func (db *DB) ClaimDeliveries(owner string, now, leaseUntil int64, limit, maxAttempts int) ([]ClaimedDelivery, error) {
 	if limit < 1 {
 		limit = 1
@@ -66,16 +71,18 @@ func (db *DB) ClaimDeliveries(owner string, now, leaseUntil int64, limit, maxAtt
 		     last_error = $1,
 		     updated_at = $2
 		 FROM (
-		   SELECT id
-		   FROM notification_deliveries
-		   WHERE (
-		       (status = 'running' AND lease_until <= $2 AND attempt_count >= $3)
-		       OR (status IN ('pending', 'retry_wait') AND next_attempt_at <= $2 AND attempt_count >= $3)
+		   SELECT d2.id
+		   FROM notification_deliveries d2
+		   JOIN integrations i ON i.id = d2.integration_id
+		   WHERE i.type = $4
+		     AND (
+		       (d2.status = 'running' AND d2.lease_until <= $2 AND d2.attempt_count >= $3)
+		       OR (d2.status IN ('pending', 'retry_wait') AND d2.next_attempt_at <= $2 AND d2.attempt_count >= $3)
 		     )
-		   FOR UPDATE SKIP LOCKED
+		   FOR UPDATE OF d2 SKIP LOCKED
 		 ) AS picked
 		 WHERE d.id = picked.id`,
-		exhaustedReason, now, maxAttempts,
+		exhaustedReason, now, maxAttempts, AgentWebhookType,
 	); err != nil {
 		return nil, err
 	}
@@ -85,6 +92,7 @@ func (db *DB) ClaimDeliveries(owner string, now, leaseUntil int64, limit, maxAtt
 			FROM notification_deliveries d
 			JOIN integrations i ON i.id = d.integration_id
 			WHERE i.enabled
+			  AND i.type = $6
 			  AND d.attempt_count < $5
 			  AND (
 			    (d.status IN ('pending', 'retry_wait') AND d.next_attempt_at <= $3)
@@ -103,7 +111,7 @@ func (db *DB) ClaimDeliveries(owner string, now, leaseUntil int64, limit, maxAtt
 		FROM picked
 		WHERE d.id = picked.id
 		RETURNING d.id, d.event_id, d.incident_id, d.integration_id, d.event_type, d.payload, d.attempt_count`,
-		owner, leaseUntil, now, limit, maxAttempts,
+		owner, leaseUntil, now, limit, maxAttempts, AgentWebhookType,
 	)
 	if err != nil {
 		return nil, err
@@ -246,15 +254,17 @@ func (db *DB) ListDeliveriesByIncident(incidentID int64) ([]DeliveryView, error)
 	return out, rows.Err()
 }
 
-// RetryDeadDelivery starts a new attempt round for a dead task. The same row is
-// reused, so the event and integration stay unique.
+// RetryDeadDelivery starts a new attempt round for a dead agent_webhook task.
+// The same row is reused, so the event and integration stay unique. A dead task
+// on a retired channel is refused.
 func (db *DB) RetryDeadDelivery(id, now int64) error {
 	res, err := db.Exec(
-		`UPDATE notification_deliveries
+		`UPDATE notification_deliveries AS d
 		 SET status = 'pending', attempt_count = 0, next_attempt_at = $2,
 		     last_error = NULL, lease_owner = NULL, lease_until = NULL, updated_at = $2
-		 WHERE id = $1 AND status = 'dead'`,
-		id, now,
+		 FROM integrations i
+		 WHERE d.id = $1 AND d.status = 'dead' AND i.id = d.integration_id AND i.type = $3`,
+		id, now, AgentWebhookType,
 	)
 	if err != nil {
 		return err
@@ -266,13 +276,82 @@ func (db *DB) RetryDeadDelivery(id, now int64) error {
 	if n == 1 {
 		return nil
 	}
-	var status string
-	err = db.QueryRow(`SELECT status FROM notification_deliveries WHERE id = $1`, id).Scan(&status)
+	var status, kind string
+	err = db.QueryRow(
+		`SELECT d.status, i.type
+		 FROM notification_deliveries d
+		 JOIN integrations i ON i.id = d.integration_id
+		 WHERE d.id = $1`, id,
+	).Scan(&status, &kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
 		return err
 	}
+	if kind != AgentWebhookType {
+		return ErrChannelRetired
+	}
 	return ErrNotRetryable
+}
+
+const retiredRunningReason = "running delivery left in place; an old worker may still send"
+
+// RetiredDeliveryResult is what one drain of the retired channels changed.
+type RetiredDeliveryResult struct {
+	Cancelled int64
+	Audited   int64
+}
+
+// CancelRetiredDeliveries marks pending and retry_wait tasks on telegram, slack,
+// email and webhook as cancelled. Running rows stay running and get one audit
+// row, because this process cannot prove an old worker will not still send.
+// Calling it again does not insert a second audit row. It does not run from
+// server startup.
+func (db *DB) CancelRetiredDeliveries(now int64) (RetiredDeliveryResult, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return RetiredDeliveryResult{}, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
+		`UPDATE notification_deliveries AS d
+		 SET status = 'cancelled',
+		     lease_owner = NULL,
+		     lease_until = NULL,
+		     updated_at = $1
+		 FROM integrations i
+		 WHERE i.id = d.integration_id
+		   AND i.type IN ('telegram', 'slack', 'email', 'webhook')
+		   AND d.status IN ('pending', 'retry_wait')`,
+		now,
+	)
+	if err != nil {
+		return RetiredDeliveryResult{}, err
+	}
+	cancelled, err := res.RowsAffected()
+	if err != nil {
+		return RetiredDeliveryResult{}, err
+	}
+	res, err = tx.Exec(
+		`INSERT INTO retired_delivery_audits (delivery_id, status, reason, created_at)
+		 SELECT d.id, d.status, $2, $1
+		 FROM notification_deliveries d
+		 JOIN integrations i ON i.id = d.integration_id
+		 WHERE i.type IN ('telegram', 'slack', 'email', 'webhook')
+		   AND d.status = 'running'
+		 ON CONFLICT (delivery_id) DO NOTHING`,
+		now, retiredRunningReason,
+	)
+	if err != nil {
+		return RetiredDeliveryResult{}, err
+	}
+	audited, err := res.RowsAffected()
+	if err != nil {
+		return RetiredDeliveryResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return RetiredDeliveryResult{}, err
+	}
+	return RetiredDeliveryResult{Cancelled: cancelled, Audited: audited}, nil
 }

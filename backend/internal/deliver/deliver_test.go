@@ -14,9 +14,11 @@ import (
 
 	"database/sql"
 
+	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/db"
 	"github.com/ecakeman/alertflow/internal/event"
 	"github.com/ecakeman/alertflow/internal/notify"
+	"github.com/ecakeman/alertflow/internal/query"
 )
 
 func TestDeliverSucceedsAndLogs(t *testing.T) {
@@ -30,7 +32,7 @@ func TestDeliverSucceedsAndLogs(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer srv.Close()
-	if _, err := database.CreateIntegration("webhook", "hook", true, false, json.RawMessage(`{"url":"`+srv.URL+`","headers":{"Authorization":"super-secret"}}`)); err != nil {
+	if _, err := database.CreateIntegration(db.AgentWebhookType, "hook", true, false, json.RawMessage(`{"url":"`+srv.URL+`","headers":{"Authorization":"super-secret"}}`)); err != nil {
 		t.Fatal(err)
 	}
 	ev := mustOffline(t, database, "svc")
@@ -191,7 +193,7 @@ func TestClaimIsExclusiveAndLeaseExpires(t *testing.T) {
 
 func TestInvalidChannelDoesNotRetry(t *testing.T) {
 	database := db.OpenTest(t)
-	if _, err := database.CreateIntegration("webhook", "bad", true, false, json.RawMessage(`{}`)); err != nil {
+	if _, err := database.CreateIntegration(db.AgentWebhookType, "bad", true, false, json.RawMessage(`{}`)); err != nil {
 		t.Fatal(err)
 	}
 	ev := mustOffline(t, database, "svc")
@@ -281,7 +283,7 @@ func TestAbandonedRunningLeaseCanBeReclaimed(t *testing.T) {
 
 func TestManualRetryClearsAttempts(t *testing.T) {
 	database := db.OpenTest(t)
-	if _, err := database.CreateIntegration("webhook", "bad", true, false, json.RawMessage(`{}`)); err != nil {
+	if _, err := database.CreateIntegration(db.AgentWebhookType, "bad", true, false, json.RawMessage(`{}`)); err != nil {
 		t.Fatal(err)
 	}
 	ev := mustOffline(t, database, "svc")
@@ -309,12 +311,15 @@ func newClock() *clock { return &clock{sec: time.Now().Unix()} }
 func (c *clock) now() int64 { return c.sec }
 
 func clocked(database *db.DB, now int64) *Worker {
+	notify.Register(notify.AgentWebhookType, notify.AgentSender{
+		Q: query.New(database, func() *config.Config { return &config.Config{} }),
+	})
 	return &Worker{DB: database, Owner: "worker", Now: func() int64 { return now }}
 }
 
 func mustChannel(t *testing.T, database *db.DB, name, url string, warnings bool) *db.Integration {
 	t.Helper()
-	in, err := database.CreateIntegration("webhook", name, true, warnings, json.RawMessage(`{"url":"`+url+`"}`))
+	in, err := database.CreateIntegration(db.AgentWebhookType, name, true, warnings, json.RawMessage(`{"url":"`+url+`"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -577,7 +582,7 @@ func TestDeliveryErrorHidesSecrets(t *testing.T) {
 	const pathSecret = "path-secret-token-value"
 	const bodySecret = "body-secret-token-value"
 	refused := "http://127.0.0.1:1/" + pathSecret
-	refusedChannel, err := database.CreateIntegration("webhook", "refused", true, false, json.RawMessage(`{"url":"`+refused+`"}`))
+	refusedChannel, err := database.CreateIntegration(db.AgentWebhookType, "refused", true, false, json.RawMessage(`{"url":"`+refused+`"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -597,7 +602,7 @@ func TestDeliveryErrorHidesSecrets(t *testing.T) {
 		http.Error(w, bodySecret, http.StatusInternalServerError)
 	}))
 	defer srv.Close()
-	if _, err := database.CreateIntegration("webhook", "echo", true, false, json.RawMessage(`{"url":"`+srv.URL+`","headers":{"Authorization":"`+bodySecret+`"}}`)); err != nil {
+	if _, err := database.CreateIntegration(db.AgentWebhookType, "echo", true, false, json.RawMessage(`{"url":"`+srv.URL+`","headers":{"Authorization":"`+bodySecret+`"}}`)); err != nil {
 		t.Fatal(err)
 	}
 	echoEv := mustOffline(t, database, "echo-svc")

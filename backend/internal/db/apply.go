@@ -260,7 +260,8 @@ type notifySubject struct {
 
 func insertDeliveriesTx(tx *sql.Tx, ev notifySubject, kind string, incidentID, resolvedAt *int64, now int64) error {
 	rows, err := tx.Query(
-		`SELECT id, notify_warnings FROM integrations WHERE enabled`,
+		`SELECT id, notify_warnings FROM integrations WHERE enabled AND type = $1`,
+		AgentWebhookType,
 	)
 	if err != nil {
 		return err

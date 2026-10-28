@@ -99,7 +99,7 @@ The agent is a separate service reached only over HTTP. It has two edges, and ne
 
 Chat uses the same durable path: a question is stored in `agent_chat_requests` together with a `chat_requested` delivery row and answered asynchronously. The agent keeps the matching `chat_requests` row, and enqueues the answer into its own callback outbox **in the same transaction** that marks the question answered, so "answered but never sent" is not a reachable state.
 
-`ALERTFLOW_ROLE=delivery` sends those rows. It claims one due task at a time, calls that channel's `Sender`, and does not fan out with `Dispatcher.Notify`. The lease is longer than the send timeout and is not renewed. Success, retry, and dead updates require the same lease. A crash after the remote service accepts the request and before PostgreSQL records `succeeded` can send the task again. Delivery is at-least-once, not exactly-once. If the worker keeps crashing before it finishes, the task still stops at the attempt limit: the next claim marks that expired row `dead`, clears the lease, and does not write a `notification_log` row. HTTP 408, 425, and 429 wait and retry; other 4xx responses are permanent. A warning delivery can point at its warning incident, but the `notification_log` row for `warning` keeps `incident_id` NULL. Stored and returned errors do not include channel secrets. The test-notification API still calls `Dispatcher.Test` and does not enqueue a task.
+`ALERTFLOW_ROLE=delivery` sends `agent_webhook` rows. It claims one due task at a time, calls that channel's `Sender`, and does not fan out with `Dispatcher.Notify`. Retired channels are not claimed, retried, or swept to `dead`. The lease is longer than the send timeout and is not renewed. Success, retry, and dead updates require the same lease. A crash after the remote service accepts the request and before PostgreSQL records `succeeded` can send the task again. Delivery is at-least-once, not exactly-once. If the worker keeps crashing before it finishes, the task still stops at the attempt limit: the next claim marks that expired `agent_webhook` row `dead`, clears the lease, and does not write a `notification_log` row. `ALERTFLOW_ROLE=retire-deliveries` runs once and exits. It cancels `pending` and `retry_wait` on the four retired channels and writes `retired_delivery_audits` for `running` rows, which stay `running`. It is not part of server startup. HTTP 408, 425, and 429 wait and retry; other 4xx responses are permanent. A warning delivery can point at its warning incident, but the `notification_log` row for `warning` keeps `incident_id` NULL. Stored and returned errors do not include channel secrets. The test-notification API still calls `Dispatcher.Test` and does not enqueue a task.
 
 ### The retry ladder
 
@@ -187,7 +187,7 @@ one whose `schema_version` is not 1, is written to `dead_letter_events` and then
 its offset is committed. A database error rolls the transaction back and leaves
 the offset uncommitted.
 
-Enabled integrations receive a `notification_deliveries` row in status `pending`.
+Enabled `agent_webhook` integrations receive a `notification_deliveries` row in status `pending`. Telegram, Slack, email and generic webhook do not.
 `warning` rows go only to integrations with `notify_warnings`. Recovery from
 `offline` to `warning` queues a resolve task and no warning task. The payload is
 a snapshot of the event and does not copy integration secrets. Nothing in this

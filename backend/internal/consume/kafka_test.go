@@ -23,7 +23,7 @@ func TestKafkaPublishAndConsume(t *testing.T) {
 		t.Skip("ALERTFLOW_KAFKA_BROKERS is not set; skipping the Kafka integration test")
 	}
 	database := db.OpenTest(t)
-	if _, err := database.CreateIntegration("webhook", "hook", true, false, json.RawMessage(`{"url":"http://example.invalid","token":"super-secret-token"}`)); err != nil {
+	if _, err := database.CreateIntegration(db.AgentWebhookType, "hook", true, false, json.RawMessage(`{"url":"http://example.invalid","token":"super-secret-token"}`)); err != nil {
 		t.Fatal(err)
 	}
 	ev, err := event.NewCheckCompleted("svc", "API", "https://example.com/health", time.Now().Unix(), db.StatusOffline, nil, nil, "connection timeout", 2)

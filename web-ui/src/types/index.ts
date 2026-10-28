@@ -179,14 +179,14 @@ export interface Delivery {
   integrationName: string
   integrationType: string
   eventType: string
-  status: 'pending' | 'running' | 'retry_wait' | 'succeeded' | 'dead'
+  status: 'pending' | 'running' | 'retry_wait' | 'succeeded' | 'dead' | 'cancelled'
   attemptCount: number
   nextAttemptAt: string
   lastError: string
   sentAt: string | null
 }
 
-export type IntegrationType = 'telegram' | 'slack' | 'email' | 'webhook'
+export type IntegrationType = 'telegram' | 'slack' | 'email' | 'webhook' | 'agent_webhook'
 
 export interface Integration {
   id: number

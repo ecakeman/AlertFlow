@@ -46,8 +46,10 @@ func main() {
 		runConsumer()
 	case "delivery":
 		runDelivery()
+	case "retire-deliveries":
+		runRetireDeliveries()
 	default:
-		slog.Error("ALERTFLOW_ROLE must be server, publisher, consumer, or delivery")
+		slog.Error("ALERTFLOW_ROLE must be server, publisher, consumer, delivery, or retire-deliveries")
 		os.Exit(1)
 	}
 }
@@ -116,6 +118,20 @@ func runConsumer() {
 		slog.Error("consumer stopped", "error", err)
 		os.Exit(1)
 	}
+}
+
+// runRetireDeliveries cancels queued tasks on the four retired channels and
+// writes an audit row for any still running. It exits. Start it only after
+// every old delivery worker has stopped.
+func runRetireDeliveries() {
+	database := openRoleDB()
+	defer database.Close()
+	result, err := database.CancelRetiredDeliveries(time.Now().Unix())
+	if err != nil {
+		slog.Error("retire deliveries", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("retired channel deliveries", "cancelled", result.Cancelled, "running_left", result.Audited)
 }
 
 func runDelivery() {

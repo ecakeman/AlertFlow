@@ -53,8 +53,8 @@ real work:
   duration; a check that recovers on a retry logs a warning event alongside
   them. Add your own for planned work, comment to keep the team in sync, and
   page through the full history.
-- 📣 **Get told about it** — channels are **Telegram, Slack, email or any
-  webhook**. Add a channel, hit *Send test*, done. An outage queues one task per
+- 📣 **Get told about it** — the diagnostic **Agent** is the notification
+  channel. Add it, hit *Send test*, done. An outage queues one task per
   enabled channel, and the delivery process sends it. A crash after the receiver
   accepts the request can send it again. Warnings are opt‑in per channel.
 - 🔍 **Per‑service detail** — uptime over 7/30/365 days, a response‑time chart,
@@ -150,7 +150,7 @@ imported.
 | `ALERTFLOW_ADDR`         | `:8080`   | Listen address (`host:port`).                |
 | `ALERTFLOW_LOG_LEVEL`    | `info`    | Log verbosity: `debug`, `info`, `warn`, `error`. |
 | `ALERTFLOW_DATABASE_URL` | —         | PostgreSQL DSN. Required.                    |
-| `ALERTFLOW_ROLE`         | `server`  | `server`, `publisher`, `consumer`, or `delivery`. |
+| `ALERTFLOW_ROLE`         | `server`  | `server`, `publisher`, `consumer`, `delivery`, or `retire-deliveries`. |
 | `ALERTFLOW_KAFKA_BROKERS`| —        | Broker list for publisher and consumer.      |
 | `ALERTFLOW_AGENT_CALLBACK_TOKEN` | — | Bearer token for `POST /webhooks/agent` (the agent pushes its diagnosis back). Empty disables that endpoint. |
 | `REDIS_URL`              | —         | Optional read cache. Empty serves everything from PostgreSQL. |

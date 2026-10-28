@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { Plus, Send, MessageSquare, Mail, Webhook, LoaderCircle, Plug, MoreHorizontal, Pencil, Trash2, SendHorizontal } from '@lucide/vue'
+import { Plus, Send, MessageSquare, Mail, Webhook, Bot, LoaderCircle, Plug, MoreHorizontal, Pencil, Trash2, SendHorizontal } from '@lucide/vue'
 import PageHeader from '@/components/layout/PageHeader.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import IntegrationFormDialog from '@/components/integrations/IntegrationFormDialog.vue'
@@ -26,6 +26,11 @@ const meta: Record<IntegrationType, { label: string; icon: typeof Send; class: s
   slack: { label: 'Slack', icon: MessageSquare, class: 'bg-fuchsia-500/15 text-fuchsia-500' },
   email: { label: '邮件', icon: Mail, class: 'bg-amber-500/15 text-amber-500' },
   webhook: { label: 'Webhook', icon: Webhook, class: 'bg-emerald-500/15 text-emerald-500' },
+  agent_webhook: { label: '诊断 Agent', icon: Bot, class: 'bg-emerald-500/15 text-emerald-500' },
+}
+
+function retired(it: Integration) {
+  return it.type !== 'agent_webhook'
 }
 
 const formOpen = ref(false)
@@ -108,11 +113,11 @@ async function onTest(it: Integration) {
   <div class="mx-auto max-w-[1000px] px-6 py-6 lg:px-8">
     <PageHeader
       title="集成"
-      description="当事件开始或恢复时向这些渠道发送通知。"
+      description="故障打开时向诊断 Agent 发送调查任务。Slack、Telegram、邮件和通用 Webhook 已退役。"
     >
       <template #actions>
         <Button @click="openAdd">
-          <Plus />添加集成</Button>
+          <Plus />添加 Agent</Button>
       </template>
     </PageHeader>
 
@@ -124,11 +129,11 @@ async function onTest(it: Integration) {
       v-else-if="store.integrations.length === 0"
       :icon="Plug"
       title="暂无集成"
-      description="接入 Telegram、Slack、邮件或自定义 Webhook，以接收事件通知。"
+      description="添加诊断 Agent。历史外发渠道仍会列在这里，但不再发送。"
       class="mt-10"
     >
       <Button @click="openAdd">
-        <Plus />添加集成</Button>
+        <Plus />添加 Agent</Button>
     </EmptyState>
 
     <div v-else class="mt-6 grid gap-3">
@@ -143,13 +148,13 @@ async function onTest(it: Integration) {
         <div class="min-w-0 flex-1">
           <p class="truncate text-sm font-semibold">{{ it.name }}</p>
           <p class="text-xs text-muted-foreground">
-            {{ meta[it.type].label }} · {{ it.enabled ? 'Enabled' : 'Disabled' }}
+            {{ meta[it.type].label }} · {{ retired(it) ? '已退役' : it.enabled ? 'Enabled' : 'Disabled' }}
           </p>
         </div>
-        <Button variant="outline" size="sm" :disabled="testingId === it.id" @click="onTest(it)">
+        <Button v-if="!retired(it)" variant="outline" size="sm" :disabled="testingId === it.id" @click="onTest(it)">
           <LoaderCircle v-if="testingId === it.id" class="animate-spin" />
           <SendHorizontal v-else />发送测试</Button>
-        <Switch :model-value="it.enabled" @update:model-value="(v: boolean) => onToggle(it, v)" />
+        <Switch v-if="!retired(it)" :model-value="it.enabled" @update:model-value="(v: boolean) => onToggle(it, v)" />
         <DropdownMenu>
           <DropdownMenuTrigger
             class="flex size-8 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
@@ -158,9 +163,9 @@ async function onTest(it: Integration) {
             <MoreHorizontal class="size-4" />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" class="w-40">
-            <DropdownMenuItem @select="openEdit(it)">
+            <DropdownMenuItem v-if="!retired(it)" @select="openEdit(it)">
               <Pencil />编辑</DropdownMenuItem>
-            <DropdownMenuSeparator />
+            <DropdownMenuSeparator v-if="!retired(it)" />
             <DropdownMenuItem variant="destructive" @select="openDelete(it)">
               <Trash2 />删除</DropdownMenuItem>
           </DropdownMenuContent>

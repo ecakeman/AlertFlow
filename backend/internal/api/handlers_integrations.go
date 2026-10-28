@@ -61,8 +61,8 @@ func (s *Server) handleCreateIntegration(c *gin.Context) error {
 	if err := decode(c, &in); err != nil {
 		return err
 	}
-	if _, ok := requiredFields[in.Type]; !ok {
-		return fail(http.StatusBadRequest, "unknown integration type")
+	if err := acceptIntegrationType(in.Type); err != nil {
+		return err
 	}
 	name := strings.TrimSpace(in.Name)
 	if name == "" {
@@ -99,10 +99,13 @@ func (s *Server) handleUpdateIntegration(c *gin.Context) error {
 	if name == "" {
 		return fail(http.StatusBadRequest, "name is required")
 	}
+	if err := acceptIntegrationType(existing.Type); err != nil {
+		return err
+	}
 	kind := existing.Type
 	if t := strings.TrimSpace(in.Type); t != "" && t != kind {
-		if _, ok := requiredFields[t]; !ok {
-			return fail(http.StatusBadRequest, "unknown integration type")
+		if err := acceptIntegrationType(t); err != nil {
+			return err
 		}
 		kind = t
 	}
@@ -146,6 +149,9 @@ func (s *Server) handleTestIntegration(c *gin.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := acceptIntegrationType(existing.Type); err != nil {
+		return err
+	}
 	msg := notify.Message{
 		Event:       notify.EventIncidentStart,
 		ServiceName: "Test notification",
@@ -171,6 +177,16 @@ func (s *Server) integrationParam(c *gin.Context) (*db.Integration, error) {
 		return nil, fail(http.StatusNotFound, "integration not found")
 	}
 	return in, nil
+}
+
+func acceptIntegrationType(kind string) error {
+	if kind == notify.AgentWebhookType {
+		return nil
+	}
+	if _, retired := requiredFields[kind]; retired {
+		return fail(http.StatusBadRequest, "integration type is retired")
+	}
+	return fail(http.StatusBadRequest, "unknown integration type")
 }
 
 func secretSet(kind string) map[string]bool {

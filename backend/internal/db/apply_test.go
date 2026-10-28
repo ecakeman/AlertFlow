@@ -12,10 +12,13 @@ import (
 func TestApplyCheckEventTransitions(t *testing.T) {
 	database := OpenTest(t)
 	secret := "super-secret-token"
-	if _, err := database.CreateIntegration("webhook", "pages", true, false, json.RawMessage(`{"url":"http://example.invalid","token":"`+secret+`"}`)); err != nil {
+	if _, err := database.CreateIntegration(AgentWebhookType, "pages", true, false, json.RawMessage(`{"url":"http://example.invalid","token":"`+secret+`"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.CreateIntegration("webhook", "warnings", true, true, json.RawMessage(`{"url":"http://example.invalid/warn","token":"`+secret+`"}`)); err != nil {
+	if _, err := database.CreateIntegration(AgentWebhookType, "warnings", true, true, json.RawMessage(`{"url":"http://example.invalid/warn","token":"`+secret+`"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.CreateIntegration("telegram", "legacy", true, true, json.RawMessage(`{"botToken":"`+secret+`","chatId":"1"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.CreateIntegration("webhook", "off", false, true, json.RawMessage(`{"url":"http://example.invalid/off"}`)); err != nil {

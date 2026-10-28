@@ -72,6 +72,9 @@ func (s *Server) handleRetryDelivery(c *gin.Context) error {
 	if errors.Is(err, db.ErrNotRetryable) {
 		return fail(http.StatusBadRequest, "only a dead delivery can be retried")
 	}
+	if errors.Is(err, db.ErrChannelRetired) {
+		return fail(http.StatusBadRequest, "notification channel is retired")
+	}
 	if err != nil {
 		return fail(http.StatusInternalServerError, "could not retry delivery")
 	}

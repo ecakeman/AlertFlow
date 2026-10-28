@@ -134,23 +134,18 @@ Notification channels. Fire on incident start and resolve only.
 | `POST /api/integrations`             | admin | Create `{ type, name, enabled, notifyWarnings, config }`. |
 | `PUT /api/integrations/{id}`         | admin | Update; blank/omitted secrets keep their stored value. `notifyWarnings` is a plain overwrite — always send it. |
 | `DELETE /api/integrations/{id}`      | admin | Delete. Its notification log and pending delivery tasks are removed. Removing a task is not a successful send. |
-| `POST /api/integrations/{id}/test`   | admin | Send one real test message. Always `200`; see below. It does not enqueue a delivery task. |
+| `POST /api/integrations/{id}/test`   | admin | Send one real test message for `agent_webhook`. A retired channel returns 400. A send attempt is `200`; see below. It does not enqueue a delivery task. |
 | `GET /api/incidents/{id}/deliveries` | auth  | Delivery tasks for that incident: status, attempts, last error, next retry. The error text has channel secrets removed. |
-| `POST /api/deliveries/{id}/retry`    | admin | Queue a `dead` task again and reset its attempt count.   |
+| `POST /api/deliveries/{id}/retry`    | admin | Queue a dead `agent_webhook` task again and reset its attempt count. A retired channel returns 400. |
 
-`type` is `telegram` | `slack` | `email` | `webhook`. The `config` shape depends
-on it:
+`POST`, `PUT` and `POST /test` accept only `agent_webhook`. `telegram`, `slack`, `email` and `webhook` return 400 `integration type is retired`. `GET` still lists historical rows. Delete still removes them. The agent config is:
 
 ```jsonc
-{ "botToken": "123:ABC", "chatId": "-100123" }                       // telegram
-{ "webhookUrl": "https://hooks.slack.com/services/…" }               // slack
-{ "host": "smtp.example.com", "port": 587, "username": "u",          // email
-  "password": "p", "from": "alerts@x.com", "to": "ops@x.com" }       //   (STARTTLS; port 465 unsupported)
-{ "url": "https://…", "method": "POST", "headers": { "X-K": "v" },   // webhook
-  "bodyTemplate": "{{.ServiceName}} is {{.Event}}" }                 //   (blank ⇒ default JSON payload)
+{ "url": "http://agent:8000/webhooks/alertflow", "method": "POST",
+  "headers": { "Authorization": "Bearer …" } }
 ```
 
-A blank `bodyTemplate` sends the old fields plus the agent contract. `event`, `service`, `url`, `status` (`down`, `recovered`, or `warning`), and `message` stay as they were. The added fields are `schema_version`, `event_id`, `service_id`, `service_name`, `occurred_at`, and `severity`. `occurred_at` is this event's time. `started_at` is the incident's start and is omitted for a warning. `resolved_at` is present on resolve and matches `occurred_at`. `incident_id` is present when the delivery has an incident. `check_id` is present for a check. `attempts` and `error` are present when the snapshot has them. `event_id` is `<event>:<incident_id>`, or `delivery:<notification_deliveries.id>` when there is no incident id. A custom `bodyTemplate` renders the message, including `.OccurredAt` and `.StartedAt`.
+New tasks use the agent envelope, not this body. A historical generic webhook with a blank `bodyTemplate` sent the old fields plus the agent contract. `event`, `service`, `url`, `status` (`down`, `recovered`, or `warning`), and `message` stay as they were. The added fields are `schema_version`, `event_id`, `service_id`, `service_name`, `occurred_at`, and `severity`. `occurred_at` is this event's time. `started_at` is the incident's start and is omitted for a warning. `resolved_at` is present on resolve and matches `occurred_at`. `incident_id` is present when the delivery has an incident. `check_id` is present for a check. `attempts` and `error` are present when the snapshot has them. `event_id` is `<event>:<incident_id>`, or `delivery:<notification_deliveries.id>` when there is no incident id. A custom `bodyTemplate` renders the message, including `.OccurredAt` and `.StartedAt`.
 
 `GET /internal/agent/v1/incidents`, `/incidents/{id}`, `/services/{id}/metrics`, and `/services/{id}/checks` return the same JSON as the matching `/api` reads. Send `Authorization: Bearer <ALERTFLOW_AGENT_TOKEN>`. An empty token makes the whole group return 503. A wrong token returns 401. Other methods return 405, and unknown paths return JSON 404.
 

@@ -71,7 +71,7 @@ func TestReplaceIntegrationsDropsDeliveriesAndKeepsSequence(t *testing.T) {
 	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries`); n != 0 {
 		t.Fatalf("replace left %d deliveries", n)
 	}
-	next, err := database.CreateIntegration("webhook", "after", true, false, json.RawMessage(`{"url":"http://example.invalid/after"}`))
+	next, err := database.CreateIntegration(AgentWebhookType, "after", true, false, json.RawMessage(`{"url":"http://example.invalid/after"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestReplaceIntegrationsDropsDeliveriesAndKeepsSequence(t *testing.T) {
 
 func mustChannel(t *testing.T, database *DB, name string, warnings bool) *Integration {
 	t.Helper()
-	in, err := database.CreateIntegration("webhook", name, true, warnings, json.RawMessage(`{"url":"http://example.invalid/`+name+`"}`))
+	in, err := database.CreateIntegration(AgentWebhookType, name, true, warnings, json.RawMessage(`{"url":"http://example.invalid/`+name+`"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
