@@ -173,7 +173,12 @@ func insertDiagnosticEvent(tx *sql.Tx, pull DiagnosticPull, item DiagnosticItem,
 }
 
 func diagnosticStatusKind(kind string) bool {
-	return kind == "component_health" || kind == "dependency_health" || kind == "resource"
+	switch kind {
+	case "component_health", "dependency_health", "resource", "saturation":
+		return true
+	default:
+		return false
+	}
 }
 
 type diagnosticCursor struct {

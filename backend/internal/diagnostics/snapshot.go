@@ -12,9 +12,13 @@ var (
 	statuses = map[string]bool{"healthy": true, "degraded": true, "unhealthy": true, "unknown": true}
 	kinds    = map[string]bool{
 		"component_health": true, "dependency_health": true, "resource": true,
+		"saturation":   true,
 		"recent_error": true, "recent_change": true, "slow_operation": true,
 	}
-	statusKinds  = map[string]bool{"component_health": true, "dependency_health": true, "resource": true}
+	// saturation is an internal level, same as resource: status is required.
+	statusKinds = map[string]bool{
+		"component_health": true, "dependency_health": true, "resource": true, "saturation": true,
+	}
 	summaryKinds = map[string]bool{"recent_error": true, "recent_change": true, "slow_operation": true}
 )
 

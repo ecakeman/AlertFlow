@@ -41,6 +41,15 @@ def test_invalid_json_naive_time_and_attribute_limits():
     assert stale["items"][0]["limitations"]
 
 
+def test_saturation_requires_a_status():
+    kept = validate({"schema_version": "v2", "items": [_item(kind="saturation", name="pool", status="unhealthy")]}, EVENT)
+    assert kept["coverage"] == "ok"
+    assert kept["items"][0]["status"] == "unhealthy"
+    dropped = validate({"schema_version": "v2", "items": [_item(kind="saturation", name="pool", status=None)]}, EVENT)
+    assert dropped["coverage"] == "invalid"
+    assert dropped["items"] == []
+
+
 def test_config_and_transport_failures_stay_on_the_diagnostic_source(tmp_path, monkeypatch):
     missing = load_config("")
     assert fetch(missing, "a", "b")["coverage"] == "not_configured"

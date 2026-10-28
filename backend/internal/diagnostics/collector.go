@@ -24,8 +24,15 @@ type Collector struct {
 	db     *db.DB
 	client *http.Client
 
-	mu      sync.Mutex
-	workers map[string]*worker
+	// lifecycle serialises Sync, Release and Stop so a cancelled loop is waited
+	// on before another one is started or the call returns.
+	lifecycle sync.Mutex
+	mu        sync.Mutex
+	workers   map[string]*worker
+
+	// beforeStore, when set, runs after a snapshot is fetched and before it is
+	// written. Tests use it to hold a poll open.
+	beforeStore func()
 }
 
 type worker struct {
@@ -55,20 +62,26 @@ func New(database *db.DB) *Collector {
 	}
 }
 
-// Sync keeps one worker for each service that has a diagnostics URL.
+// Sync keeps one worker for each service that has a diagnostics URL. A replaced
+// or removed loop is cancelled and waited on before this call returns, and a
+// replacement does not start until that wait finishes.
 func (c *Collector) Sync(services []config.Service) {
 	if c == nil {
 		return
 	}
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	wanted := map[string]bool{}
+	var restart []config.Service
+	var wait []*worker
 	for _, svc := range services {
 		if strings.TrimSpace(svc.Diagnostics.URL) == "" {
 			continue
 		}
 		wanted[svc.ID] = true
-		if existing := c.workers[svc.ID]; existing != nil {
+		existing := c.workers[svc.ID]
+		if existing != nil {
 			existing.mu.Lock()
 			same := existing.svc.Diagnostics == svc.Diagnostics
 			if same {
@@ -79,6 +92,10 @@ func (c *Collector) Sync(services []config.Service) {
 				continue
 			}
 			existing.cancel()
+			delete(c.workers, svc.ID)
+			wait = append(wait, existing)
+			restart = append(restart, svc)
+			continue
 		}
 		c.start(svc)
 	}
@@ -86,8 +103,23 @@ func (c *Collector) Sync(services []config.Service) {
 		if !wanted[id] {
 			w.cancel()
 			delete(c.workers, id)
+			wait = append(wait, w)
 		}
 	}
+	c.mu.Unlock()
+	for _, w := range wait {
+		<-w.done
+	}
+	if len(restart) == 0 {
+		return
+	}
+	c.mu.Lock()
+	for _, svc := range restart {
+		if c.workers[svc.ID] == nil {
+			c.start(svc)
+		}
+	}
+	c.mu.Unlock()
 }
 
 func (c *Collector) start(svc config.Service) {
@@ -120,6 +152,8 @@ func (c *Collector) Release(id string) {
 	if c == nil {
 		return
 	}
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
 	c.mu.Lock()
 	w := c.workers[id]
 	if w != nil {
@@ -132,11 +166,13 @@ func (c *Collector) Release(id string) {
 	}
 }
 
-// Stop cancels every worker and waits for the current requests to finish.
+// Stop cancels every worker and waits until each has left its current poll.
 func (c *Collector) Stop() {
 	if c == nil {
 		return
 	}
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
 	c.mu.Lock()
 	workers := c.workers
 	c.workers = map[string]*worker{}
@@ -166,6 +202,12 @@ func (c *Collector) Poll(ctx context.Context, svc config.Service) error {
 	pull, err := c.fetch(ctx, svc, since, until)
 	if err != nil {
 		return err
+	}
+	if c.beforeStore != nil {
+		c.beforeStore()
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 	return c.db.ApplyDiagnostics(pull)
 }

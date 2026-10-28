@@ -18,7 +18,7 @@ _KINDS = {
     "recent_change",
     "slow_operation",
 }
-_STATUS_KINDS = {"component_health", "dependency_health", "resource"}
+_STATUS_KINDS = {"component_health", "dependency_health", "resource", "saturation"}
 _SUMMARY_KINDS = {"recent_error", "recent_change", "slow_operation"}
 _MAX_DETAIL_KEYS = 24
 _MAX_DETAIL_DEPTH = 3
