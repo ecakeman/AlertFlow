@@ -3,6 +3,7 @@ import type {
   Service,
   ServiceMetrics,
   ChecksPage,
+  TimelinePage,
   Incident,
   IncidentSeverity,
   IncidentsPage,
@@ -85,6 +86,17 @@ export const api = {
   checkNow: (id: string) => request<Service>('POST', `/api/services/${id}/check`),
   serviceMetrics: (id: string, range: MetricsRange = '24h') =>
     request<ServiceMetrics>('GET', `/api/services/${id}/metrics?range=${range}`),
+  serviceTimeline: (
+    id: string,
+    opts: { from: string; to: string; sources?: string; types?: string; limit?: number; cursor?: string },
+  ) => {
+    const q = new URLSearchParams({ from: opts.from, to: opts.to })
+    if (opts.sources) q.set('sources', opts.sources)
+    if (opts.types) q.set('types', opts.types)
+    if (opts.limit) q.set('limit', String(opts.limit))
+    if (opts.cursor) q.set('cursor', opts.cursor)
+    return request<TimelinePage>('GET', `/api/services/${id}/timeline?${q}`)
+  },
   serviceChecks: (id: string, opts: { limit?: number; before?: number } = {}) => {
     const q = new URLSearchParams()
     if (opts.limit) q.set('limit', String(opts.limit))

@@ -94,6 +94,43 @@ export interface CheckRow {
   attempts: number
 }
 
+/** One runtime timeline event. Times are UTC RFC3339. */
+export interface TimelineEvent {
+  id: number
+  eventKey: string
+  serviceId: string
+  source: string
+  eventType: string
+  severity: string
+  title: string
+  summary: string
+  occurredAt: string
+  observedAt: string
+  recordedAt: string
+  resource?: {
+    clusterId?: string
+    namespace?: string
+    kind?: string
+    name?: string
+    uid?: string
+  }
+  incidentId?: number
+  details: Record<string, unknown>
+}
+
+export interface TimelineCoverage {
+  status: string
+  lastSuccessAt: string | null
+  lastError?: string
+}
+
+export interface TimelinePage {
+  events: TimelineEvent[]
+  nextCursor: string | null
+  window: { from: string; to: string; retentionDays: number }
+  coverage: Record<string, TimelineCoverage>
+}
+
 /** A page of check rows; `nextBefore` is null once there is nothing older. */
 export interface ChecksPage {
   checks: CheckRow[]

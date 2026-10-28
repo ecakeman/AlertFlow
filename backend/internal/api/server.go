@@ -178,6 +178,7 @@ func (s *Server) routes() {
 	app.GET("/api/services", auth, adapt(s.handleListServices))
 	app.GET("/api/services/:id/metrics", auth, adapt(s.handleServiceMetrics))
 	app.GET("/api/services/:id/checks", auth, adapt(s.handleServiceChecks))
+	app.GET("/api/services/:id/timeline", auth, adapt(s.handleServiceTimeline))
 	app.GET("/api/settings", auth, adapt(s.handleGetSettings))
 	app.GET("/api/dashboard/stats", auth, adapt(s.handleDashboardStats))
 	app.GET("/api/incidents", auth, adapt(s.handleListIncidents))

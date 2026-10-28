@@ -35,6 +35,7 @@ Phase 0 验收通过后才能改核心代码。一次只做一个阶段。
 - 前端集成表单只创建 `agent_webhook`。历史四种渠道仍可列出和删除。
 - `POST /api/incidents` 在一个事务里写 Incident、Timeline 和可用 Agent 的调查任务（`backend/internal/db/timeline.go`）。只改标题或开始时间不写 Timeline。首次解决写解决事件，不建新任务。
 - `ALERTFLOW_K8S_ENABLED` 为 `true` 或 `1` 时，`monitor` 只读观察已映射的 Deployment。client-go 为 v0.35.9。空的 `kubernetes` 块不采集。连接失败、权限错误或 15 秒内缓存未同步，只把来源标成 `unavailable` 并在后台重试，不卡住配置重载或退出。Pod 和 Deployment 的新增事件在缓存同步之后写入；四类 informer 的 Watch 错误都会标来源并再协调一次。去掉映射只把对象标成不再活动、来源标成 `disabled`，Timeline 保留。语义指纹变化才写 Timeline，后续事件键带 `resourceVersion`，`source` 为 `kubernetes`。来源状态和对象写入都在服务锁之后确认服务仍在配置里。不调用 `event.Decide`，不建 Incident，不提供 `GetKubernetesState`。
+- `GET /api/services/:id/timeline` 给已登录用户返回该服务的 Timeline。默认最近 24 小时，窗口不超过 `ALERTFLOW_TIMELINE_RETENTION_DAYS`。按 `(occurred_at, id)` 做 keyset。来源覆盖来自 `runtime_source_state`。不缓存，不写事件，不挂到 `/internal/agent/v1`。
 - `monitor` 对配置了 `diagnostics.url` 的服务按间隔拉取应用诊断。种类与 Agent 相同，其中 `saturation` 和 `resource` 一样必须带 `status`：`unhealthy` 记为 `error`，`degraded` 记为 `warning`。失败只更新 `runtime_source_state`。成功时把异常项和恢复写进 `runtime_events`，`source` 为 `application_diagnostics`。替换或去掉采集时会等旧循环退出。不调用 `event.Decide`，不建 Incident。Agent 仍用 `DIAGNOSTICS_FILE` 直连。
 - `CheckNow` 在没有常驻 worker 时会造一个临时 worker 做一次性检查（`backend/internal/monitor/scheduler.go`）。
 - Agent 任务今天经 `agent_webhook` 发到 Agent 的 webhook。结果经 `POST /webhooks/agent` 回来。Agent 只读查询走 `/internal/agent/v1/...`。Agent 自己的回调出站表是 `agent_callback_outbox`（`agent/schema.sql`），靠 `message_id` 唯一。

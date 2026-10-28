@@ -16,6 +16,7 @@ import StatusDot from '@/components/dashboard/StatusDot.vue'
 import ResponseTimeChart, { type OutageWindow } from '@/components/services/ResponseTimeChart.vue'
 import SslCertCard from '@/components/services/SslCertCard.vue'
 import PingConsole from '@/components/services/PingConsole.vue'
+import RuntimeTimeline from '@/components/services/RuntimeTimeline.vue'
 import ServiceFormDialog from '@/components/services/ServiceFormDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import { Button } from '@/components/ui/button'
@@ -359,6 +360,15 @@ function fmtDateTime(iso: string): string {
           </CardContent>
         </Card>
       </div>
+
+      <Card class="mt-6">
+        <CardHeader class="space-y-0">
+          <CardTitle class="text-sm">运行时间轴</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <RuntimeTimeline :service-id="id" />
+        </CardContent>
+      </Card>
 
       <!-- Ping console -->
       <Card class="mt-6">

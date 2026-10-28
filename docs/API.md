@@ -30,6 +30,7 @@ Errors use `{ "error": "message" }` with an appropriate status code.
 | `POST /api/services/{id}/check`  | admin | Run a check immediately; returns updated metrics.     |
 | `GET /api/services/{id}/metrics` | user  | Aggregates, time series, uptime windows + TLS (`?range=1h\|6h\|24h\|7d\|30d\|365d`, default `24h`; unknown values fall back to `24h`). |
 | `GET /api/services/{id}/checks`  | user  | Stored check cycles, newest first, for the ping console (`?limit=` 1–500, default 100; `?before=` an id cursor). |
+| `GET /api/services/{id}/timeline` | user | Runtime timeline, newest first. `from`/`to` are RFC3339 (default the last 24h). The window is clamped to timeline retention. `sources` is `incident`, `application_diagnostics`, `kubernetes`, or `agent`. `limit` is 1–100 (default 50). `cursor` is the previous `nextCursor`. |
 | `GET /api/dashboard/stats`       | user  | Runtime aggregates the dashboard's stat tiles need beyond the list above — currently `{ "warningServiceCount": N }` (see below). |
 | `POST /api/services/{id}/image`  | admin | Upload a WebP icon (raw `image/webp` body).           |
 | `DELETE /api/services/{id}/image`| admin | Remove the icon.                                      |
@@ -272,6 +273,40 @@ values at the default 30s interval: `1h`→60s, `6h`→300s, `24h`→900s, `7d`�
 `uptimeWindows` can only see stored history, so they are bounded by
 `check.retention_days` (default 30) — `days365` will read low until enough
 history exists.
+
+## Timeline object
+
+`GET /api/services/{id}/timeline` returns one page:
+
+```jsonc
+{
+  "events": [
+    {
+      "id": 12,
+      "eventKey": "incident:4:opened",
+      "serviceId": "api",
+      "source": "incident",
+      "eventType": "incident.opened",
+      "severity": "error",
+      "title": "Incident opened",
+      "summary": "",
+      "occurredAt": "2026-10-28T12:00:00Z",
+      "observedAt": "2026-10-28T12:00:03Z",
+      "recordedAt": "2026-10-28T12:00:03Z",
+      "incidentId": 4,
+      "details": {}
+    }
+  ],
+  "nextCursor": null,
+  "window": { "from": "2026-10-27T12:00:00Z", "to": "2026-10-28T12:00:00Z", "retentionDays": 30 },
+  "coverage": {
+    "kubernetes": { "status": "disabled", "lastSuccessAt": null },
+    "application_diagnostics": { "status": "empty", "lastSuccessAt": null }
+  }
+}
+```
+
+`coverage.status` is the stored collector status, or `disabled` when that source is not configured and has no row, or `empty` when it is configured but has not reported yet. The response does not include the collector cursor.
 
 ## Check object
 
