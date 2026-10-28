@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/ecakeman/alertflow/internal/event"
 )
@@ -183,6 +184,84 @@ func ensureServiceEpoch(tx *sql.Tx, serviceID string) (int64, error) {
 	return epoch, nil
 }
 
+// ErrAckUnrecorded means the broker accepted the message and this transaction
+// could not store published_at. The send is not rolled back. Retry may publish
+// the same event again; the consumer drops the duplicate.
+var ErrAckUnrecorded = errors.New("broker ack was not recorded")
+
+// PublishUnderServiceLock holds the same service advisory lock as
+// DeleteServiceRecords across the Kafka send. The lock is taken before the
+// outbox row. send runs only while that lock is held. A retired service or a
+// lost lease returns false and does not call send. A send error rolls the
+// transaction back and leaves the unpublished row in place.
+func (db *DB) PublishUnderServiceLock(serviceID string, id int64, owner string, occurredAt int64, epoch *int64, send func() error) (bool, error) {
+	if serviceID == "" || id == 0 || owner == "" || send == nil {
+		return false, fmt.Errorf("publish: missing service, outbox id, owner, or sender")
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if err := lockService(tx, serviceID); err != nil {
+		return false, err
+	}
+	var leaseOwner sql.NullString
+	var leaseUntil sql.NullInt64
+	var published bool
+	err = tx.QueryRow(
+		`SELECT lease_owner, lease_until, published_at IS NOT NULL
+		 FROM outbox_events WHERE id = $1 FOR UPDATE`, id,
+	).Scan(&leaseOwner, &leaseUntil, &published)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	now := time.Now().Unix()
+	leased := !published && leaseOwner.String == owner && leaseUntil.Valid && leaseUntil.Int64 > now
+	retiredAt, retiredEpoch, retiredOK, err := retiredMark(tx, serviceID)
+	if err != nil {
+		return false, err
+	}
+	retired := retiredOK && eventIsRetired(occurredAt, epoch, retiredAt, retiredEpoch)
+	if !leased || retired {
+		if retired && leased {
+			if _, err := tx.Exec(`DELETE FROM outbox_events WHERE id = $1 AND published_at IS NULL`, id); err != nil {
+				return false, err
+			}
+			if err := tx.Commit(); err != nil {
+				return false, err
+			}
+		}
+		return false, nil
+	}
+	if err := send(); err != nil {
+		return false, err
+	}
+	res, err := tx.Exec(
+		`UPDATE outbox_events
+		 SET published_at = $2, lease_owner = NULL, lease_until = NULL
+		 WHERE id = $1 AND published_at IS NULL AND lease_owner = $3 AND lease_until > $4`,
+		id, time.Now().Unix(), owner, now,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if n == 0 {
+		return false, ErrAckUnrecorded
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("%w: %v", ErrAckUnrecorded, err)
+	}
+	return true, nil
+}
+
 // ForgetLeasedOutbox deletes a claimed row that must not be published.
 // A row already removed by service deletion is not an error.
 func (db *DB) ForgetLeasedOutbox(id int64, owner string, now int64) error {
@@ -195,8 +274,8 @@ func (db *DB) ForgetLeasedOutbox(id int64, owner string, now int64) error {
 }
 
 // lockService takes a transaction-scoped advisory lock for one service.
-// Check writes, diagnostic writes and service deletion all use it, so a delete
-// cannot commit while one of those writes is still inserting.
+// Check writes, diagnostic writes, service deletion and outbox publication all
+// use it. Publication holds it until the Kafka send returns.
 func lockService(tx *sql.Tx, serviceID string) error {
 	_, err := tx.Exec(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, serviceID)
 	return err

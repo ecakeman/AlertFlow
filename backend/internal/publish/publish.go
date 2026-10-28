@@ -170,36 +170,28 @@ func (p *Publisher) publishOne(ctx context.Context, row db.OutboxEvent) error {
 	if body.EventType != event.TypeCheckCompleted {
 		return p.fail(row, fmt.Errorf("unsupported event %s", body.EventType))
 	}
-	retired, err := p.DB.ServiceRetired(body.ServiceID, body.OccurredAt, body.Epoch)
-	if err != nil {
-		return p.fail(row, err)
-	}
-	if retired {
-		now := time.Now().Unix()
-		if err := p.DB.ForgetLeasedOutbox(row.ID, p.Owner, now); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		slog.Info("publisher skipped a retired service", "service", body.ServiceID, "event", row.EventID)
-		return nil
-	}
 	key := row.MessageKey
 	if key == "" {
 		key = body.ServiceID
 	}
-	err = p.writer.WriteMessages(ctx, kafka.Message{
-		Key:   []byte(key),
-		Value: row.Payload,
-		Headers: []kafka.Header{{
-			Key:   "event_id",
-			Value: []byte(row.EventID),
-		}},
+	sent, err := p.DB.PublishUnderServiceLock(body.ServiceID, row.ID, p.Owner, body.OccurredAt, body.Epoch, func() error {
+		return p.writer.WriteMessages(ctx, kafka.Message{
+			Key:   []byte(key),
+			Value: row.Payload,
+			Headers: []kafka.Header{{
+				Key:   "event_id",
+				Value: []byte(row.EventID),
+			}},
+		})
 	})
+	if errors.Is(err, db.ErrAckUnrecorded) {
+		return fmt.Errorf("broker acked event %s but the lease could not record it: %w", row.EventID, err)
+	}
 	if err != nil {
 		return p.fail(row, err)
 	}
-	publishedAt := time.Now().Unix()
-	if err := p.DB.MarkOutboxPublished(row.ID, p.Owner, publishedAt, publishedAt); err != nil {
-		return fmt.Errorf("broker acked event %s but the lease could not record it: %w", row.EventID, err)
+	if !sent {
+		slog.Info("publisher skipped a retired service", "service", body.ServiceID, "event", row.EventID)
 	}
 	return nil
 }
@@ -214,7 +206,7 @@ func (p *Publisher) fail(row db.OutboxEvent, cause error) error {
 	}
 	now := time.Now().Unix()
 	next := now + delay
-	if recErr := p.DB.RecordOutboxFailure(row.ID, p.Owner, now, cause.Error(), next); recErr != nil {
+	if recErr := p.DB.RecordOutboxFailure(row.ID, p.Owner, now, cause.Error(), next); recErr != nil && !errors.Is(recErr, sql.ErrNoRows) {
 		return fmt.Errorf("publish %s: %w (record failure: %v)", row.EventID, cause, recErr)
 	}
 	return fmt.Errorf("publish %s: %w", row.EventID, cause)
