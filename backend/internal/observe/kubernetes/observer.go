@@ -47,6 +47,7 @@ type group struct {
 	factory informers.SharedInformerFactory
 	cancel  context.CancelFunc
 	done    chan struct{}
+	again   chan struct{}
 	synced  bool
 }
 
@@ -112,6 +113,11 @@ func (o *Observer) Sync(services []config.Service) {
 	if o.client == nil && o.connErr == nil {
 		return
 	}
+	o.mu.Lock()
+	prev := append([]target(nil), o.targets...)
+	changed := !sameTargets(o.targets, next)
+	o.targets = next
+	o.mu.Unlock()
 	if o.client == nil {
 		msg := "kubernetes is not connected"
 		if o.connErr != nil {
@@ -120,12 +126,9 @@ func (o *Observer) Sync(services []config.Service) {
 		for _, item := range next {
 			_ = o.db.SetKubernetesSource(item.ServiceID, "unavailable", clip(msg), o.allow(item.ServiceID))
 		}
+		o.releaseTargets(removedTargets(prev, next))
 		return
 	}
-	o.mu.Lock()
-	changed := !sameTargets(o.targets, next)
-	o.targets = next
-	o.mu.Unlock()
 
 	wanted := map[string]bool{}
 	var wait []*group
@@ -151,6 +154,13 @@ func (o *Observer) Sync(services []config.Service) {
 		g.cancel()
 		<-g.done
 	}
+	o.releaseTargets(removedTargets(prev, next))
+}
+
+func (o *Observer) releaseTargets(items []target) {
+	for _, item := range items {
+		_ = o.db.ReleaseKubernetesMapping(item.ServiceID, item.ClusterID, item.Namespace, o.allow(item.ServiceID))
+	}
 }
 
 // Close stops every informer and waits for it to leave its current callback.
@@ -175,35 +185,69 @@ func (o *Observer) Close() {
 func (o *Observer) startNamespace(ns string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	factory := informers.NewSharedInformerFactoryWithOptions(o.client, 0, informers.WithNamespace(ns))
-	g := &group{factory: factory, cancel: cancel, done: make(chan struct{})}
+	g := &group{factory: factory, cancel: cancel, done: make(chan struct{}), again: make(chan struct{}, 1)}
 	o.mu.Lock()
 	o.groups[ns] = g
 	o.mu.Unlock()
 	pods := factory.Core().V1().Pods().Informer()
 	deploys := factory.Apps().V1().Deployments().Informer()
-	factory.Core().V1().Events().Informer()
-	factory.Apps().V1().ReplicaSets().Informer()
+	live := func() bool { return o.namespaceSynced(ns) }
 	pods.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		UpdateFunc: func(_, obj interface{}) { o.onPod(obj, true) },
+		AddFunc:    func(obj interface{}) { o.onPod(obj, live()) },
+		UpdateFunc: func(_, obj interface{}) { o.onPod(obj, live()) },
 		DeleteFunc: func(obj interface{}) { o.onPodGone(obj) },
 	})
 	deploys.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		UpdateFunc: func(_, obj interface{}) { o.onDeployment(obj, true) },
+		AddFunc:    func(obj interface{}) { o.onDeployment(obj, live()) },
+		UpdateFunc: func(_, obj interface{}) { o.onDeployment(obj, live()) },
 		DeleteFunc: func(obj interface{}) { o.onDeploymentGone(obj) },
 	})
-	factory.Core().V1().Events().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	events := factory.Core().V1().Events().Informer()
+	sets := factory.Apps().V1().ReplicaSets().Informer()
+	events.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(obj interface{}) { o.onEvent(obj) },
 		UpdateFunc: func(_, obj interface{}) { o.onEvent(obj) },
 	})
-	pods.SetWatchErrorHandler(func(_ *cache.Reflector, err error) { o.onWatchError(ns, err) })
-	deploys.SetWatchErrorHandler(func(_ *cache.Reflector, err error) { o.onWatchError(ns, err) })
+	watchErr := func(_ *cache.Reflector, err error) { o.onWatchError(ns, err) }
+	for _, inf := range []cache.SharedInformer{pods, deploys, events, sets} {
+		inf.SetWatchErrorHandler(watchErr)
+	}
 	go func() {
 		defer close(g.done)
 		factory.Start(ctx.Done())
 		o.syncThenReconcile(ctx, ns, factory)
+		o.reconcileAfterErrors(ctx, ns, factory)
 		<-ctx.Done()
 		factory.Shutdown()
 	}()
+}
+
+func (o *Observer) reconcileAfterErrors(ctx context.Context, ns string, factory informers.SharedInformerFactory) {
+	g := o.group(ns)
+	if g == nil {
+		return
+	}
+	for ctx.Err() == nil {
+		select {
+		case <-ctx.Done():
+			return
+		case <-g.again:
+			if o.awaitCache(ctx, factory) && ctx.Err() == nil {
+				o.listNamespace(ns)
+			}
+		}
+	}
+}
+
+func (o *Observer) requestReconcile(ns string) {
+	g := o.group(ns)
+	if g == nil || g.again == nil {
+		return
+	}
+	select {
+	case g.again <- struct{}{}:
+	default:
+	}
 }
 
 func (o *Observer) cacheSyncTimeout() time.Duration {
@@ -481,6 +525,7 @@ func (o *Observer) onWatchError(ns string, err error) {
 	case apierrors.IsResourceExpired(err) || apierrors.IsGone(err):
 		slog.Warn("kubernetes: watch expired", "namespace", ns)
 		o.markNamespace(ns, "gap", "watch expired")
+		o.requestReconcile(ns)
 	case apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err):
 		slog.Warn("kubernetes: permission denied", "namespace", ns)
 		o.markNamespace(ns, "unavailable", "kubernetes permission denied")
@@ -546,6 +591,20 @@ func targetsOf(services []config.Service) []target {
 			continue
 		}
 		out = append(out, target{ServiceID: svc.ID, ClusterID: k.ClusterID, Namespace: k.Namespace, Name: k.WorkloadName})
+	}
+	return out
+}
+
+func removedTargets(prev, next []target) []target {
+	keep := make(map[target]bool, len(next))
+	for _, item := range next {
+		keep[item] = true
+	}
+	var out []target
+	for _, item := range prev {
+		if !keep[item] {
+			out = append(out, item)
+		}
 	}
 	return out
 }

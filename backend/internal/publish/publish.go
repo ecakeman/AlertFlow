@@ -28,13 +28,18 @@ const (
 	leaseSeconds = 30
 )
 
+type messageWriter interface {
+	WriteMessages(ctx context.Context, msgs ...kafka.Message) error
+	Close() error
+}
+
 // Publisher claims outbox rows, waits for a broker ack, then marks them published.
 type Publisher struct {
 	DB      *db.DB
 	Brokers []string
 	Topic   string
 	Owner   string
-	writer  *kafka.Writer
+	writer  messageWriter
 }
 
 // New builds a publisher. brokers is a comma-separated list from ALERTFLOW_KAFKA_BROKERS.

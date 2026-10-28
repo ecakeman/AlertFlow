@@ -1,6 +1,7 @@
 package kubernetes
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -188,6 +189,112 @@ func readyPod(name, uid, rsUID string) *corev1.Pod {
 	}
 }
 
+func TestObjectsAddedAfterSyncAreFirstSeen(t *testing.T) {
+	client := fake.NewClientset()
+	database := db.OpenTest(t)
+	obs := New(database, func(string) bool { return true })
+	obs.client = client
+	obs.Sync([]config.Service{mapped()})
+	t.Cleanup(obs.Close)
+	waitSynced(t, obs, "lab")
+	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type LIKE 'kubernetes.%.first_seen'`); n != 0 {
+		t.Fatalf("initial events = %d", n)
+	}
+
+	replicas := int32(1)
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "lab", UID: types.UID("deploy-new"), ResourceVersion: "1"},
+		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+		Status:     appsv1.DeploymentStatus{Replicas: 1, ReadyReplicas: 1, AvailableReplicas: 1},
+	}
+	if _, err := client.AppsV1().Deployments("lab").Create(context.Background(), deploy, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	rs := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "api-rs", Namespace: "lab", UID: types.UID("rs-new"), ResourceVersion: "1",
+		OwnerReferences: []metav1.OwnerReference{{Kind: "Deployment", Name: "api", UID: types.UID("deploy-new")}},
+	}}
+	if _, err := client.AppsV1().ReplicaSets("lab").Create(context.Background(), rs, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitRows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'kubernetes.deployment.first_seen'`, 1)
+	pod := readyPod("api-1", "pod-new", "rs-new")
+	pod.ResourceVersion = "1"
+	if _, err := client.CoreV1().Pods("lab").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitRows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'kubernetes.pod.first_seen'`, 1)
+	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'kubernetes.pod.changed'`); n != 0 {
+		t.Fatalf("add was stored as a live change: %d", n)
+	}
+}
+
+func TestWatchExpiryReconcilesWithoutALiveChange(t *testing.T) {
+	replicas := int32(1)
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "lab", UID: types.UID("deploy-1"), ResourceVersion: "1"},
+		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+		Status:     appsv1.DeploymentStatus{Replicas: 1, ReadyReplicas: 1, AvailableReplicas: 1},
+	}
+	rs := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "api-rs", Namespace: "lab", UID: types.UID("rs-1"),
+		OwnerReferences: []metav1.OwnerReference{{Kind: "Deployment", Name: "api", UID: types.UID("deploy-1")}},
+	}}
+	pod := readyPod("api-0", "pod-1", "rs-1")
+	pod.ResourceVersion = "1"
+	client := fake.NewClientset(deploy, rs, pod)
+	database := db.OpenTest(t)
+	obs := New(database, func(string) bool { return true })
+	obs.client = client
+	obs.Sync([]config.Service{mapped()})
+	t.Cleanup(obs.Close)
+	waitSynced(t, obs, "lab")
+
+	stored, err := obs.group("lab").factory.Core().V1().Pods().Lister().Pods("lab").Get("api-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored.ResourceVersion = "2"
+	stored.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
+	obs.onWatchError("lab", apierrors.NewResourceExpired("expired"))
+	waitRows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'kubernetes.pod.changed' AND details->>'time_accuracy' = 'reconciled_after_gap'`, 1)
+	waitSource(t, database, "ok")
+}
+
+func TestRemovingTheMappingKeepsTimeline(t *testing.T) {
+	replicas := int32(1)
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "lab", UID: types.UID("deploy-1"), ResourceVersion: "1"},
+		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+	}
+	client := fake.NewClientset(deploy)
+	database := db.OpenTest(t)
+	obs := New(database, func(string) bool { return true })
+	obs.client = client
+	obs.Sync([]config.Service{mapped()})
+	t.Cleanup(obs.Close)
+	waitSynced(t, obs, "lab")
+	waitRows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'kubernetes.deployment.first_seen'`, 1)
+
+	bare := mapped()
+	bare.Kubernetes = config.ServiceKubernetes{}
+	obs.Sync([]config.Service{bare})
+	waitSource(t, database, "disabled")
+	var active bool
+	if err := database.QueryRow(`SELECT active FROM runtime_object_states WHERE resource_uid = 'deploy-1'`).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active {
+		t.Fatal("object stayed active after the mapping was removed")
+	}
+	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'kubernetes.deployment.inactive'`); n != 0 {
+		t.Fatalf("unmapping wrote an inactive event: %d", n)
+	}
+	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'kubernetes.deployment.first_seen'`); n != 1 {
+		t.Fatalf("timeline = %d", n)
+	}
+}
+
 func TestCacheSyncTimeoutDoesNotBlockReloadOrClose(t *testing.T) {
 	database := db.OpenTest(t)
 	client := fake.NewClientset()
@@ -253,6 +360,20 @@ func TestCloseWhileCacheSyncIsPending(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("shutdown wrote source rows = %d", n)
 	}
+}
+
+func waitRows(t *testing.T, database *db.DB, query string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var n int
+	for time.Now().Before(deadline) {
+		n = rows(t, database, query)
+		if n == want {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("%s = %d, want %d", query, n, want)
 }
 
 func waitSynced(t *testing.T, obs *Observer, ns string) {

@@ -188,6 +188,49 @@ func (db *DB) SetKubernetesSource(serviceID, status, errText string, present fun
 	return tx.Commit()
 }
 
+// ReleaseKubernetesMapping marks a mapping that is no longer configured.
+// Objects stop being active, and the source becomes disabled. Timeline rows stay.
+// This is not an object deletion.
+func (db *DB) ReleaseKubernetesMapping(serviceID, clusterID, namespace string, present func() bool) error {
+	if serviceID == "" {
+		return fmt.Errorf("kubernetes mapping is missing a service")
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := lockService(tx, serviceID); err != nil {
+		return err
+	}
+	if present != nil && !present() {
+		return ErrServiceGone
+	}
+	now := time.Now().Unix()
+	if _, err := tx.Exec(
+		`UPDATE runtime_object_states SET active = FALSE, updated_at = $4
+		 WHERE service_id = $1 AND cluster_id = $2 AND namespace = $3 AND active`,
+		serviceID, clusterID, namespace, now,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO runtime_source_state (
+			service_id, source, enabled, status, last_attempt_at, last_success_at,
+			last_error_safe, cursor, updated_at
+		 ) VALUES ($1, $2, FALSE, 'disabled', $3, NULL, 'mapping removed', '{}', $3)
+		 ON CONFLICT (service_id, source) DO UPDATE SET
+			enabled = FALSE,
+			status = 'disabled',
+			last_error_safe = 'mapping removed',
+			updated_at = EXCLUDED.updated_at`,
+		serviceID, KubernetesSource, now,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // DeactivateUnseenKubernetes marks stored objects that were absent from the
 // latest list. Each one gets a single inactive timeline row.
 func (db *DB) DeactivateUnseenKubernetes(serviceID, clusterID, namespace, kind string, seen []string, observedAt int64, present func() bool) error {
