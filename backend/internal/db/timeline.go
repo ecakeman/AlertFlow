@@ -31,6 +31,11 @@ type timelineEvent struct {
 	// origin object.
 	Source  string
 	Details json.RawMessage
+	ClusterID    string
+	Namespace    string
+	ResourceKind string
+	ResourceName string
+	ResourceUID  string
 }
 
 func incidentOpenedKey(id int64) string {
@@ -61,11 +66,15 @@ func insertTimelineTx(tx *sql.Tx, ev timelineEvent, now int64) error {
 	_, err := tx.Exec(
 		`INSERT INTO runtime_events (
 			event_key, service_id, source, event_type, severity, title, summary,
-			occurred_at, observed_at, recorded_at, incident_id, details
-		 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			occurred_at, observed_at, recorded_at, incident_id,
+			cluster_id, namespace, resource_kind, resource_name, resource_uid,
+			details
+		 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 		 ON CONFLICT (event_key) DO NOTHING`,
 		ev.Key, ev.ServiceID, source, ev.EventType, ev.Severity, ev.Title, ev.Summary,
-		ev.OccurredAt, ev.ObservedAt, now, incidentID, string(details),
+		ev.OccurredAt, ev.ObservedAt, now, incidentID,
+		nullStr(ev.ClusterID), nullStr(ev.Namespace), nullStr(ev.ResourceKind),
+		nullStr(ev.ResourceName), nullStr(ev.ResourceUID), string(details),
 	)
 	return err
 }

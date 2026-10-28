@@ -10,6 +10,7 @@ import (
 	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/db"
 	"github.com/ecakeman/alertflow/internal/diagnostics"
+	"github.com/ecakeman/alertflow/internal/observe/kubernetes"
 	"github.com/ecakeman/alertflow/internal/query"
 )
 
@@ -47,10 +48,17 @@ func (l *Loop) Run(ctx context.Context) error {
 	}
 	diag := diagnostics.New(l.DB)
 	diag.Configured = l.present
+	cluster := kubernetes.New(l.DB, l.present)
+	if kubernetes.Enabled() {
+		if err := cluster.Connect(); err != nil {
+			slog.Error("kubernetes: connection failed; checks continue", "error", err)
+		}
+	}
 	defer sched.Stop()
 	defer diag.Stop()
+	defer cluster.Close()
 
-	l.apply(sched, diag)
+	l.apply(sched, diag, cluster)
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	for {
@@ -58,12 +66,12 @@ func (l *Loop) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			l.apply(sched, diag)
+			l.apply(sched, diag, cluster)
 		}
 	}
 }
 
-func (l *Loop) apply(sched *Scheduler, diag *diagnostics.Collector) {
+func (l *Loop) apply(sched *Scheduler, diag *diagnostics.Collector, cluster *kubernetes.Observer) {
 	loaded, err := config.Load(l.Dir)
 	if err != nil {
 		slog.Warn("monitor: config reload failed", "error", err)
@@ -80,6 +88,7 @@ func (l *Loop) apply(sched *Scheduler, diag *diagnostics.Collector) {
 	}
 	sched.Sync(loaded.Services)
 	diag.Sync(loaded.Services)
+	cluster.Sync(loaded.Services)
 }
 
 func (l *Loop) present(serviceID string) bool {

@@ -120,6 +120,9 @@ func TestUpdateServiceKeepsDiagnostics(t *testing.T) {
 		Diagnostics: config.ServiceDiagnostics{
 			URL: "https://diag.example/snapshot", TokenEnv: "DIAGNOSTICS_TOKEN", Interval: 60,
 		},
+		Kubernetes: config.ServiceKubernetes{
+			ClusterID: "local", Namespace: "lab", WorkloadKind: "Deployment", WorkloadName: "api",
+		},
 	}}}
 	if err := config.Save(dir, cfg); err != nil {
 		t.Fatal(err)
@@ -152,5 +155,8 @@ func TestUpdateServiceKeepsDiagnostics(t *testing.T) {
 	svc := onDisk.Find("svc")
 	if svc == nil || svc.Name != "Renamed" || svc.Diagnostics.URL != "https://diag.example/snapshot" || svc.Diagnostics.TokenEnv != "DIAGNOSTICS_TOKEN" {
 		t.Fatalf("service = %+v", svc)
+	}
+	if svc.Kubernetes.WorkloadName != "api" || svc.Kubernetes.Namespace != "lab" {
+		t.Fatalf("kubernetes = %+v", svc.Kubernetes)
 	}
 }

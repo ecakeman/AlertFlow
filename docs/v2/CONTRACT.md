@@ -27,13 +27,14 @@ Phase 0 验收通过后才能改核心代码。一次只做一个阶段。
 审计对象是上面的基线提交，不是目标架构。
 
 - 角色有 `server`、`monitor`、`publisher`、`consumer`、`delivery`，以及一次性的 `retire-deliveries`（`backend/cmd/alertflow/main.go`）。`monitor` 每秒重读配置并跑周期检查和诊断采集。`api.New` 不 `Sync`。`POST /api/services/:id/check` 仍是一次性 `CheckNow`。删除服务先改 `config.yaml`，再在 `pg_advisory_xact_lock` 里写 `retired_services` 并删运行数据。检查和诊断拿到同一把锁后重读文件，服务已不在就不写。TLS 快照和检查在同一个事务里。Publisher 在发送前看 `retired_services`，Consumer 对不晚于 `retired_at` 的事件只记 `processed_events`，不再建 Incident 或运行状态。`retire-deliveries` 不在启动时运行。
-- HTTP 是 Gin v1.10.1。`HandleMethodNotAllowed` 为 false，错误方法进入 `serveSPA`。模块声明 Go 1.25.7。没有 gRPC，没有 client-go。Redis 只是可降级读缓存。
-- Goose 迁移嵌入二进制，在 `db.Open` 时自动执行，并有 advisory lock。已有 `00001`–`00014`。下一号是 `00015`。`00013` 让退役审计在投递行删除后仍然保留，并记录取消原因。`00014` 新增 Timeline 三张表。不要改已应用的迁移。
+- HTTP 是 Gin v1.10.1。`HandleMethodNotAllowed` 为 false，错误方法进入 `serveSPA`。模块声明 Go 1.25.7。没有 gRPC。`k8s.io/client-go`、`k8s.io/api`、`k8s.io/apimachinery` 固定为 v0.35.9。Redis 只是可降级读缓存。
+- Goose 迁移嵌入二进制，在 `db.Open` 时自动执行，并有 advisory lock。已有 `00001`–`00015`。下一号是 `00016`。`00013` 让退役审计在投递行删除后仍然保留，并记录取消原因。`00014` 新增 Timeline 三张表。`00015` 新增 `retired_services`。不要改已应用的迁移。
 - `integrations.type` 仍允许 `telegram`、`slack`、`email`、`webhook`、`agent_webhook`（`00010`）。创建、更新和测试只接受 `agent_webhook`。这四种外发渠道没有发送器，`Dispatcher.Notify` 已删除。
 - `notification_deliveries.status` 允许 `pending`、`running`、`retry_wait`、`succeeded`、`dead`、`cancelled`（`00012`）。
 - `insertDeliveriesTx` 只给启用的 `agent_webhook` 插入任务（`backend/internal/db/apply.go`）。`ClaimDeliveries` 只领取这种渠道。检查真正打开或解决故障时，同一事务写 `runtime_events`，键是 `incident:{id}:opened` 和 `incident:{id}:resolved`。手动创建走 `CreateManualIncident`，不经过 Kafka。
 - 前端集成表单只创建 `agent_webhook`。历史四种渠道仍可列出和删除。
 - `POST /api/incidents` 在一个事务里写 Incident、Timeline 和可用 Agent 的调查任务（`backend/internal/db/timeline.go`）。只改标题或开始时间不写 Timeline。首次解决写解决事件，不建新任务。
+- `ALERTFLOW_K8S_ENABLED` 为 `true` 或 `1` 时，`monitor` 只读观察已映射的 Deployment。client-go 为 v0.35.9。空的 `kubernetes` 块不采集。连接失败只把来源标成 `unavailable`，HTTP 检查继续。语义指纹变化才写 Timeline，`source` 为 `kubernetes`。不调用 `event.Decide`，不建 Incident，不提供 `GetKubernetesState`。
 - `monitor` 对配置了 `diagnostics.url` 的服务按间隔拉取应用诊断。种类与 Agent 相同，其中 `saturation` 和 `resource` 一样必须带 `status`：`unhealthy` 记为 `error`，`degraded` 记为 `warning`。失败只更新 `runtime_source_state`。成功时把异常项和恢复写进 `runtime_events`，`source` 为 `application_diagnostics`。替换或去掉采集时会等旧循环退出。不调用 `event.Decide`，不建 Incident。Agent 仍用 `DIAGNOSTICS_FILE` 直连。
 - `CheckNow` 在没有常驻 worker 时会造一个临时 worker 做一次性检查（`backend/internal/monitor/scheduler.go`）。
 - Agent 任务今天经 `agent_webhook` 发到 Agent 的 webhook。结果经 `POST /webhooks/agent` 回来。Agent 只读查询走 `/internal/agent/v1/...`。Agent 自己的回调出站表是 `agent_callback_outbox`（`agent/schema.sql`），靠 `message_id` 唯一。
@@ -177,7 +178,6 @@ A2A 使用 1.0 的 HTTP+JSON/REST，非流式，轮询任务。官方 Python SDK
 
 ## 8. 留到对应阶段再定的事项
 
-- Phase 5：与 Go 1.25 和目标 Kubernetes 版本匹配的 client-go、api、apimachinery 版本。
 - Phase 7：`.proto` 字段。
 - Phase 8：MCP 的最终 release、transport 和工具名。
 - Phase 9：RAGFlow 的最终 tag。

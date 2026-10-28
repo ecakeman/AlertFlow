@@ -62,6 +62,11 @@ Each entry defines one monitored endpoint.
     url: http://fault-lab:8090/diagnostics/v1/snapshot # http(s) URL
     token_env: DIAGNOSTICS_TOKEN # env var holding the bearer token; the token is not stored here
     interval: 60 # seconds between pulls (min 15). 0 or omitted uses 60
+  kubernetes: # optional; omit the block to skip collection
+    cluster_id: local-kind
+    namespace: fault-lab
+    workload_kind: Deployment
+    workload_name: fault-lab
 ```
 
 ### Field notes
@@ -82,6 +87,30 @@ Each entry defines one monitored endpoint.
   collector. `token_env` is the name of an environment variable. The service
   form does not edit this block, and saving a service from the form leaves it
   in place.
+- **`kubernetes`** is optional. An empty block does not start collection.
+  `workload_kind` must be `Deployment`. The service form does not edit this
+  block. Collection also requires `ALERTFLOW_K8S_ENABLED=true` on the monitor
+  process. `ALERTFLOW_KUBECONFIG` is a kubeconfig path; when it is empty the
+  process uses its in-cluster config. A connection or permission failure marks
+  that source unavailable and does not stop HTTP checks. The Role for one
+  namespace only needs `get`, `list`, and `watch` on `pods`, `events`,
+  `replicasets`, and `deployments`. It does not need a ClusterRole or any
+  write verb.
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: alertflow-observer
+  namespace: fault-lab
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "deployments"]
+    verbs: ["get", "list", "watch"]
+```
 
 ### `widget.mode`
 

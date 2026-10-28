@@ -145,6 +145,16 @@ type Service struct {
 	Chart       Chart              `yaml:"chart"`
 	Layout      Layout             `yaml:"layout"`
 	Diagnostics ServiceDiagnostics `yaml:"diagnostics,omitempty"`
+	Kubernetes  ServiceKubernetes  `yaml:"kubernetes,omitempty"`
+}
+
+// ServiceKubernetes maps a service to one Deployment. An empty block means
+// this service is not collected from the cluster.
+type ServiceKubernetes struct {
+	ClusterID    string `yaml:"cluster_id,omitempty"`
+	Namespace    string `yaml:"namespace,omitempty"`
+	WorkloadKind string `yaml:"workload_kind,omitempty"`
+	WorkloadName string `yaml:"workload_name,omitempty"`
 }
 
 // ServiceDiagnostics is an optional application-diagnostics snapshot. An empty
@@ -354,6 +364,9 @@ func (s *Service) Validate() error {
 			s.Check.RetryDelays[i] = maxRetryDelay
 		}
 	}
+	if err := s.normalizeKubernetes(); err != nil {
+		return err
+	}
 	s.Diagnostics.URL = strings.TrimSpace(s.Diagnostics.URL)
 	s.Diagnostics.TokenEnv = strings.TrimSpace(s.Diagnostics.TokenEnv)
 	if s.Diagnostics.URL == "" {
@@ -368,6 +381,24 @@ func (s *Service) Validate() error {
 	}
 	if s.Diagnostics.Interval < minDiagnosticsInterval {
 		s.Diagnostics.Interval = minDiagnosticsInterval
+	}
+	return nil
+}
+
+func (s *Service) normalizeKubernetes() error {
+	k := &s.Kubernetes
+	k.ClusterID = strings.TrimSpace(k.ClusterID)
+	k.Namespace = strings.TrimSpace(k.Namespace)
+	k.WorkloadKind = strings.TrimSpace(k.WorkloadKind)
+	k.WorkloadName = strings.TrimSpace(k.WorkloadName)
+	if k.ClusterID == "" && k.Namespace == "" && k.WorkloadKind == "" && k.WorkloadName == "" {
+		return nil
+	}
+	if k.ClusterID == "" || k.Namespace == "" || k.WorkloadName == "" {
+		return fmt.Errorf("kubernetes mapping needs cluster_id, namespace, and workload_name")
+	}
+	if k.WorkloadKind != "Deployment" {
+		return fmt.Errorf("kubernetes workload_kind must be Deployment")
 	}
 	return nil
 }

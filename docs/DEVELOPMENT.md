@@ -108,7 +108,7 @@ web-ui/
     lib/                 # icon-generator, image (canvas→WebP), prng, format
 ```
 
-Import direction worth remembering: `incident → {db, notify}`. The check scheduler does not import `incident`. `monitor`, `publish`, `consume`, and `deliver` are separate processes selected by `ALERTFLOW_ROLE`; the server process does not start them. `monitor` is the process that runs periodic checks and diagnostics collection.
+Import direction worth remembering: `incident → {db, notify}`. The check scheduler does not import `incident`. `monitor`, `publish`, `consume`, and `deliver` are separate processes selected by `ALERTFLOW_ROLE`; the server process does not start them. `monitor` is the process that runs periodic checks, diagnostics collection, and, when `ALERTFLOW_K8S_ENABLED` is set, the read-only Kubernetes observer (`k8s.io/client-go` v0.35.9).
 `incident` must never import `monitor` (cycle) — see
 [ARCHITECTURE.md §4](ARCHITECTURE.md#4-incident-lifecycle).
 

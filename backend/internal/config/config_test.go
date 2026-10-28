@@ -270,6 +270,27 @@ func TestDiagnosticsURLValidation(t *testing.T) {
 	}
 }
 
+func TestKubernetesMappingValidation(t *testing.T) {
+	cfg := Default()
+	cfg.Services = []Service{{
+		ID: "svc", Name: "Svc", URL: "https://example.com",
+		Kubernetes: ServiceKubernetes{Namespace: "lab"},
+	}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("partial kubernetes mapping was accepted")
+	}
+	cfg.Services[0].Kubernetes = ServiceKubernetes{
+		ClusterID: "local", Namespace: "lab", WorkloadKind: "Pod", WorkloadName: "api",
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("pod workload was accepted")
+	}
+	cfg.Services[0].Kubernetes.WorkloadKind = "Deployment"
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func equalInts(a, b []int) bool {
 	if len(a) != len(b) {
 		return false

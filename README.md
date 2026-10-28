@@ -154,6 +154,8 @@ imported.
 | `ALERTFLOW_KAFKA_BROKERS`| —        | Broker list for publisher and consumer.      |
 | `ALERTFLOW_AGENT_CALLBACK_TOKEN` | — | Bearer token for `POST /webhooks/agent` (the agent pushes its diagnosis back). Empty disables that endpoint. |
 | `REDIS_URL`              | —         | Optional read cache. Empty serves everything from PostgreSQL. |
+| `ALERTFLOW_K8S_ENABLED`  | off       | `true` or `1` starts the read-only Kubernetes observer on `monitor`. |
+| `ALERTFLOW_KUBECONFIG`   | —         | Kubeconfig path. Empty uses the in-cluster config. |
 | `ALERTFLOW_AGENT_TOKEN`  | —         | Bearer token for `GET /internal/agent/v1/...`. Empty disables those routes. |
 | `ALERTFLOW_DB_MAX_OPEN`  | `10`      | Maximum open database connections.           |
 | `ALERTFLOW_DB_MAX_IDLE`  | `5`       | Maximum idle database connections.           |

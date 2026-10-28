@@ -56,14 +56,14 @@ invent a test command.
   — keep `CGO_ENABLED=0`; schema via **goose** PostgreSQL migrations in `db/migrations/*.sql`, embedded and
   run on `Open`), `event` (`monitor.check.completed` payload and `Decide`), `publish` (outbox to Kafka), `consume` (Kafka to incidents and pending deliveries), `query` (the read-composition layer above), `cache` (optional Redis read cache), `auth` (bcrypt + session tokens; cookies are set by the api layer), `monitor` (HTTP
   checker + goroutine-per-service ticker scheduler; `Sync` reconciles on config change; also reads the
-  TLS cert off HTTPS responses; it does not call `incident`), `diagnostics` (optional per-service application snapshot poll; writes timeline and source state, does not open incidents), `incident` (opens/resolves
+  TLS cert off HTTPS responses; it does not call `incident`), `diagnostics` (optional per-service application snapshot poll; writes timeline and source state, does not open incidents), `observe/kubernetes` (optional read-only Deployment observer in the monitor process; writes timeline and object state, does not open incidents), `incident` (opens/resolves
   outage incidents from online↔offline transitions; imports `db`, never `monitor`, to avoid a
   cycle), `notify` (the diagnostic agent webhook; `Dispatcher.Test` sends that one registered sender), `image` (WebP
   validate/store), `archive` (export/import zip), `logger` (slog JSON setup), `api` (the `Server` owns
   config+db+scheduler and applies edits copy-on-write under a lock; **Gin** app with per-route
   auth/admin middleware, a central `ErrorHandler` rendering `{ "error": ... }`, and a native SPA
   catch-all serving the embedded FS — `/api/` and `/webhooks/` never fall through to it), `web` (`//go:embed dist`, exposes `web.FS()`). Entry:
-  `cmd/alertflow/main.go` (`ALERTFLOW_ROLE`: `server` listens and does not run periodic checks; `monitor` runs the scheduler and diagnostics collection; `publisher`, `consumer`, `delivery`, and `retire-deliveries` do not).
+  `cmd/alertflow/main.go` (`ALERTFLOW_ROLE`: `server` listens and does not run periodic checks; `monitor` runs the scheduler, diagnostics collection, and the optional Kubernetes observer; `publisher`, `consumer`, `delivery`, and `retire-deliveries` do not).
 - **Frontend:** Vue 3 `<script setup>`, Pinia stores (`auth`, `services`, `incidents`, `integrations`,
   `settings`, `ui`), typed API client in `src/api/`, `useServicesPolling` (~10s) drives live updates.
   Router guards gate setup/login/role. `/incidents` is open to any signed-in user (anyone may comment);
