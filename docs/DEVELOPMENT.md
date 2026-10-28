@@ -108,7 +108,7 @@ web-ui/
     lib/                 # icon-generator, image (canvas→WebP), prng, format
 ```
 
-Import direction worth remembering: `incident → {db, notify}`. The check scheduler does not import `incident`. `publish`, `consume`, and `deliver` are separate processes selected by `ALERTFLOW_ROLE`; the server process does not start them.
+Import direction worth remembering: `incident → {db, notify}`. The check scheduler does not import `incident`. `monitor`, `publish`, `consume`, and `deliver` are separate processes selected by `ALERTFLOW_ROLE`; the server process does not start them. `monitor` is the process that runs periodic checks and diagnostics collection.
 `incident` must never import `monitor` (cycle) — see
 [ARCHITECTURE.md §4](ARCHITECTURE.md#4-incident-lifecycle).
 

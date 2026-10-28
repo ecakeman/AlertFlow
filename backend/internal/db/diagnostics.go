@@ -54,11 +54,24 @@ func (db *DB) LastDiagnosticSuccess(serviceID string) (int64, error) {
 // ApplyDiagnostics records one pull. Abnormal items and recoveries become
 // timeline events. The pull does not open or resolve an incident.
 func (db *DB) ApplyDiagnostics(pull DiagnosticPull) error {
+	return db.ApplyDiagnosticsPresent(pull, nil)
+}
+
+// ApplyDiagnosticsPresent is ApplyDiagnostics with a presence check. present
+// runs after the service lock. A false result returns ErrServiceGone and
+// writes nothing. A nil present always writes.
+func (db *DB) ApplyDiagnosticsPresent(pull DiagnosticPull, present func() bool) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err := lockService(tx, pull.ServiceID); err != nil {
+		return err
+	}
+	if present != nil && !present() {
+		return ErrServiceGone
+	}
 	now := time.Now().Unix()
 	if pull.ObservedAt == 0 {
 		pull.ObservedAt = now

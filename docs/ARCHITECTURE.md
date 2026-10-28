@@ -24,20 +24,22 @@ common design mistake here.
 
 **Rule of thumb:** user-authored configuration a human might hand-edit → YAML.
 Machine-generated history, anything high-volume, and anything secret → PostgreSQL.
-One server process owns the YAML snapshot, so the first version still runs a
-single API replica even though the database can accept more connections.
+One server process writes the YAML snapshot, so the first version still runs a
+single API replica even though the database can accept more connections. The
+monitor process reads that same file.
 
 Why the split matters:
 
 - A service is deleted from `config.yaml`, but its incidents stay in PostgreSQL.
   DTO conversion therefore resolves names defensively (`toIncidentDTO` falls back
   to `"(deleted service)"`). Deleting a service explicitly cascades:
-  `handleDeleteService` first stops that service's checker and waits for the
-  current cycle to finish. It then deletes checks, the TLS snapshot, timeline
-  rows, runtime state, unpublished outbox rows and incidents in one transaction.
-  The service leaves `config.yaml` only after that commit. A cleanup error is
-  logged and returned, and the config is left in place. An image delete error
-  is handled the same way, before the config write.
+  `handleDeleteService` deletes the image, then removes the service from
+  `config.yaml`, then deletes checks, the TLS snapshot, timeline rows, runtime
+  state, unpublished outbox rows and incidents in one transaction. That
+  transaction takes the same service lock as a check or diagnostics write, and
+  those writes re-read the file after the lock and skip the insert when the
+  service is gone. A failed row delete writes the previous config back. An
+  image delete error happens before the config write.
 - Integration secrets are deliberately **not** in `config.yaml` — that file is
   exposed verbatim by `GET /api/config` (the raw YAML editor) and is what people
   screenshot and commit.
@@ -69,10 +71,12 @@ Consequences to respect:
 
 ## 3. The monitoring loop
 
-`internal/monitor/scheduler.go`. One goroutine per service, each on its own
-`interval` ticker. `Sync(services)` reconciles after any config change: unchanged
-workers keep running, changed ones restart, removed ones stop (`sameCheck`
-decides).
+`ALERTFLOW_ROLE=monitor` runs `internal/monitor/scheduler.go`. One goroutine per
+service, each on its own `interval` ticker. The process re-reads the config
+directory every second and `Sync`s. A failed read keeps the last good snapshot.
+`server` does not start these loops. `POST /api/services/:id/check` still runs
+one `CheckNow` in the API process. Unchanged workers keep running, changed ones
+restart, removed ones stop (`sameCheck` decides).
 
 One `check()` does, in order:
 
@@ -85,9 +89,9 @@ One `check()` does, in order:
 6. `storeTLS(...)` — upsert the cert snapshot (HTTPS only, offline cycles only).
 7. Update `w.lastStatus`, which the next cycle uses only to decide whether to retry.
 
-The scheduler stops there. It does not call `OnTransition` and it does not send notifications. `published_at` stays NULL in the server process. Claiming an outbox row uses `FOR UPDATE SKIP LOCKED` on `outbox_events` only. That is not a lock on a service, and `runMu` is not a lock across processes.
+The scheduler stops there. It does not call `OnTransition` and it does not send notifications. `published_at` stays NULL in the monitor process. Claiming an outbox row uses `FOR UPDATE SKIP LOCKED` on `outbox_events` only. That is not a lock on a service. `RecordCheckAndOutbox`, diagnostics apply and `DeleteServiceRecords` take `pg_advisory_xact_lock` keyed by the service id. After that lock, a check or diagnostics write re-reads `config.yaml` and skips the insert when the service is gone. When `REDIS_URL` is set, the monitor process invalidates that service's cached reads after a check commits. A Redis failure is logged and the check still writes.
 
-`internal/diagnostics` polls a service's optional `diagnostics.url` on its own interval. Kinds match the agent: `component_health`, `dependency_health`, `resource`, `saturation`, `recent_error`, `recent_change`, and `slow_operation`. The first four require `status` (`healthy`, `degraded`, `unhealthy`, or `unknown`). `degraded` is severity `warning` and `unhealthy` is `error`; `healthy` and `unknown` do not write a row. A later `healthy` or `unknown` after `degraded` or `unhealthy` writes one recovery row at severity `info`. `recent_error` is `error`, `slow_operation` is `warning`, and `recent_change` is `info`. A failed pull updates `runtime_source_state` only. Replacing or removing a collector waits until the previous loop has left its current poll. It does not call `event.Decide` and it does not open an incident. The agent still reads its own diagnostics file directly.
+The monitor process also runs `internal/diagnostics`, which polls a service's optional `diagnostics.url` on its own interval. Kinds match the agent: `component_health`, `dependency_health`, `resource`, `saturation`, `recent_error`, `recent_change`, and `slow_operation`. The first four require `status` (`healthy`, `degraded`, `unhealthy`, or `unknown`). `degraded` is severity `warning` and `unhealthy` is `error`; `healthy` and `unknown` do not write a row. A later `healthy` or `unknown` after `degraded` or `unhealthy` writes one recovery row at severity `info`. `recent_error` is `error`, `slow_operation` is `warning`, and `recent_change` is `info`. A failed pull updates `runtime_source_state` only. Replacing or removing a collector waits until the previous loop has left its current poll. It does not call `event.Decide` and it does not open an incident. The agent still reads its own diagnostics file directly.
 
 `ALERTFLOW_ROLE=publisher` is a second process of the same binary. It claims one due outbox row at a time, in `id` order, and writes it to the Kafka topic `alert-events` with the service id as the key. `published_at` is set only after the broker ack, and only when that process still holds the lease. Run one publisher. The database commit and the Kafka ack are not one atomic action: a crash after the ack and before `published_at` can publish the same event again.
 

@@ -196,15 +196,18 @@ func (db *DB) DeleteIncident(id int64) error {
 }
 
 // DeleteServiceRecords removes one service's checks, certificate snapshot,
-// timeline, runtime state, unpublished outbox rows and incidents. The caller
-// stops the checker before this and removes the service from config only after
-// it commits.
+// timeline, runtime state, unpublished outbox rows and incidents. It takes the
+// same service lock as a check or diagnostics write. The caller removes the
+// service from config before this, and puts that config back if this fails.
 func (db *DB) DeleteServiceRecords(serviceID string) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err := lockService(tx, serviceID); err != nil {
+		return err
+	}
 	for _, stmt := range []string{
 		`DELETE FROM checks WHERE service_id = $1`,
 		`DELETE FROM service_tls WHERE service_id = $1`,

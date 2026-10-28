@@ -38,12 +38,10 @@ func (s *Server) handleImport(c *gin.Context) error {
 	if err != nil {
 		return fail(http.StatusBadRequest, err.Error())
 	}
-	// Swap the freshly-applied config into memory and re-sync monitoring.
+	// The monitor process reloads this file. This process only keeps the snapshot.
 	s.mu.Lock()
 	s.cfg = cfg
-	sched := s.sched
 	s.mu.Unlock()
-	sched.Sync(cfg.Services)
 
 	return writeJSON(c, http.StatusOK, map[string]any{"ok": true, "services": len(cfg.Services)})
 }

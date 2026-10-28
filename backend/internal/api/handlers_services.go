@@ -129,31 +129,22 @@ func (s *Server) handleUpdateService(c *gin.Context) error {
 	return writeJSON(c, http.StatusOK, toServiceDTO(status.Service, status.Metrics))
 }
 
-// DELETE /api/services/:id → stop checks, remove runtime rows, then drop the
-// service from config. Config stays when runtime cleanup fails.
+// DELETE /api/services/:id → drop the service from config, then delete its
+// runtime rows under the same lock a late check would take. A failed row
+// delete puts the previous config back.
 func (s *Server) handleDeleteService(c *gin.Context) error {
 	id := c.Param("id")
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.cfg.Find(id) == nil {
+		s.mu.Unlock()
 		return configErr(errServiceNotFound)
 	}
-	if s.sched != nil {
-		s.sched.Release(id)
-	}
-	if s.diag != nil {
-		s.diag.Release(id)
-	}
-	if err := s.database.DeleteServiceRecords(id); err != nil {
-		slog.Error("delete service history", "service", id, "error", err)
-		s.restoreRuntime()
-		return fail(http.StatusInternalServerError, "could not delete service history")
-	}
 	if err := image.Delete(config.ImagesPath(s.configDir), id); err != nil {
+		s.mu.Unlock()
 		slog.Error("delete service image", "service", id, "error", err)
-		s.restoreRuntime()
 		return fail(http.StatusInternalServerError, "could not delete service image")
 	}
+	previous := s.cfg
 	next := s.cfg.Clone()
 	kept := make([]config.Service, 0, len(next.Services))
 	for _, svc := range next.Services {
@@ -163,22 +154,28 @@ func (s *Server) handleDeleteService(c *gin.Context) error {
 	}
 	next.Services = kept
 	if err := config.Save(s.configDir, next); err != nil {
+		s.mu.Unlock()
 		slog.Error("delete service config", "service", id, "error", err)
-		s.restoreRuntime()
 		return fail(http.StatusInternalServerError, "could not delete service")
 	}
 	s.cfg = next
-	s.restoreRuntime()
+	database := s.database
+	dir := s.configDir
+	s.mu.Unlock()
+	// The row delete takes the service lock. Releasing s.mu first lets a check
+	// that already holds that lock finish its presence read.
+	if err := database.DeleteServiceRecords(id); err != nil {
+		slog.Error("delete service history", "service", id, "error", err)
+		s.mu.Lock()
+		if restoreErr := config.Save(dir, previous); restoreErr != nil {
+			slog.Error("restore service config", "service", id, "error", restoreErr)
+		} else {
+			s.cfg = previous
+		}
+		s.mu.Unlock()
+		return fail(http.StatusInternalServerError, "could not delete service history")
+	}
 	return writeEmpty(c, http.StatusNoContent)
-}
-
-func (s *Server) restoreRuntime() {
-	if s.sched != nil {
-		s.sched.Sync(s.cfg.Services)
-	}
-	if s.diag != nil {
-		s.diag.Sync(s.cfg.Services)
-	}
 }
 
 type layoutItem struct {

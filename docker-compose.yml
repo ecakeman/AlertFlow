@@ -65,6 +65,22 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  monitor:
+    image: alertflow:local
+    environment:
+      ALERTFLOW_ROLE: monitor
+      ALERTFLOW_DATABASE_URL: postgres://alertflow:${POSTGRES_PASSWORD:-alertflow}@postgres:5432/alertflow?sslmode=disable
+      ALERTFLOW_CONFIG_DIR: /config
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    volumes:
+      - alertflow-config:/config
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   kafka:
     image: ${KAFKA_IMAGE:-apache/kafka:3.9.1}
     hostname: kafka

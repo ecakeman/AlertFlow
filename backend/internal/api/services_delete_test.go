@@ -10,7 +10,6 @@ import (
 
 	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/db"
-	"github.com/ecakeman/alertflow/internal/monitor"
 )
 
 func TestDeleteServiceRemovesHistoryBeforeConfig(t *testing.T) {
@@ -27,10 +26,7 @@ func TestDeleteServiceRemovesHistoryBeforeConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sched := monitor.New(database)
-	sched.Sync(loaded.Services)
-	t.Cleanup(sched.Stop)
-	s := &Server{configDir: dir, cfg: loaded, database: database, sched: sched}
+	s := &Server{configDir: dir, cfg: loaded, database: database}
 	attachQuery(s)
 	app := s.newEngine()
 	token := "session-token"
@@ -82,10 +78,18 @@ func TestDeleteServiceRemovesHistoryBeforeConfig(t *testing.T) {
 
 func TestDeleteServiceKeepsConfigWhenCleanupFails(t *testing.T) {
 	database := db.OpenTest(t)
+	dir := t.TempDir()
 	cfg := &config.Config{Services: []config.Service{{
 		ID: "svc", Name: "API", URL: "https://example.com",
 	}}}
-	s := &Server{cfg: cfg, database: database}
+	if err := config.Save(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{configDir: dir, cfg: loaded, database: database}
 	if err := database.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -94,12 +98,16 @@ func TestDeleteServiceKeepsConfigWhenCleanupFails(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodDelete, "/api/services/svc", nil)
 	c.Params = gin.Params{{Key: "id", Value: "svc"}}
 
-	err := s.handleDeleteService(c)
+	err = s.handleDeleteService(c)
 	if err == nil {
 		t.Fatal("delete succeeded after the database was closed")
 	}
 	if s.config().Find("svc") == nil {
 		t.Fatal("config dropped the service after cleanup failed")
+	}
+	onDisk, err := config.Load(dir)
+	if err != nil || onDisk.Find("svc") == nil {
+		t.Fatalf("config on disk = %v, %v", onDisk, err)
 	}
 }
 
@@ -120,9 +128,7 @@ func TestUpdateServiceKeepsDiagnostics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sched := monitor.New(database)
-	t.Cleanup(sched.Stop)
-	s := &Server{configDir: dir, cfg: loaded, database: database, sched: sched}
+	s := &Server{configDir: dir, cfg: loaded, database: database}
 	attachQuery(s)
 	app := s.newEngine()
 	user, err := database.CreateUser("admin", "hash", "admin")

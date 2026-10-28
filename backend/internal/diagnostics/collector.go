@@ -4,6 +4,7 @@ package diagnostics
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -33,6 +34,10 @@ type Collector struct {
 	// beforeStore, when set, runs after a snapshot is fetched and before it is
 	// written. Tests use it to hold a poll open.
 	beforeStore func()
+
+	// Configured, when set, is called inside the store transaction after the
+	// service lock. A false result drops the snapshot.
+	Configured func(serviceID string) bool
 }
 
 type worker struct {
@@ -209,7 +214,17 @@ func (c *Collector) Poll(ctx context.Context, svc config.Service) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	return c.db.ApplyDiagnostics(pull)
+	var present func() bool
+	if c.Configured != nil {
+		present = func() bool { return c.Configured(svc.ID) }
+	}
+	if err := c.db.ApplyDiagnosticsPresent(pull, present); err != nil {
+		if errors.Is(err, db.ErrServiceGone) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (c *Collector) poll(ctx context.Context, svc config.Service) {

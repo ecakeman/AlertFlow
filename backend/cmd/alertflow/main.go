@@ -1,5 +1,5 @@
-// Command alertflow is the single-binary server: it serves the embedded web UI
-// and the JSON API (Gin), and runs the monitoring scheduler.
+// Command alertflow is one binary with several roles. server serves the API and
+// the embedded UI. monitor runs periodic checks and diagnostics collection.
 package main
 
 import (
@@ -15,11 +15,13 @@ import (
 	"time"
 
 	"github.com/ecakeman/alertflow/internal/api"
+	"github.com/ecakeman/alertflow/internal/cache"
 	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/consume"
 	"github.com/ecakeman/alertflow/internal/db"
 	"github.com/ecakeman/alertflow/internal/deliver"
 	"github.com/ecakeman/alertflow/internal/logger"
+	"github.com/ecakeman/alertflow/internal/monitor"
 	"github.com/ecakeman/alertflow/internal/notify"
 	"github.com/ecakeman/alertflow/internal/publish"
 	"github.com/ecakeman/alertflow/internal/query"
@@ -40,6 +42,8 @@ func main() {
 	switch envOr("ALERTFLOW_ROLE", "server") {
 	case "server":
 		runServer(addr, configDir)
+	case "monitor":
+		runMonitor(configDir)
 	case "publisher":
 		runPublisher()
 	case "consumer":
@@ -49,7 +53,7 @@ func main() {
 	case "retire-deliveries":
 		runRetireDeliveries()
 	default:
-		slog.Error("ALERTFLOW_ROLE must be server, publisher, consumer, delivery, or retire-deliveries")
+		slog.Error("ALERTFLOW_ROLE must be server, monitor, publisher, consumer, delivery, or retire-deliveries")
 		os.Exit(1)
 	}
 }
@@ -83,6 +87,31 @@ func runServer(addr, configDir string) {
 	defer cancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "error", err)
+	}
+}
+
+func runMonitor(configDir string) {
+	dir := resolveConfigDir(configDir)
+	database := openRoleDB()
+	defer database.Close()
+	redisCache, cacheErr := cache.New(os.Getenv("REDIS_URL"))
+	if cacheErr != nil {
+		slog.Error("redis: ignoring unusable REDIS_URL; checks still write", "error", cacheErr)
+		redisCache = nil
+	}
+	if redisCache.Enabled() {
+		if err := redisCache.Ping(context.Background()); err != nil {
+			slog.Warn("redis: not reachable; checks still write", "error", err)
+		}
+	}
+	defer redisCache.Close()
+	loop := &monitor.Loop{DB: database, Dir: dir, Cache: redisCache}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	slog.Info("monitor started", "config_dir", dir)
+	if err := loop.Run(ctx); err != nil && ctx.Err() == nil {
+		slog.Error("monitor stopped", "error", err)
+		os.Exit(1)
 	}
 }
 

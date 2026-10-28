@@ -45,6 +45,16 @@ func Load(dir string) (*Config, error) {
 	return Parse(data)
 }
 
+// ServiceConfigured reports whether id is in the config on disk. A read or
+// parse failure uses fallback, the last snapshot that loaded.
+func ServiceConfigured(dir, id string, fallback *Config) bool {
+	loaded, err := Load(dir)
+	if err != nil {
+		loaded = fallback
+	}
+	return loaded != nil && loaded.Find(id) != nil
+}
+
 // Parse unmarshals and validates raw YAML bytes.
 func Parse(data []byte) (*Config, error) {
 	var c Config

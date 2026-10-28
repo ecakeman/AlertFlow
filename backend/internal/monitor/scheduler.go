@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -23,10 +24,13 @@ type Scheduler struct {
 	client *http.Client
 
 	// OnCheckStored, when set, runs after a check row and its outbox row have
-	// committed (and the cert snapshot is written). The API server uses it to
-	// retire cached reads for that service. It runs on the worker goroutine, so
-	// it must return quickly.
+	// committed (and the cert snapshot is written). It retires cached reads for
+	// that service. It runs on the worker goroutine, so it must return quickly.
 	OnCheckStored func(serviceID string)
+
+	// Configured, when set, is called inside the store transaction after the
+	// service lock. A false result drops the check instead of inserting it.
+	Configured func(serviceID string) bool
 
 	mu      sync.Mutex
 	workers map[string]*worker
@@ -188,7 +192,14 @@ func (s *Scheduler) finishCycle(w *worker, svc config.Service, cyc cycleResult, 
 		slog.Error("monitor: build check event failed", "service", svc.ID, "error", err)
 		return
 	}
-	if _, err := s.db.RecordCheckAndOutbox(ev); err != nil {
+	var present func() bool
+	if s.Configured != nil {
+		present = func() bool { return s.Configured(svc.ID) }
+	}
+	if _, err := s.db.RecordCheckAndOutboxPresent(ev, present); err != nil {
+		if errors.Is(err, db.ErrServiceGone) {
+			return
+		}
 		slog.Error("monitor: store check failed", "service", svc.ID, "error", err)
 		return
 	}

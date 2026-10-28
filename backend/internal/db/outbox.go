@@ -27,10 +27,22 @@ type OutboxEvent struct {
 	LeaseUntil    *int64
 }
 
+// ErrServiceGone means the on-disk config no longer contains the service, so
+// the write was dropped after the service lock was taken.
+var ErrServiceGone = errors.New("service is no longer configured")
+
 // RecordCheckAndOutbox inserts one check and its outbox event in a single
 // transaction. The event payload's check_id is the id returned by that insert.
 // A failure, including Commit, leaves neither row behind.
 func (db *DB) RecordCheckAndOutbox(ev event.CheckCompleted) (int64, error) {
+	return db.RecordCheckAndOutboxPresent(ev, nil)
+}
+
+// RecordCheckAndOutboxPresent is RecordCheckAndOutbox with a presence check.
+// present runs after the service lock and before the insert. A false result
+// rolls the transaction back and returns ErrServiceGone. A nil present always
+// writes.
+func (db *DB) RecordCheckAndOutboxPresent(ev event.CheckCompleted, present func() bool) (int64, error) {
 	if ev.EventID == "" || ev.EventType == "" || ev.ServiceID == "" {
 		return 0, fmt.Errorf("record check: event is missing id, type, or service")
 	}
@@ -39,6 +51,12 @@ func (db *DB) RecordCheckAndOutbox(ev event.CheckCompleted) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
+	if err := lockService(tx, ev.ServiceID); err != nil {
+		return 0, err
+	}
+	if present != nil && !present() {
+		return 0, ErrServiceGone
+	}
 
 	attempts := ev.Attempts
 	if attempts < 1 {
@@ -76,6 +94,14 @@ func (db *DB) RecordCheckAndOutbox(ev event.CheckCompleted) (int64, error) {
 		return 0, err
 	}
 	return checkID, nil
+}
+
+// lockService takes a transaction-scoped advisory lock for one service.
+// Check writes, diagnostic writes and service deletion all use it, so a delete
+// cannot commit while one of those writes is still inserting.
+func lockService(tx *sql.Tx, serviceID string) error {
+	_, err := tx.Exec(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, serviceID)
+	return err
 }
 
 // GetOutboxByEventID loads one outbox row. The stored event_id is the stable id.

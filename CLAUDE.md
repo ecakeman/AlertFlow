@@ -63,7 +63,7 @@ invent a test command.
   config+db+scheduler and applies edits copy-on-write under a lock; **Gin** app with per-route
   auth/admin middleware, a central `ErrorHandler` rendering `{ "error": ... }`, and a native SPA
   catch-all serving the embedded FS — `/api/` and `/webhooks/` never fall through to it), `web` (`//go:embed dist`, exposes `web.FS()`). Entry:
-  `cmd/alertflow/main.go` (`ALERTFLOW_ROLE`: `server` listens and runs the scheduler; `publisher`, `consumer`, `delivery`, and `retire-deliveries` do not).
+  `cmd/alertflow/main.go` (`ALERTFLOW_ROLE`: `server` listens and does not run periodic checks; `monitor` runs the scheduler and diagnostics collection; `publisher`, `consumer`, `delivery`, and `retire-deliveries` do not).
 - **Frontend:** Vue 3 `<script setup>`, Pinia stores (`auth`, `services`, `incidents`, `integrations`,
   `settings`, `ui`), typed API client in `src/api/`, `useServicesPolling` (~10s) drives live updates.
   Router guards gate setup/login/role. `/incidents` is open to any signed-in user (anyone may comment);

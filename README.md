@@ -78,9 +78,9 @@ real work:
 
 Use Docker Compose. PostgreSQL 16 stores users, sessions, checks, incidents and
 integrations. Kafka (`apache/kafka:3.9.1`) carries check events. The `alertflow`
-container serves the API and the embedded UI and runs checks. `publisher`,
-`consumer`, and `delivery` are the same binary with `ALERTFLOW_ROLE` set; run
-one publisher. The app connects with `ALERTFLOW_DATABASE_URL` from `.env`. No
+container serves the API and the embedded UI. `monitor` runs the checks.
+`publisher`, `consumer`, and `delivery` are the same binary with
+`ALERTFLOW_ROLE` set; run one publisher and one monitor. The app connects with `ALERTFLOW_DATABASE_URL` from `.env`. No
 published image is required — Compose builds `alertflow:local` from this
 repository. The consumer records incidents and queues notification tasks. The
 delivery process sends those tasks. Sending is at-least-once.
@@ -150,7 +150,7 @@ imported.
 | `ALERTFLOW_ADDR`         | `:8080`   | Listen address (`host:port`).                |
 | `ALERTFLOW_LOG_LEVEL`    | `info`    | Log verbosity: `debug`, `info`, `warn`, `error`. |
 | `ALERTFLOW_DATABASE_URL` | —         | PostgreSQL DSN. Required.                    |
-| `ALERTFLOW_ROLE`         | `server`  | `server`, `publisher`, `consumer`, `delivery`, or `retire-deliveries`. |
+| `ALERTFLOW_ROLE`         | `server`  | `server`, `monitor`, `publisher`, `consumer`, `delivery`, or `retire-deliveries`. |
 | `ALERTFLOW_KAFKA_BROKERS`| —        | Broker list for publisher and consumer.      |
 | `ALERTFLOW_AGENT_CALLBACK_TOKEN` | — | Bearer token for `POST /webhooks/agent` (the agent pushes its diagnosis back). Empty disables that endpoint. |
 | `REDIS_URL`              | —         | Optional read cache. Empty serves everything from PostgreSQL. |
