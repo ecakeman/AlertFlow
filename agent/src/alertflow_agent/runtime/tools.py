@@ -446,7 +446,11 @@ def _mcp_request(name, args, state, settings, source):
             "truncation_limit": cap,
         }, recorded
     query = str(args.get("query") or "")
-    scoped = scope_promql(query, selector) if source == "prometheus" else scope_logql(query, selector)
+    scoped = (
+        scope_promql(query, selector, settings.mcp_max_window_seconds)
+        if source == "prometheus"
+        else scope_logql(query, selector)
+    )
     if not scoped:
         raise MCPError("unscoped")
     recorded["query"] = scoped

@@ -120,6 +120,12 @@ def test_unscoped_query_is_not_sent():
     assert scope_promql('up{service="api",job="a"}', 'service="api"') == 'up{service="api",job="a"}'
     assert scope_promql('up{service=api}', 'service="api"') is None
     assert scope_promql("up", "service=api") is None
+    assert scope_promql("up offset 30d", 'service="api"') is None
+    assert scope_promql("rate(http_requests_total[30d])", 'service="api"') is None
+    assert scope_promql("up @ 1700000000", 'service="api"') is None
+    assert scope_promql("rate(http_requests_total[5ms])", 'service="api"') is None
+    assert scope_promql("max_over_time(up[5m:1m])", 'service="api"') == 'max_over_time(up{service="api"}[5m:1m])'
+    assert scope_promql("rate(http_requests_total[5m])", 'service="api"', 60) is None
     assert scope_logql('{job="x"} |= "e"', '{service="api"}') == '{job="x",service="api"} |= "e"'
 
 
@@ -184,6 +190,19 @@ def test_window_row_and_request_caps():
     assert "PROMETHEUS_TOO_LARGE" in _gaps(blocked)
     assert huge.calls == []
     assert refused["status"] == "error"
+
+
+def test_promql_time_modifiers_are_not_sent():
+    client = Recorder()
+    state = _state()
+    for query in ("up offset 30d", "rate(http_requests_total[30d])", "up @ 1700000000", "up[5m:1m:1m]"):
+        result = run_tool("query", {"query": query}, state, _settings(), {"mcp": client})
+        assert result["status"] == "error"
+    assert "PROMETHEUS_UNSCOPED" in _gaps(state)
+    assert client.calls == []
+    allowed = run_tool("query", {"query": "max_over_time(up[5m:1m])"}, _state(), _settings(), {"mcp": client})
+    assert allowed["status"] == "success"
+    assert client.calls[0][1]["query"] == 'max_over_time(up{service="api"}[5m:1m])'
 
 
 def test_conflicting_service_matcher_is_not_sent():

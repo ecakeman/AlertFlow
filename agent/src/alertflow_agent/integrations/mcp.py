@@ -170,9 +170,15 @@ def selector_for(raw: str, service_id: str) -> str | None:
     return value.strip()
 
 
-def scope_promql(query: str, matcher: str) -> str | None:
+_DURATION = re.compile(r"^(\d+)([smhdwy])$")
+_DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 365 * 86400}
+
+
+def scope_promql(query: str, matcher: str, max_window_seconds: int = 3600) -> str | None:
     text = (query or "").strip()
     if not text or not matcher or text.count("{") > 1 or text.count("{") != text.count("}"):
+        return None
+    if not _promql_window_ok(text, max_window_seconds):
         return None
     masked = _mask_promql(text)
     metrics = []
@@ -225,6 +231,40 @@ def _parse_matchers(text: str) -> list[tuple[str, str, str]] | None:
     if source.strip() and not parsed:
         return None
     return parsed
+
+
+def _promql_window_ok(text: str, max_window_seconds: int) -> bool:
+    """拒绝 offset、@，以及超出预算或无法识别的区间选择器。"""
+    visible = _blank_quotes(text)
+    if "@" in visible or re.search(r"\boffset\b", visible, re.IGNORECASE):
+        return False
+    if visible.count("[") != visible.count("]"):
+        return False
+    limit = max(int(max_window_seconds), 0)
+    for match in re.finditer(r"\[([^\]]*)\]", visible):
+        parts = [part.strip() for part in match.group(1).split(":")]
+        if not match.group(1).strip() or len(parts) not in (1, 2):
+            return False
+        for part in parts:
+            seconds = _duration_seconds(part)
+            if seconds is None or seconds > limit:
+                return False
+    return True
+
+
+def _duration_seconds(token: str) -> int | None:
+    match = _DURATION.fullmatch(token)
+    if not match:
+        return None
+    return int(match.group(1)) * _DURATION_UNITS[match.group(2)]
+
+
+def _blank_quotes(text: str) -> str:
+    chars = list(text)
+    for match in re.finditer(r'"[^"]*"', text):
+        for index in range(match.start(), match.end()):
+            chars[index] = " "
+    return "".join(chars)
 
 
 def _mask_promql(text: str) -> str:
