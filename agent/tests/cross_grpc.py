@@ -3,6 +3,7 @@
 import json
 import sys
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import grpc
 from google.protobuf import struct_pb2
@@ -11,15 +12,50 @@ from alertflow_agent import config
 from alertflow_agent.callbacks import CallbackSender
 from alertflow_agent.chat_worker import ChatWorker
 from alertflow_agent.db import PostgresStore, apply_schema
-from alertflow_agent.grpc_tasks import serve_tasks
+from alertflow_agent.generated.alertflow.agent.v1 import agent_pb2, agent_pb2_grpc
+from alertflow_agent.grpc_tasks import TaskServicer
 from alertflow_agent.integrations.alertflow import AlertFlowClient
 from alertflow_agent.runtime.graph import Runner
-from alertflow_agent.generated.alertflow.agent.v1 import agent_pb2, agent_pb2_grpc
+from alertflow_agent.runtime.llm import ScriptedModel
+from fakes import FakeAlertFlow, event_row
 
 
 class FixedModel:
     def answer(self, prompt):
         return "cross-language answer"
+
+
+class DropFirstInvestigationAck(agent_pb2_grpc.AgentTaskServiceServicer):
+    """The first accepted investigation is stored, then its success response is dropped."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.dropped = False
+
+    def StartInvestigation(self, request, context):
+        result = self.inner.StartInvestigation(request, context)
+        if result.accepted and not self.dropped:
+            self.dropped = True
+            context.abort(grpc.StatusCode.UNAVAILABLE, "response dropped")
+        return result
+
+    def StartChat(self, request, context):
+        return self.inner.StartChat(request, context)
+
+
+class DropFirstStored:
+    """Calls the real callback RPC, then treats the first stored result as lost."""
+
+    def __init__(self, client):
+        self.client = client
+        self.dropped = False
+
+    def __call__(self, payload):
+        result = self.client.submit_callback(as_dict(payload))
+        if result.get("stored") and not self.dropped:
+            self.dropped = True
+            raise ConnectionError("response dropped")
+        return result
 
 
 def reply(payload):
@@ -54,10 +90,22 @@ def investigation(message_id):
     )
 
 
+def open_store(url):
+    return PostgresStore(url)
+
+
 def count_runs(url):
-    store = PostgresStore(url)
+    store = open_store(url)
     try:
         return len(store.list_runs())
+    finally:
+        store.conn.close()
+
+
+def run_keys(url):
+    store = open_store(url)
+    try:
+        return [row["dedupe_key"] for row in store.list_runs()]
     finally:
         store.conn.close()
 
@@ -66,6 +114,19 @@ def as_dict(payload):
     if isinstance(payload, str):
         return json.loads(payload)
     return payload
+
+
+def serve(listen, settings, store):
+    server = grpc.server(
+        ThreadPoolExecutor(max_workers=4),
+        options=(("grpc.max_receive_message_length", 1024 * 1024),),
+    )
+    agent_pb2_grpc.add_AgentTaskServiceServicer_to_server(
+        DropFirstInvestigationAck(TaskServicer(settings, store)), server,
+    )
+    server.add_insecure_port(listen)
+    server.start()
+    return server
 
 
 def main():
@@ -79,7 +140,7 @@ def main():
         alertflow_agent_grpc_token=go_token,
         llm_api_key="test",
     )
-    server = serve_tasks(settings, store)
+    server = serve(listen, settings, store)
     hooks = Runner.__new__(Runner)
     hooks.settings = settings
     hooks.store = store
@@ -92,21 +153,7 @@ def main():
             break
         op = cmd["op"]
         try:
-            if op == "accept":
-                message_id = cmd["message_id"]
-                channel = grpc.insecure_channel(listen)
-                stub = agent_pb2_grpc.AgentTaskServiceStub(channel)
-                result = stub.StartInvestigation(
-                    investigation(message_id),
-                    metadata=(("authorization", "Bearer " + task_token),),
-                )
-                channel.close()
-                reply({
-                    "accepted": result.accepted,
-                    "duplicate": result.duplicate,
-                    "persisted": count_runs(database_url),
-                })
-            elif op == "bad_token":
+            if op == "bad_token":
                 before = count_runs(database_url)
                 channel = grpc.insecure_channel(listen)
                 stub = agent_pb2_grpc.AgentTaskServiceStub(channel)
@@ -120,17 +167,19 @@ def main():
                     reply({"code": exc.code().name, "persisted": count_runs(database_url), "before": before})
                 finally:
                     channel.close()
+            elif op == "runs":
+                reply({"persisted": count_runs(database_url), "keys": run_keys(database_url)})
             elif op == "query":
                 client = AlertFlowClient(go_target, go_token, timeout=5)
                 timeline = client.timeline("svc", 1, 4_000_000_000, [])
-                event_row = next(row for row in timeline["events"] if row.get("eventKey") == "tl:1")
+                matched = next(row for row in timeline["events"] if row.get("eventKey") == "tl:1")
                 reply({
                     "config": client.runtime_config(),
                     "incidents": client.incidents("svc", 10),
                     "incident": client.incident(int(cmd["incident_id"])),
                     "metrics": client.metrics("svc", "24h"),
                     "checks": client.checks("svc", None, 10),
-                    "timeline": event_row,
+                    "timeline": matched,
                     "sources": client.source_coverage("svc"),
                     "kubernetes": client.kubernetes_state("svc"),
                 })
@@ -163,10 +212,30 @@ def main():
                 failed = hooks._failure_callback(run_id, "graph failed")
                 store.enqueue_callback(report)
                 store.enqueue_callback(failed)
-                sent = CallbackSender(settings, store).drain()
                 client = AlertFlowClient(go_target, go_token, timeout=5)
-                replay = [client.submit_callback(as_dict(item["payload"])) for item in store.callback_rows()]
-                reply({"disabled": disabled, "sent": sent, "replay": replay})
+                sender = CallbackSender(settings, store)
+                sender.submit = DropFirstStored(client)
+                sent = sender.drain()
+                waiting = sum(1 for item in store.callback_rows() if item["status"] == "retry_wait")
+                store.conn.execute(
+                    "UPDATE agent_callback_outbox SET next_attempt_at = now() WHERE status = 'retry_wait'",
+                )
+                retried = sender.drain()
+                reply({"disabled": disabled, "sent": sent, "waiting": waiting, "retried": retried})
+            elif op == "graph":
+                row = event_row("agent")
+                row["id"] = str(uuid.uuid4())
+                row["dedupe_key"] = "graph-exec"
+                row["service_id"] = "svc"
+                row["incident_id"] = int(cmd["incident_id"])
+                row["input_event"]["service_id"] = "svc"
+                row["input_event"]["incident_id"] = int(cmd["incident_id"])
+                row["input_event"]["script"] = ["finish"]
+                store.insert_run(row)
+                Runner(settings, store, FakeAlertFlow(), ScriptedModel()).execute(row["id"])
+                sent = CallbackSender(settings, store).drain()
+                saved = store.get(row["id"]) or {}
+                reply({"status": saved.get("status"), "sent": sent, "run_id": row["id"]})
             elif op == "chat_answer":
                 answered = ChatWorker(settings, store, hooks).drain()
                 sent = CallbackSender(settings, store).drain()

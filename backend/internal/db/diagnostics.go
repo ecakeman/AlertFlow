@@ -184,11 +184,45 @@ func insertDiagnosticEvent(tx *sql.Tx, pull DiagnosticPull, item DiagnosticItem,
 	if err != nil {
 		return err
 	}
+	if legacy, ok := legacyDiagnosticKey(item, recovered); ok {
+		stored, err := diagnosticLegacyHit(tx, pull.ServiceID, legacy)
+		if err != nil {
+			return err
+		}
+		if stored {
+			return nil
+		}
+	}
 	return insertTimelineTx(tx, timelineEvent{
 		Key: key, ServiceID: pull.ServiceID, Source: DiagnosticSource, EventType: eventType,
 		Severity: severity, Title: title, Summary: item.Summary,
 		OccurredAt: item.ObservedAt, ObservedAt: pull.ObservedAt, Details: details,
 	}, now)
+}
+
+// legacyDiagnosticKey is the event key written before the service id was part
+// of the key. A later poll of the same service must not store that event again.
+func legacyDiagnosticKey(item DiagnosticItem, recovered bool) (string, bool) {
+	if item.EventID == "" {
+		return "", false
+	}
+	key := "diagnostics:" + item.EventID
+	if recovered {
+		key += ":recovered"
+	}
+	return key, true
+}
+
+func diagnosticLegacyHit(tx *sql.Tx, serviceID, key string) (bool, error) {
+	var owner string
+	err := tx.QueryRow(`SELECT service_id FROM runtime_events WHERE event_key = $1`, key).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return owner == serviceID, nil
 }
 
 func diagnosticEventKey(serviceID string, item DiagnosticItem) string {

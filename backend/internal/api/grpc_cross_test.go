@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -53,10 +54,6 @@ func TestCrossLanguageGRPC(t *testing.T) {
 	})
 
 	database := db.OpenTest(t)
-	inc, err := database.CreateIncident("svc", "auto", time.Now().Unix(), nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	now := time.Now().Unix()
 	if err := database.InsertCheck("svc", now, "online", nil, nil, "", 1); err != nil {
 		t.Fatal(err)
@@ -98,6 +95,7 @@ func TestCrossLanguageGRPC(t *testing.T) {
 
 	py := os.Getenv("ALERTFLOW_PYTHON")
 	if py == "" {
+		var err error
 		py, err = exec.LookPath("python3")
 		if err != nil {
 			t.Fatal(err)
@@ -155,13 +153,47 @@ func TestCrossLanguageGRPC(t *testing.T) {
 	if deniedPy["code"] != "UNAUTHENTICATED" || deniedPy["persisted"] != float64(0) || deniedPy["before"] != float64(0) {
 		t.Fatalf("python auth = %v", deniedPy)
 	}
-	first := call("accept", map[string]any{"message_id": "m-1"})
-	if first["accepted"] != true || first["duplicate"] == true || first["persisted"] != float64(1) {
-		t.Fatalf("accept = %v", first)
+	ev, err := event.NewCheckCompleted("svc", "API", "https://example.com/health", now, db.StatusOffline, nil, nil, "down", 1)
+	if err != nil {
+		t.Fatal(err)
 	}
-	again := call("accept", map[string]any{"message_id": "m-1"})
-	if again["duplicate"] != true || again["persisted"] != float64(1) {
-		t.Fatalf("duplicate = %v", again)
+	ev.CheckID = 2
+	if err := database.ApplyCheckEvent(ev); err != nil {
+		t.Fatal(err)
+	}
+	var incID int64
+	if err := database.QueryRow(`SELECT id FROM incidents WHERE service_id = 'svc'`).Scan(&incID); err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := deliver.DialTasks(ctx, taskAddr, "task-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tasks.Close() })
+	tasks.Q = s.queries
+	clock := time.Now().Unix()
+	worker := &deliver.Worker{DB: database, Owner: "cross", Now: func() int64 { return clock }, Tasks: tasks}
+	if n, err := worker.ProcessDue(ctx); err != nil || n != 1 {
+		t.Fatalf("investigation delivery n=%d err=%v", n, err)
+	}
+	if status := deliveryStatus(t, database, ev.EventID); status != "retry_wait" {
+		t.Fatalf("dropped investigation ack = %s", status)
+	}
+	firstRuns := call("runs", nil)
+	if firstRuns["persisted"] != float64(1) {
+		t.Fatalf("stored before retry = %v", firstRuns)
+	}
+	clock += 5
+	if n, err := worker.ProcessDue(ctx); err != nil || n != 1 {
+		t.Fatalf("investigation retry n=%d err=%v", n, err)
+	}
+	if status := deliveryStatus(t, database, ev.EventID); status != "succeeded" {
+		t.Fatalf("investigation delivery = %s", status)
+	}
+	stored := call("runs", nil)
+	keys, _ := stored["keys"].([]any)
+	if stored["persisted"] != float64(1) || len(keys) != 1 || keys[0] != "incident_start:"+strconv.FormatInt(incID, 10) {
+		t.Fatalf("investigation runs = %v", stored)
 	}
 
 	conn, err := grpc.NewClient(goAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -180,7 +212,7 @@ func TestCrossLanguageGRPC(t *testing.T) {
 		t.Fatalf("bad token wrote a row, reports = %d", n)
 	}
 
-	query := call("query", map[string]any{"incident_id": inc.ID})
+	query := call("query", map[string]any{"incident_id": incID})
 	cfg, _ := query["config"].(map[string]any)
 	llm, _ := cfg["llm"].(map[string]any)
 	if cfg["context_budget_tokens"] != float64(42) || llm["model"] != "cross-model" || cfg["memory_enabled"] != false {
@@ -191,7 +223,7 @@ func TestCrossLanguageGRPC(t *testing.T) {
 		t.Fatalf("incidents = %v", incidents)
 	}
 	one, _ := query["incident"].(map[string]any)
-	if one["id"] != float64(inc.ID) || one["serviceId"] != "svc" {
+	if one["id"] != float64(incID) || one["serviceId"] != "svc" {
 		t.Fatalf("incident = %v", one)
 	}
 	metrics, _ := query["metrics"].(map[string]any)
@@ -227,18 +259,8 @@ func TestCrossLanguageGRPC(t *testing.T) {
 	}
 
 	callbacks := call("callbacks", nil)
-	if callbacks["disabled"] != true || callbacks["sent"] != float64(3) {
+	if callbacks["disabled"] != true || callbacks["sent"] != float64(2) || callbacks["waiting"] != float64(1) || callbacks["retried"] != float64(1) {
 		t.Fatalf("callbacks = %v", callbacks)
-	}
-	replay, _ := callbacks["replay"].([]any)
-	if len(replay) != 3 {
-		t.Fatalf("replay = %v", callbacks["replay"])
-	}
-	for _, item := range replay {
-		ack, _ := item.(map[string]any)
-		if ack["duplicate"] != true {
-			t.Fatalf("replay = %v", callbacks["replay"])
-		}
 	}
 	if n := count(t, database, `SELECT COUNT(*) FROM agent_runs`); n != 3 {
 		t.Fatalf("reports = %d", n)
@@ -248,9 +270,24 @@ func TestCrossLanguageGRPC(t *testing.T) {
 			t.Fatalf("%s = %d", kind, n)
 		}
 	}
+	graph := call("graph", map[string]any{"incident_id": incID})
+	if graph["status"] != "completed" || graph["sent"] != float64(2) {
+		t.Fatalf("graph = %v", graph)
+	}
+	if n := count(t, database, `SELECT COUNT(*) FROM agent_runs`); n != 5 {
+		t.Fatalf("graph reports = %d", n)
+	}
+	for _, kind := range []string{"agent.run.started", "agent.run.completed"} {
+		if n := count(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = $1`, kind); n != 2 {
+			t.Fatalf("%s = %d", kind, n)
+		}
+	}
+	if n := count(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'agent.run.failed'`); n != 1 {
+		t.Fatalf("failed timeline = %d", n)
+	}
 
 	payload, err := json.Marshal(db.DeliverySnapshot{
-		Event: db.EventChatRequested, EventID: "chat-cross", IncidentID: &inc.ID,
+		Event: db.EventChatRequested, EventID: "chat-cross", IncidentID: &incID,
 		ServiceID: "svc", ServiceName: "API", OccurredAt: now,
 		Chat: &db.ChatSnapshot{RequestID: "chat-cross", Message: "why?"},
 	})
@@ -258,17 +295,10 @@ func TestCrossLanguageGRPC(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, _, err := database.CreateChatRequest(db.ChatRequestRow{
-		RequestID: "chat-cross", IncidentID: inc.ID, Message: "why?",
+		RequestID: "chat-cross", IncidentID: incID, Message: "why?",
 	}, payload, now); err != nil {
 		t.Fatal(err)
 	}
-	tasks, err := deliver.DialTasks(ctx, taskAddr, "task-token")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = tasks.Close() })
-	tasks.Q = s.queries
-	worker := &deliver.Worker{DB: database, Owner: "cross", Now: func() int64 { return time.Now().Unix() }, Tasks: tasks}
 	if n, err := worker.ProcessDue(ctx); err != nil || n != 1 {
 		t.Fatalf("chat delivery n=%d err=%v", n, err)
 	}
@@ -304,7 +334,7 @@ func TestCrossLanguageGRPC(t *testing.T) {
 		t.Fatalf("break = %v", closed)
 	}
 	downPayload, err := json.Marshal(db.DeliverySnapshot{
-		Event: db.EventChatRequested, EventID: "chat-down", IncidentID: &inc.ID,
+		Event: db.EventChatRequested, EventID: "chat-down", IncidentID: &incID,
 		ServiceID: "svc", ServiceName: "API", OccurredAt: now,
 		Chat: &db.ChatSnapshot{RequestID: "chat-down", Message: "still?"},
 	})
@@ -312,7 +342,7 @@ func TestCrossLanguageGRPC(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, _, err := database.CreateChatRequest(db.ChatRequestRow{
-		RequestID: "chat-down", IncidentID: inc.ID, Message: "still?",
+		RequestID: "chat-down", IncidentID: incID, Message: "still?",
 	}, downPayload, now); err != nil {
 		t.Fatal(err)
 	}
