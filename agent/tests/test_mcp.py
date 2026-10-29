@@ -107,6 +107,12 @@ def test_unscoped_query_is_not_sent():
     assert "PROMETHEUS_UNSCOPED" in _gaps(state)
     assert client.calls == []
     assert scope_promql("up", 'service="api"') == 'up{service="api"}'
+    assert scope_promql('up{job="a"}', 'service="api"') == 'up{job="a",service="api"}'
+    assert scope_promql("rate(http_requests_total[5m])", 'service="api"') == 'rate(http_requests_total{service="api"}[5m])'
+    assert scope_promql("sum(rate(http_requests_total[5m]))", 'service="api"') == 'sum(rate(http_requests_total{service="api"}[5m]))'
+    assert scope_promql("sum by (code) (up)", 'service="api"') == 'sum by (code) (up{service="api"})'
+    assert scope_promql("up or down", 'service="api"') is None
+    assert scope_promql('foo{a="b"} + bar{c="d"}', 'service="api"') is None
     assert scope_logql('{job="x"} |= "e"', '{service="api"}') == '{job="x",service="api"} |= "e"'
 
 
@@ -116,8 +122,12 @@ def test_configured_query_writes_scoped_evidence_once():
     result = run_tool("query", {"query": "up"}, state, _settings(), {"mcp": client})
     assert result["status"] == "success"
     sent = client.calls[0][1]
-    assert sent["query"] == 'up{service="api"}'
-    assert sent["end"] - sent["start"] == 3600
+    assert sent == {
+        "query": 'up{service="api"}',
+        "timestamp": "2026-10-11T10:00:00Z",
+        "truncation_limit": 100,
+    }
+    assert "time" not in sent and "limit" not in sent
     item = state["evidence"][result["evidence_ids"][0]]
     assert item["source_type"] == "prometheus"
     assert item["data"]["query"] == 'up{service="api"}'
@@ -140,7 +150,11 @@ def test_window_row_and_request_caps():
         {"mcp": client},
     )
     sent = client.calls[0][1]
-    assert sent["end"] - sent["start"] == 60
+    assert sent["start_time"] == "2026-10-11T09:59:00Z"
+    assert sent["end_time"] == "2026-10-11T10:00:00Z"
+    assert sent["step"] == "30s"
+    assert sent["truncation_limit"] == 2
+    assert "start" not in sent and "end" not in sent and "limit" not in sent
     item = state["evidence"][result["evidence_ids"][0]]
     assert item["data"]["samples"] == 2
     assert item["data"]["value"] == "alpha"
@@ -154,6 +168,23 @@ def test_window_row_and_request_caps():
     assert "PROMETHEUS_TOO_LARGE" in _gaps(blocked)
     assert huge.calls == []
     assert refused["status"] == "error"
+
+
+def test_label_values_sends_matches_and_v018_times():
+    client = Recorder(text='["api"]')
+    state = _state()
+    result = run_tool("label_values", {"label": "service"}, state, _settings(), {"mcp": client})
+    assert result["status"] == "success"
+    sent = client.calls[0][1]
+    assert sent == {
+        "label": "service",
+        "matches": ['{service="api"}'],
+        "start_time": "2026-10-11T09:00:00Z",
+        "end_time": "2026-10-11T10:00:00Z",
+        "truncation_limit": 100,
+    }
+    assert isinstance(sent["matches"][0], str)
+    assert "matchers" not in sent
 
 
 def test_call_budget_stops_before_another_connection():

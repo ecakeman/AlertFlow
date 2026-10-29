@@ -17,6 +17,8 @@ Do not use the Prometheus image tag `latest`. v0.19.0 renames the binary to `pro
 
 Set `PROMETHEUS_MCP_TOKEN` and `LOKI_MCP_TOKEN` only in the Agent process environment or a secret store. They are bearer tokens for the MCP endpoints, not `ALERTFLOW_AGENT_GRPC_TOKEN`. The Agent does not write them into evidence, reports, or logs.
 
+`PROMETHEUS_MCP_TOKEN` is forwarded by `prometheus-mcp-server` v0.18.0 to the Prometheus backend. A client that sends `Authorization` does not, by itself, mean the MCP endpoint requires authentication. If that port is reachable beyond the Agent, put it behind a proxy or another network control that actually checks the caller.
+
 The MCP process needs read-only access to Prometheus and Loki. Do not enable TSDB admin on the Prometheus MCP server.
 
 Map each AlertFlow `service_id` before expecting evidence:

@@ -353,7 +353,7 @@ def _mcp(name, args, state, settings, clients) -> dict:
         return {"status": "invalid_request", "note": "unknown tool", "evidence_ids": []}
     source = "prometheus" if name in PROMETHEUS_TOOLS else "loki"
     try:
-        sent = _mcp_request(name, args, state, settings, source)
+        sent, recorded = _mcp_request(name, args, state, settings, source)
     except MCPError as exc:
         _mcp_gap(state, source, exc.kind)
         return {"status": "error", "note": _mcp_note(source, exc.kind), "evidence_ids": []}
@@ -390,10 +390,10 @@ def _mcp(name, args, state, settings, clients) -> dict:
     truncated = summary.pop("truncated", False)
     data = {
         "source": source,
-        "query": _scrub(str(sent.get("query") or sent.get("matchers") or ""), settings),
-        "start": sent.get("start"),
-        "end": sent.get("end"),
-        "limit": sent.get("limit") or limit,
+        "query": _scrub(str(recorded.get("query") or ""), settings),
+        "start": recorded.get("start"),
+        "end": recorded.get("end"),
+        "limit": recorded.get("limit") or limit,
         **summary,
     }
     limitations = ["truncated to the configured row cap"] if truncated else []
@@ -405,6 +405,11 @@ def _mcp(name, args, state, settings, clients) -> dict:
 
 
 def _mcp_request(name, args, state, settings, source):
+    """返回发给上游的参数，以及写入 evidence 的时间窗。
+
+    Prometheus 字段对齐 v0.18.0：时间为字符串，截断用 truncation_limit，
+    label_values 的服务选择器放在 matches 数组里。
+    """
     service_id = (state.get("event") or {}).get("service_id") or ""
     if name in SCOPED_TOOLS:
         raw = settings.prometheus_service_selectors if source == "prometheus" else settings.loki_service_selectors
@@ -420,31 +425,58 @@ def _mcp_request(name, args, state, settings, source):
         _optional_epoch(args.get("end", args.get("to", args.get("time")))),
         settings.mcp_max_window_seconds,
     )
+    start_text = _rfc3339(start)
+    end_text = _rfc3339(end)
+    cap = int(settings.mcp_max_samples if source == "prometheus" else settings.mcp_max_log_lines)
+    recorded = {"query": "", "start": start_text, "end": end_text, "limit": cap}
     if name in {"label_names", "metric_metadata"}:
-        sent = {"start": start, "end": end}
+        sent = {}
         if name == "metric_metadata":
             sent["metric"] = str(args.get("metric") or args.get("name") or "")
-        return sent
+        return sent, recorded
     if name == "label_values":
-        matchers = selector if selector.startswith("{") else "{" + selector + "}"
-        return {"label": str(args.get("label") or "job"), "matchers": matchers, "start": start, "end": end}
+        match = selector if selector.startswith("{") else "{" + selector + "}"
+        recorded["query"] = match
+        return {
+            "label": str(args.get("label") or "job"),
+            "matches": [match],
+            "start_time": start_text,
+            "end_time": end_text,
+            "truncation_limit": cap,
+        }, recorded
     query = str(args.get("query") or "")
     scoped = scope_promql(query, selector) if source == "prometheus" else scope_logql(query, selector)
     if not scoped:
         raise MCPError("unscoped")
-    sent = {"query": scoped, "start": start, "end": end}
-    if name == "query":
-        sent["time"] = end
+    recorded["query"] = scoped
     if name == "loki_query":
         requested = args.get("limit")
         try:
-            requested = int(requested) if requested is not None else settings.mcp_max_log_lines
+            requested = int(requested) if requested is not None else cap
         except (TypeError, ValueError):
-            requested = settings.mcp_max_log_lines
-        sent["limit"] = max(1, min(requested, int(settings.mcp_max_log_lines)))
-    else:
-        sent["limit"] = int(settings.mcp_max_samples)
-    return sent
+            requested = cap
+        limit = max(1, min(requested, cap))
+        recorded["limit"] = limit
+        return {"query": scoped, "start": start_text, "end": end_text, "limit": limit}, recorded
+    if name == "query":
+        return {"query": scoped, "timestamp": end_text, "truncation_limit": cap}, recorded
+    return {
+        "query": scoped,
+        "start_time": start_text,
+        "end_time": end_text,
+        "step": _prom_step(start, end, cap),
+        "truncation_limit": cap,
+    }, recorded
+
+
+def _rfc3339(epoch: int) -> str:
+    return datetime.fromtimestamp(int(epoch), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _prom_step(start: int, end: int, samples: int) -> str:
+    span = max(int(end) - int(start), 1)
+    seconds = max(1, (span + max(int(samples), 1) - 1) // max(int(samples), 1))
+    return f"{seconds}s"
 
 
 def _optional_epoch(value):

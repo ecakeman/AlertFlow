@@ -10,7 +10,9 @@ from starlette.applications import Starlette
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 
+from alertflow_agent.config import Settings
 from alertflow_agent.integrations.mcp import HTTPSource, MCPError
+from alertflow_agent.runtime.tools import run_tool
 
 HITS = []
 
@@ -90,6 +92,72 @@ def test_streamable_http_initialize_discovery_call_and_auth():
             source.call("query", {"query": "bad"})
     finally:
         server.should_exit = True
+
+
+SCHEMA = []
+
+
+def prom_query(query: str = "", timestamp: str = "", truncation_limit: int = 0) -> str:
+    SCHEMA.append(("query", query, timestamp, truncation_limit))
+    return "1"
+
+
+def prom_range(query: str = "", start_time: str = "", end_time: str = "", step: str = "", truncation_limit: int = 0) -> str:
+    SCHEMA.append(("range_query", query, start_time, end_time, step, truncation_limit))
+    return "1"
+
+
+def prom_label_values(label: str = "", matches: list | None = None, start_time: str = "", end_time: str = "", truncation_limit: int = 0) -> str:
+    SCHEMA.append(("label_values", label, list(matches or []), start_time, end_time, truncation_limit))
+    return "api"
+
+
+class _Bridge:
+    def __init__(self, source):
+        self.source = source
+
+    def call(self, name, args):
+        return self.source.call(name, args)
+
+
+def test_v018_schema_server_receives_incident_time_and_selector():
+    SCHEMA.clear()
+    app = FastMCP("prom-schema", json_response=True, stateless_http=True)
+    app.add_tool(prom_query, name="query")
+    app.add_tool(prom_range, name="range_query")
+    app.add_tool(prom_label_values, name="label_values")
+    server, port = _server(app.streamable_http_app())
+    try:
+        source = HTTPSource(f"http://127.0.0.1:{port}/mcp", "", 5, 65536)
+        settings = Settings(
+            prometheus_mcp_url=f"http://127.0.0.1:{port}/mcp",
+            prometheus_service_selectors='{"api":"service=\\"api\\""}',
+            mcp_max_samples=100,
+            mcp_max_window_seconds=3600,
+        )
+        state = {"event": {"service_id": "api", "occurred_at": "2026-10-11T10:00:00Z"}, "evidence": {}, "coverage": {"gaps": []}}
+        assert run_tool("query", {"query": "up"}, state, settings, {"mcp": _Bridge(source)})["status"] == "success"
+        assert run_tool("range_query", {"query": "rate(http_requests_total[5m])"}, state, settings, {"mcp": _Bridge(source)})["status"] == "success"
+        assert run_tool("label_values", {"label": "service"}, state, settings, {"mcp": _Bridge(source)})["status"] == "success"
+    finally:
+        server.should_exit = True
+    assert SCHEMA[0] == ("query", 'up{service="api"}', "2026-10-11T10:00:00Z", 100)
+    assert SCHEMA[1] == (
+        "range_query",
+        'rate(http_requests_total{service="api"}[5m])',
+        "2026-10-11T09:00:00Z",
+        "2026-10-11T10:00:00Z",
+        "36s",
+        100,
+    )
+    assert SCHEMA[2] == (
+        "label_values",
+        "service",
+        ['{service="api"}'],
+        "2026-10-11T09:00:00Z",
+        "2026-10-11T10:00:00Z",
+        100,
+    )
 
 
 def test_http_429_timeout_and_disconnect_are_distinct():

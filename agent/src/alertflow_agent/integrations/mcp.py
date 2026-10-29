@@ -19,9 +19,12 @@ SCOPED_TOOLS = frozenset({"query", "range_query", "label_values", "loki_query"})
 EVIDENCE_TOOLS = SCOPED_TOOLS
 APPROVED_TOOLS = frozenset(PROMETHEUS_TOOLS) | frozenset(LOKI_TOOLS)
 
-_REJECT_PROMQL = re.compile(r"\b(or|unless|by|without)\b", re.IGNORECASE)
 _IDENT = re.compile(r"[A-Za-z_:][A-Za-z0-9_:]*")
 _MATCHER = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)\s*(=~|!~|=|!=)\s*"([^"]*)"')
+_PROMQL_KEYWORDS = {
+    "and", "or", "unless", "offset", "bool", "ignoring", "on",
+    "group_left", "group_right", "by", "without",
+}
 
 
 class MCPError(Exception):
@@ -169,13 +172,14 @@ def selector_for(raw: str, service_id: str) -> str | None:
 
 def scope_promql(query: str, matcher: str) -> str | None:
     text = (query or "").strip()
-    if not text or not matcher or _REJECT_PROMQL.search(text) or text.count("{") > 1:
+    if not text or not matcher or text.count("{") > 1 or text.count("{") != text.count("}"):
         return None
-    if text.count("{") != text.count("}"):
-        return None
+    masked = _mask_promql(text)
     metrics = []
-    for match in _IDENT.finditer(text):
-        if text[match.end():].lstrip().startswith("("):
+    for match in _IDENT.finditer(masked):
+        if match.group(0).lower() in _PROMQL_KEYWORDS:
+            continue
+        if masked[match.end():].lstrip().startswith("("):
             continue
         metrics.append(match)
     if len(metrics) != 1:
@@ -190,6 +194,22 @@ def scope_promql(query: str, matcher: str) -> str | None:
         return text[:open_at] + "{" + merged + "}" + text[close_at + 1:]
     metric = metrics[0]
     return text[:metric.end()] + "{" + matcher + "}" + text[metric.end():]
+
+
+def _mask_promql(text: str) -> str:
+    chars = list(text)
+
+    def blank(pattern: re.Pattern[str]) -> None:
+        for match in pattern.finditer(text):
+            for index in range(match.start(), match.end()):
+                chars[index] = " "
+
+    blank(re.compile(r'"[^"]*"'))
+    blank(re.compile(r"\{[^}]*\}"))
+    blank(re.compile(r"\[[^\]]*\]"))
+    blank(re.compile(r"\b(?:by|without)\s*\([^)]*\)", re.IGNORECASE))
+    blank(re.compile(r"\d+[smhdwy]"))
+    return "".join(chars)
 
 
 def scope_logql(query: str, selector: str) -> str | None:
