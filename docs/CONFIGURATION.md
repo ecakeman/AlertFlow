@@ -9,6 +9,8 @@ Agent traffic is gRPC. `ALERTFLOW_GRPC_ADDR` (default `:9090`) and `ALERTFLOW_AG
 
 Optional MCP evidence is off unless the Agent process has a URL. `PROMETHEUS_MCP_URL` is the Prometheus MCP Streamable HTTP endpoint (`.../mcp` on `ghcr.io/tjhop/prometheus-mcp-server:v0.18.0`). `LOKI_MCP_URL` is the Loki MCP Streamable HTTP endpoint (`.../stream` on `grafana/loki-mcp` `v0.6.0`). `PROMETHEUS_MCP_TOKEN` and `LOKI_MCP_TOKEN` are optional bearer tokens for those endpoints and are not the agent gRPC tokens. `MCP_TIMEOUT_SECONDS` defaults to 10. An empty URL does not open a connection. These services are not in the core Compose file.
 
+Optional RAGFlow is off unless `RAGFLOW_BASE_URL` is set. The locked image is `infiniflow/ragflow:v0.27.3`. `RAGFLOW_API_KEY` is the bearer token for that server, and `RAGFLOW_AGENT_ID` is the native agent id. An empty URL does not open a connection, and RAGFlow is not a core Compose service. See `deploy/ragflow/README.md`.
+
 `PROMETHEUS_SERVICE_SELECTORS` and `LOKI_SERVICE_SELECTORS` are JSON objects keyed by AlertFlow `service_id`. The Prometheus value is an equality matcher such as `service="api"`. The Loki value is a stream selector such as `{service="api"}`. A service with no entry is not queried, and the result is not stored as that service's evidence. `MCP_MAX_WINDOW_SECONDS` (3600), `MCP_MAX_SAMPLES` (100), `MCP_MAX_LOG_LINES` (100), `MCP_MAX_RESPONSE_BYTES` (65536) and `MCP_MAX_CALLS` (4) bound each run. See `deploy/observability-mcp/README.md`.
 
 **Not in this file** (they live in PostgreSQL, via `ALERTFLOW_DATABASE_URL`): users,

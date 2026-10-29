@@ -421,3 +421,7 @@ def test_default_compose_has_empty_mcp_urls_and_no_mcp_service():
     assert env["MCP_TIMEOUT_SECONDS"] == "${MCP_TIMEOUT_SECONDS:-10}"
     assert env["PROMETHEUS_SERVICE_SELECTORS"] == "${PROMETHEUS_SERVICE_SELECTORS:-}"
     assert env["LOKI_SERVICE_SELECTORS"] == "${LOKI_SERVICE_SELECTORS:-}"
+    assert "ragflow" not in names
+    assert env["RAGFLOW_BASE_URL"] == "${RAGFLOW_BASE_URL:-}"
+    assert env["RAGFLOW_API_KEY"] == "${RAGFLOW_API_KEY:-}"
+    assert env["RAGFLOW_AGENT_ID"] == "${RAGFLOW_AGENT_ID:-}"

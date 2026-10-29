@@ -1,0 +1,30 @@
+{
+  "code": 0,
+  "data": {
+    "data": {
+      "content": "To install Neovim, the process varies depending on your operating system.",
+      "reference": {
+        "chunks": {
+          "20": {
+            "id": "4b8935ac0a22deb1",
+            "content": "```cd /usr/ports/editors/neovim/ && make install```## Android[Termux](https://github.com/termux/termux-app) offers a Neovim package.",
+            "document_id": "4bdd2ff65e1511f0907f09f583941b45",
+            "document_name": "INSTALL22.md",
+            "dataset_id": "456ce60c5e1511f0907f09f583941b45",
+            "similarity": 0.5697155305154673
+          }
+        },
+        "doc_aggs": {
+          "INSTALL22.md": {
+            "doc_name": "INSTALL22.md",
+            "doc_id": "4bdd2ff65e1511f0907f09f583941b45",
+            "count": 3
+          }
+        }
+      },
+      "trace": []
+    },
+    "message_id": "c4692a2683d911f0858253708ecb6573",
+    "session_id": "c39f6f9c83d911f0858253708ecb6573"
+  }
+}

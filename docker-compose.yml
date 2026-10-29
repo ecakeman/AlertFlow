@@ -214,6 +214,10 @@ services:
       MCP_MAX_SAMPLES: ${MCP_MAX_SAMPLES:-100}
       MCP_MAX_RESPONSE_BYTES: ${MCP_MAX_RESPONSE_BYTES:-65536}
       MCP_MAX_CALLS: ${MCP_MAX_CALLS:-4}
+      # 可选 RAGFlow。URL 为空则不连接，也不把服务放进这个 Compose。
+      RAGFLOW_BASE_URL: ${RAGFLOW_BASE_URL:-}
+      RAGFLOW_API_KEY: ${RAGFLOW_API_KEY:-}
+      RAGFLOW_AGENT_ID: ${RAGFLOW_AGENT_ID:-}
     volumes:
       - ./agent/diagnostics.example.yaml:/diagnostics/diagnostics.yaml:ro
     depends_on:

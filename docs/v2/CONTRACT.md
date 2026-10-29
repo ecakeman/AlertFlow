@@ -19,7 +19,8 @@ Phase 0 验收通过后才能改核心代码。一次只做一个阶段。
 - Phase 6：`GET /api/services/:id/timeline` 和服务详情页时间轴。
 - Phase 7：Go 与 Agent 的三条内部业务路径一次性切到 gRPC。HTTP 留作回滚。
 - Phase 8：可选 Prometheus 与 Loki MCP。未配置不连接。结果只留在当次 Agent evidence。
-- Phase 9–10：RAGFlow、A2A。某一项验证失败只停该项。
+- Phase 9：可选 RAGFlow。锁定稳定版 `infiniflow/ragflow:v0.27.3`。未配置不连接。A2A 仍是 Phase 10。
+- Phase 10：A2A。验证失败只停该项。
 - Phase 11：不实施，除非另下指令。
 - `/webhooks/agent`、`/internal/agent/v1/...` 和 Agent 的 `POST /webhooks/alertflow` 已删除。浏览器用的 `/api/...` 还在。
 
@@ -170,7 +171,13 @@ Phase 8 锁定（没有连接真实 Prometheus 或 Loki，也没有退到 `grafa
 - LangChain MCP adapter 记录的 `http` transport 就是 Streamable HTTP，两边都对得上。运行时用 MCP Python SDK `1.30.0` 的同一 transport，只在 URL 非空时创建客户端。每次调用先 `initialize`，再 `list_tools`，只调用服务器实际提供且本项目批准的只读工具。服务器没有该工具时记 `MISSING_TOOL`，不调用。`langchain-mcp-adapters` 已不再维护，不作为依赖。
 - 查询必须能映射到当前 `service_id`。`PROMETHEUS_SERVICE_SELECTORS` / `LOKI_SERVICE_SELECTORS` 没有该服务的条目时记 `UNMAPPED`，不把全局结果存成该服务的证据。PromQL 是否已包含服务条件按标签名、操作符和值判断；同名标签冲突或选择器无法解析时记 `UNSCOPED`，不发送。表达式里的 `offset`、`@`，以及长于 `MCP_MAX_WINDOW_SECONDS` 或无法识别的区间选择器和子查询，同样记 `UNSCOPED`，不发送。即时 `query` 的证据记录 `timestamp` 和 `query_type=instant`，不把截断后的时间窗写成查询范围。`label_names` 和 `metric_metadata` 不写入 evidence。单次 run 最多 `MCP_MAX_CALLS`（4）次；时间窗最多 `MCP_MAX_WINDOW_SECONDS`（3600）；样本、日志行和响应字节分别不超过 100、100 和 65536。超时、断连、认证失败、429、空结果、畸形结果和超限只记该来源的 gap，调查继续。
 
-RAGFlow 候选是稳定版 `v0.27.3` 和预览版 `v1.0.0-rc1`。Phase 9 先做 API smoke test 再固定 tag。不把 RC 称作稳定版，也不使用 `latest`。当前研究没有确认 RAGFlow 原生 A2A。
+Phase 9 锁定稳定版镜像 `infiniflow/ragflow:v0.27.3`（该 tag 的 `docker/.env` 里 `RAGFLOW_IMAGE`）。不使用 `latest` 或 `nightly`。锁定依据是该 tag 的 `docs/references/http_api_reference.md` 和 `api/apps/restful_apis/agent_api.py`。预览版 `v1.0.0-rc1` 没有被选中，也不称作稳定版，因为稳定版已经有 completion 和文档引用字段。没有对运行中的 RAGFlow 做 HTTP smoke。
+
+- 健康检查：`GET /api/v1/system/healthz`，不需要 `Authorization`。`GET /v1/system/healthz` 已废弃。
+- 认证：`Authorization: Bearer <API_KEY>`。
+- Agent completion：`POST /api/v1/agents/chat/completions`。非流式标准请求体是 `agent_id`、`query`、`stream: false`。`POST /api/v1/agents/{agent_id}/completions` 已废弃。
+- 可验证引用只来自 `reference.chunks` 里同时有 `document_id`（或 `doc_id`）和 `id`（或 `chunk_id`）的条目。`data.data.content` 是模型正文，不是引用。没有这些标识时，结果不能当作已证实文档。
+- `RAGFLOW_BASE_URL`、`RAGFLOW_API_KEY`、`RAGFLOW_AGENT_ID` 为空时不连接。核心 Compose 不加入 RAGFlow。当前没有原生 A2A。
 
 A2A 使用 1.0 的 HTTP+JSON/REST，非流式，轮询任务。官方 Python SDK 的具体版本留到 Phase 10，用 Agent Card 和 SendMessage/GetTask 做一致性验证。适配器只做协议翻译，不复制 RAGFlow 的检索或推理。
 
@@ -186,6 +193,6 @@ A2A 使用 1.0 的 HTTP+JSON/REST，非流式，轮询任务。官方 Python SDK
 
 - Phase 7：`.proto` 字段。
 - Phase 8 已锁定：Prometheus `ghcr.io/tjhop/prometheus-mcp-server:v0.18.0`，Streamable HTTP `/mcp`，工具 `query`、`range_query`、`metric_metadata`、`label_names`、`label_values`。Loki `grafana/loki-mcp` `v0.6.0`，Streamable HTTP `/stream`，工具 `loki_query`。
-- Phase 9：RAGFlow 的最终 tag。
+- Phase 9 已锁定：`infiniflow/ragflow:v0.27.3`。Completion 是 `POST /api/v1/agents/chat/completions`。没有 live HTTP smoke。
 - Phase 10：A2A Python SDK 的最终版本。
 - HTTP 业务路由的删除日期。
