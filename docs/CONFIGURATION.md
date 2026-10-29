@@ -7,6 +7,8 @@ saves it.
 
 Agent traffic is gRPC. `ALERTFLOW_GRPC_ADDR` (default `:9090`) and `ALERTFLOW_AGENT_GRPC_TOKEN` belong to the Go server. `AGENT_GRPC_ADDR` (default `:9000`) and `AGENT_TASK_GRPC_TOKEN` belong to the Agent. `ALERTFLOW_AGENT_GRPC_TARGET` is empty unless the agent is on; server, consumer, and delivery read the same variable. An empty value writes incidents and timeline and creates no task. `ALERTFLOW_GRPC_TARGET` plus `ALERTFLOW_AGENT_GRPC_TOKEN` are both required before the Agent enqueues a callback. Compose does not publish `:9000` or `:9090`.
 
+Optional MCP evidence is off unless the Agent process has a URL. `PROMETHEUS_MCP_URL` is the Prometheus MCP Streamable HTTP endpoint (`.../mcp` on `ghcr.io/tjhop/prometheus-mcp-server:v0.18.0`). `LOKI_MCP_URL` is the Loki MCP Streamable HTTP endpoint (`.../stream` on `grafana/loki-mcp` `v0.6.0`). `PROMETHEUS_MCP_TOKEN` and `LOKI_MCP_TOKEN` are optional bearer tokens for those endpoints and are not the agent gRPC tokens. `MCP_TIMEOUT_SECONDS` defaults to 10. An empty URL does not open a connection. These services are not in the core Compose file.
+
 **Not in this file** (they live in PostgreSQL, via `ALERTFLOW_DATABASE_URL`): users,
 sessions, metrics history, TLS snapshots, **incidents + comments**, and
 **notification integrations** — integration secrets are kept out of the YAML on

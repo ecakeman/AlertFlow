@@ -18,7 +18,8 @@ Phase 0 验收通过后才能改核心代码。一次只做一个阶段。
 - Phase 5：只读 Kubernetes observer。默认关闭。不调用 `event.Decide`。
 - Phase 6：`GET /api/services/:id/timeline` 和服务详情页时间轴。
 - Phase 7：Go 与 Agent 的三条内部业务路径一次性切到 gRPC。HTTP 留作回滚。
-- Phase 8–10：Prometheus/Loki MCP、RAGFlow、A2A。某一项验证失败只停该项。
+- Phase 8：可选 Prometheus 与 Loki MCP。未配置不连接。结果只留在当次 Agent evidence。
+- Phase 9–10：RAGFlow、A2A。某一项验证失败只停该项。
 - Phase 11：不实施，除非另下指令。
 - `/webhooks/agent`、`/internal/agent/v1/...` 和 Agent 的 `POST /webhooks/alertflow` 已删除。浏览器用的 `/api/...` 还在。
 
@@ -162,6 +163,12 @@ Prometheus MCP 候选是 `prometheus/prometheus-mcp` `v0.18.0`。候选 transpor
 
 Loki MCP 候选是 `grafana/loki-mcp` `v0.6.0`。首批只开放 `loki_query`。它的 transport 比 Prometheus MCP 更需要在 Phase 8 做兼容验证。同样可以退到 `grafana/mcp-grafana`。
 
+Phase 8 锁定（没有连接真实 Prometheus 或 Loki，也没有退到 `grafana/mcp-grafana`）：
+
+- Prometheus：镜像 `ghcr.io/tjhop/prometheus-mcp-server:v0.18.0`。不要用 `latest`；v0.19.0 起二进制改名为 `prometheus-mcp`，环境变量前缀改为 `PROMETHEUS_MCP_`。Transport 是 Streamable HTTP，路径 `/mcp`（`--mcp.transport=http`）。Agent 只调用 `query`、`range_query`、`metric_metadata`、`label_names`、`label_values`。不调用 `series`，也不调用 TSDB admin。
+- Loki：发布物是 `grafana/loki-mcp` tag `v0.6.0` 的 `loki-mcp-server`。该 tag 的 `cmd/server/main.go` 同时提供 stdio、SSE（`/sse`，消息端点 `/mcp`）和 Streamable HTTP（`/stream`）。锁定 Streamable HTTP，配置的 URL 必须是 `/stream`。Agent 只调用 `loki_query`。该发布物的 README 没有单独的镜像名。
+- LangChain MCP adapter 记录的 `http` transport 就是 Streamable HTTP，两边都对得上。运行时用 MCP Python SDK 的同一 transport，只在 URL 非空时创建客户端，并在一次工具调用里打开会话。`langchain-mcp-adapters` 已不再维护，不作为依赖。
+
 RAGFlow 候选是稳定版 `v0.27.3` 和预览版 `v1.0.0-rc1`。Phase 9 先做 API smoke test 再固定 tag。不把 RC 称作稳定版，也不使用 `latest`。当前研究没有确认 RAGFlow 原生 A2A。
 
 A2A 使用 1.0 的 HTTP+JSON/REST，非流式，轮询任务。官方 Python SDK 的具体版本留到 Phase 10，用 Agent Card 和 SendMessage/GetTask 做一致性验证。适配器只做协议翻译，不复制 RAGFlow 的检索或推理。
@@ -177,7 +184,7 @@ A2A 使用 1.0 的 HTTP+JSON/REST，非流式，轮询任务。官方 Python SDK
 ## 8. 留到对应阶段再定的事项
 
 - Phase 7：`.proto` 字段。
-- Phase 8：MCP 的最终 release、transport 和工具名。
+- Phase 8 已锁定：Prometheus `ghcr.io/tjhop/prometheus-mcp-server:v0.18.0`，Streamable HTTP `/mcp`，工具 `query`、`range_query`、`metric_metadata`、`label_names`、`label_values`。Loki `grafana/loki-mcp` `v0.6.0`，Streamable HTTP `/stream`，工具 `loki_query`。
 - Phase 9：RAGFlow 的最终 tag。
 - Phase 10：A2A Python SDK 的最终版本。
 - HTTP 业务路由的删除日期。

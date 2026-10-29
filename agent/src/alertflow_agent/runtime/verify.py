@@ -60,8 +60,16 @@ def verify(draft: dict, evidence: dict, tokens: list[str], gaps: list[str] | Non
         present = {item.get("code") for item in assembled.get("unknowns") or []}
         for gap in gaps or []:
             if gap not in present:
-                assembled.setdefault("unknowns", []).append({"text": f"Coverage gap {gap}.", "code": gap, "evidence_ids": []})
+                assembled.setdefault("unknowns", []).append({"text": _gap_text(gap), "code": gap, "evidence_ids": []})
     return {"passed": not findings, "findings": findings, "warnings": [], "draft": _redact(assembled, tokens)}
+
+
+def _gap_text(gap: str) -> str:
+    if gap == "PROMETHEUS_NO_EVIDENCE":
+        return "Prometheus has no evidence."
+    if gap == "LOKI_NO_EVIDENCE":
+        return "Loki has no evidence."
+    return f"Coverage gap {gap}."
 
 
 def cited(report: dict) -> set[str]:

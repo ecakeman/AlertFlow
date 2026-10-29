@@ -79,3 +79,10 @@ class Settings(BaseSettings):
     rerank_api_key: str = ""
     rerank_model: str = ""
     rerank_style: str = "dashscope"
+
+    # 可选 MCP 证据。URL 为空则不创建客户端。token 不复用 gRPC token。
+    prometheus_mcp_url: str = ""
+    prometheus_mcp_token: str = ""
+    loki_mcp_url: str = ""
+    loki_mcp_token: str = ""
+    mcp_timeout_seconds: float = 10

@@ -9,6 +9,7 @@ from alertflow_agent.analysis.errors import classify_error
 from alertflow_agent.analysis.stats import error_stats, latency_stats
 from alertflow_agent.analysis.timeline import coverage, key_checks, segments, status_counts
 from alertflow_agent.integrations.alertflow import collect_checks, iso_now, normalize_check
+from alertflow_agent.integrations.mcp import enabled_mcp_tools, sources_from_settings
 from alertflow_agent.integrations.project_diagnostics import fetch, load_config
 from alertflow_agent.runtime.guards import before_lead, fresh_guard, note_tool
 from alertflow_agent.runtime.model import call_model
@@ -61,6 +62,7 @@ class GraphState(TypedDict, total=False):
     # 随事件一起下推的默认上下文（AlertFlow 已组装好）。它不进 state["event"]，
     # 只用于建 Evidence Registry；后续深挖仍走查询工具。
     provided_context: dict
+    mcp_tools: list
 
 
 def _epoch(value: str) -> int:
@@ -83,7 +85,7 @@ def _evidence(state, ident, source, kind, summary, data, limitations=None):
 
 
 class Runner:
-    def __init__(self, settings, store, alertflow, model, checkpointer=None, memory=None, embed=None, rerank=None) -> None:
+    def __init__(self, settings, store, alertflow, model, checkpointer=None, memory=None, embed=None, rerank=None, mcp=None) -> None:
         self.settings = settings
         self.store = store
         self.alertflow = alertflow
@@ -91,6 +93,7 @@ class Runner:
         self.memory = memory      # 长期记忆仓储（None → 记忆关闭）
         self.embed = embed        # 嵌入客户端（None / 未配置 → 不做向量召回）
         self.rerank = rerank      # 重排客户端（None / 未配置 → 退回向量序）
+        self.mcp = sources_from_settings(settings) if mcp is None else mcp
         self.graph = self._graph(checkpointer)
 
     def _refresh_runtime_config(self) -> None:
@@ -665,6 +668,7 @@ class Runner:
             state["stop_reason"] = state.get("stop_reason") or reason or ""
             state["finished"] = True
             return state
+        state["mcp_tools"] = enabled_mcp_tools(self.settings)
         decision = call_model(self.model, "lead", state, self.settings, self.store)
         if decision is None:
             return state
@@ -700,10 +704,13 @@ class Runner:
             result = cache[signature]
             result = {**result, "note": "cached"}
         else:
-            result = clip(run_tool(name, args, state, self.settings, {
+            clients = {
                 "alertflow": self.alertflow, "model": self.model, "store": self.store,
                 "memory": getattr(self, "memory", None),
-            }))
+            }
+            if self.mcp is not None:
+                clients["mcp"] = self.mcp
+            result = clip(run_tool(name, args, state, self.settings, clients))
             cache[signature] = result
         stop = note_tool(state["guard"], signature)
         if stop:

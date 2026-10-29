@@ -1,3 +1,4 @@
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -6,6 +7,7 @@ from alertflow_agent.analysis.errors import classify_error
 from alertflow_agent.analysis.stats import error_stats, latency_stats
 from alertflow_agent.analysis.timeline import coverage, key_checks, segments, status_counts
 from alertflow_agent.integrations.alertflow import collect_checks, iso_now
+from alertflow_agent.integrations.mcp import LOKI_TOOLS, MCPError, PROMETHEUS_TOOLS
 from alertflow_agent.integrations.project_diagnostics import fetch, load_config
 from alertflow_agent.runtime.model import call_model
 
@@ -40,6 +42,8 @@ def run_tool(name: str, args: dict, state: dict, settings, clients: dict) -> dic
             return _skill(args, state)
         if name == "delegate_history_review":
             return _delegate(args, state, settings, clients)
+        if name in PROMETHEUS_TOOLS or name in LOKI_TOOLS:
+            return _mcp(name, args, state, settings, clients)
     except Exception:
         return {"status": "error", "note": "tool failed", "evidence_ids": []}
     return {"status": "invalid_request", "note": "unknown tool", "evidence_ids": []}
@@ -329,6 +333,47 @@ def _recall_episode(args, state, clients) -> dict:
     _add(state, ident, "episodic_memory", ident, "episode", episode.get("card") or "", episode,
          ["historical conclusion — verify against current evidence"])
     return {"status": "success", "evidence_ids": [ident], "data": {"episode_id": ident}}
+
+
+def _mcp(name, args, state, settings, clients) -> dict:
+    """配置了 URL 才调用。失败只记覆盖缺口，不抛出。"""
+    configured = (settings.prometheus_mcp_url if name in PROMETHEUS_TOOLS else settings.loki_mcp_url) or ""
+    if not str(configured).strip():
+        return {"status": "invalid_request", "note": "unknown tool", "evidence_ids": []}
+    source = "prometheus" if name in PROMETHEUS_TOOLS else "loki"
+    client = clients.get("mcp")
+    try:
+        if client is None:
+            raise MCPError("unreadable")
+        text = client.call(name, args)
+        if not isinstance(text, str) or not text.strip():
+            raise MCPError("unreadable")
+    except MCPError as exc:
+        _mcp_gap(state, source)
+        return {"status": "error", "note": _mcp_note(source, exc.kind), "evidence_ids": []}
+    except Exception:
+        _mcp_gap(state, source)
+        return {"status": "error", "note": _mcp_note(source, "unreadable"), "evidence_ids": []}
+    text = text.strip()[:2000]
+    digest = hashlib.sha256(json.dumps(args, sort_keys=True, default=str).encode()).hexdigest()[:8]
+    ident = f"{source}:{name}:{digest}"
+    _add(state, ident, source, name, name, text, {"text": text})
+    return {"status": "success", "evidence_ids": [ident], "data": {"text": text[:400]}}
+
+
+def _mcp_gap(state, source: str) -> None:
+    code = "PROMETHEUS_NO_EVIDENCE" if source == "prometheus" else "LOKI_NO_EVIDENCE"
+    gaps = state.setdefault("coverage", {}).setdefault("gaps", [])
+    if code not in gaps:
+        gaps.append(code)
+
+
+def _mcp_note(source: str, kind: str) -> str:
+    if kind == "timeout":
+        return f"{source} timed out; this source has no evidence"
+    if kind == "auth":
+        return f"{source} rejected the request; this source has no evidence"
+    return f"{source} response could not be read; this source has no evidence"
 
 
 def _add_checks(state, rows) -> list[str]:

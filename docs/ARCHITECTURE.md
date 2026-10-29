@@ -106,7 +106,7 @@ The default webhook body keeps `status` as `down`, `recovered`, or `warning` and
 
 ### The diagnostic agent's two edges
 
-The agent is a separate service. It has two gRPC edges, and neither is a notification channel. An empty `ALERTFLOW_AGENT_GRPC_TARGET` stores the incident and timeline and does not insert an agent task. A set target that cannot be reached stays on the delivery lease and is retried.
+The agent is a separate service. It has two gRPC edges, and neither is a notification channel. An empty `ALERTFLOW_AGENT_GRPC_TARGET` stores the incident and timeline and does not insert an agent task. A set target that cannot be reached stays on the delivery lease and is retried. Optional Prometheus and Loki MCP reads stay in that run's evidence. An empty URL does not open a client. A failed read does not write `runtime_events`.
 
 **AlertFlow → agent.** `notification_deliveries` rows with `integration_id` NULL. `notify.AgentSender` encodes the v2 envelope at send time, and delivery calls `StartInvestigation` or `StartChat`. The diagnostic context is not written into the outbox.
 

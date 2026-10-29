@@ -42,6 +42,10 @@ def build_blocks(node: str, state: dict) -> list[Block]:
     blocks: list[Block] = [
         Block("system", PIN, [_read("prompts/system.md")], protect=True),
         Block("node_prompt", PIN, [_read(f"prompts/{_PROMPTS[node]}")], protect=True),
+        *([Block("mcp_tools", PIN, [
+            "Optional evidence tools, only these: " + ", ".join(state["mcp_tools"])
+            + ". A failure means that source has no evidence. Do not send credentials.",
+        ], protect=True)] if node == "lead" and state.get("mcp_tools") else []),
         Block("semantics", PIN, [_read("skills/_semantics.md")], protect=True),
         Block("event", PIN, [_event_block(state.get("event") or {})], protect=True),
     ]
