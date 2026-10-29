@@ -73,8 +73,7 @@ func (db *DB) ClaimDeliveries(owner string, now, leaseUntil int64, limit, maxAtt
 		 FROM (
 		   SELECT d2.id
 		   FROM notification_deliveries d2
-		   JOIN integrations i ON i.id = d2.integration_id
-		   WHERE i.type = $4
+		   WHERE d2.integration_id IS NULL
 		     AND (
 		       (d2.status = 'running' AND d2.lease_until <= $2 AND d2.attempt_count >= $3)
 		       OR (d2.status IN ('pending', 'retry_wait') AND d2.next_attempt_at <= $2 AND d2.attempt_count >= $3)
@@ -82,7 +81,7 @@ func (db *DB) ClaimDeliveries(owner string, now, leaseUntil int64, limit, maxAtt
 		   FOR UPDATE OF d2 SKIP LOCKED
 		 ) AS picked
 		 WHERE d.id = picked.id`,
-		exhaustedReason, now, maxAttempts, AgentWebhookType,
+		exhaustedReason, now, maxAttempts,
 	); err != nil {
 		return nil, err
 	}
@@ -90,9 +89,7 @@ func (db *DB) ClaimDeliveries(owner string, now, leaseUntil int64, limit, maxAtt
 		`WITH picked AS (
 			SELECT d.id
 			FROM notification_deliveries d
-			JOIN integrations i ON i.id = d.integration_id
-			WHERE i.enabled
-			  AND i.type = $6
+			WHERE d.integration_id IS NULL
 			  AND d.attempt_count < $5
 			  AND (
 			    (d.status IN ('pending', 'retry_wait') AND d.next_attempt_at <= $3)
@@ -111,7 +108,7 @@ func (db *DB) ClaimDeliveries(owner string, now, leaseUntil int64, limit, maxAtt
 		FROM picked
 		WHERE d.id = picked.id
 		RETURNING d.id, d.event_id, d.incident_id, d.integration_id, d.event_type, d.payload, d.attempt_count`,
-		owner, leaseUntil, now, limit, maxAttempts, AgentWebhookType,
+		owner, leaseUntil, now, limit, maxAttempts,
 	)
 	if err != nil {
 		return nil, err
@@ -120,13 +117,16 @@ func (db *DB) ClaimDeliveries(owner string, now, leaseUntil int64, limit, maxAtt
 	var claimed []ClaimedDelivery
 	for rows.Next() {
 		var row ClaimedDelivery
-		var incident sql.NullInt64
+		var incident, integration sql.NullInt64
 		var payload []byte
-		if err := rows.Scan(&row.ID, &row.EventID, &incident, &row.IntegrationID, &row.EventType, &payload, &row.AttemptCount); err != nil {
+		if err := rows.Scan(&row.ID, &row.EventID, &incident, &integration, &row.EventType, &payload, &row.AttemptCount); err != nil {
 			return nil, err
 		}
 		if incident.Valid {
 			row.IncidentID = &incident.Int64
+		}
+		if integration.Valid {
+			row.IntegrationID = integration.Int64
 		}
 		row.Payload = json.RawMessage(payload)
 		claimed = append(claimed, row)
@@ -138,6 +138,9 @@ func (db *DB) ClaimDeliveries(owner string, now, leaseUntil int64, limit, maxAtt
 		return nil, err
 	}
 	for i := range claimed {
+		if claimed[i].IntegrationID == 0 {
+			continue
+		}
 		var cfg []byte
 		var kind string
 		if err := tx.QueryRow(
@@ -168,6 +171,25 @@ func (db *DB) FailDelivery(id int64, owner string, now int64, status, errMsg str
 	return db.finishDelivery(id, owner, now, status, errMsg, nextAttemptAt, "failed")
 }
 
+// InsertInternalAgentTask queues one gRPC investigation or chat task.
+// A repeated event id and type is ignored. The row has no integration.
+func InsertInternalAgentTask(tx *sql.Tx, eventID string, incidentID *int64, eventType string, payload []byte, now int64) (int64, error) {
+	var id int64
+	err := tx.QueryRow(
+		`INSERT INTO notification_deliveries (
+			event_id, incident_id, integration_id, event_type, payload, status,
+			attempt_count, next_attempt_at, created_at, updated_at
+		 ) VALUES ($1, $2, NULL, $3, $4, 'pending', 0, $5, $5, $5)
+		 ON CONFLICT (event_id, event_type) WHERE integration_id IS NULL DO NOTHING
+		 RETURNING id`,
+		eventID, incidentID, eventType, string(payload), now,
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return id, err
+}
+
 func (db *DB) finishDelivery(id int64, owner string, now int64, status, errMsg string, stamp int64, logStatus string) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -175,7 +197,7 @@ func (db *DB) finishDelivery(id int64, owner string, now int64, status, errMsg s
 	}
 	defer tx.Rollback()
 	var eventType string
-	var integrationID int64
+	var integrationID sql.NullInt64
 	var incident sql.NullInt64
 	if status == "succeeded" {
 		err = tx.QueryRow(
@@ -206,12 +228,14 @@ func (db *DB) finishDelivery(id int64, owner string, now int64, status, errMsg s
 	if incident.Valid && eventType != "warning" {
 		incidentID = incident.Int64
 	}
-	if _, err := tx.Exec(
-		`INSERT INTO notification_log (integration_id, incident_id, event, status, error, sent_at)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		integrationID, incidentID, eventType, logStatus, nullStr(errMsg), now,
-	); err != nil {
-		return err
+	if integrationID.Valid {
+		if _, err := tx.Exec(
+			`INSERT INTO notification_log (integration_id, incident_id, event, status, error, sent_at)
+			 VALUES ($1, $2, $3, $4, $5, $6)`,
+			integrationID.Int64, incidentID, eventType, logStatus, nullStr(errMsg), now,
+		); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -222,7 +246,7 @@ func (db *DB) ListDeliveriesByIncident(incidentID int64) ([]DeliveryView, error)
 		`SELECT d.id, d.event_id, d.incident_id, d.integration_id, i.name, i.type,
 		        d.event_type, d.status, d.attempt_count, d.next_attempt_at, d.last_error, d.sent_at
 		 FROM notification_deliveries d
-		 JOIN integrations i ON i.id = d.integration_id
+		 LEFT JOIN integrations i ON i.id = d.integration_id
 		 WHERE d.incident_id = $1
 		 ORDER BY d.id`,
 		incidentID,
@@ -234,10 +258,10 @@ func (db *DB) ListDeliveriesByIncident(incidentID int64) ([]DeliveryView, error)
 	var out []DeliveryView
 	for rows.Next() {
 		var row DeliveryView
-		var incident, sent sql.NullInt64
-		var last sql.NullString
+		var incident, sent, integration sql.NullInt64
+		var last, name, kind sql.NullString
 		if err := rows.Scan(
-			&row.ID, &row.EventID, &incident, &row.IntegrationID, &row.IntegrationName, &row.IntegrationType,
+			&row.ID, &row.EventID, &incident, &integration, &name, &kind,
 			&row.EventType, &row.Status, &row.AttemptCount, &row.NextAttemptAt, &last, &sent,
 		); err != nil {
 			return nil, err
@@ -245,6 +269,11 @@ func (db *DB) ListDeliveriesByIncident(incidentID int64) ([]DeliveryView, error)
 		if incident.Valid {
 			row.IncidentID = &incident.Int64
 		}
+		if integration.Valid {
+			row.IntegrationID = integration.Int64
+		}
+		row.IntegrationName = name.String
+		row.IntegrationType = kind.String
 		if sent.Valid {
 			row.SentAt = &sent.Int64
 		}
@@ -262,8 +291,14 @@ func (db *DB) RetryDeadDelivery(id, now int64) error {
 		`UPDATE notification_deliveries AS d
 		 SET status = 'pending', attempt_count = 0, next_attempt_at = $2,
 		     last_error = NULL, lease_owner = NULL, lease_until = NULL, updated_at = $2
-		 FROM integrations i
-		 WHERE d.id = $1 AND d.status = 'dead' AND i.id = d.integration_id AND i.type = $3`,
+		 WHERE d.id = $1 AND d.status = 'dead'
+		   AND (
+		     d.integration_id IS NULL
+		     OR EXISTS (
+		       SELECT 1 FROM integrations i
+		       WHERE i.id = d.integration_id AND i.type = $3
+		     )
+		   )`,
 		id, now, AgentWebhookType,
 	)
 	if err != nil {
@@ -276,11 +311,12 @@ func (db *DB) RetryDeadDelivery(id, now int64) error {
 	if n == 1 {
 		return nil
 	}
-	var status, kind string
+	var status string
+	var kind sql.NullString
 	err = db.QueryRow(
 		`SELECT d.status, i.type
 		 FROM notification_deliveries d
-		 JOIN integrations i ON i.id = d.integration_id
+		 LEFT JOIN integrations i ON i.id = d.integration_id
 		 WHERE d.id = $1`, id,
 	).Scan(&status, &kind)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -289,7 +325,7 @@ func (db *DB) RetryDeadDelivery(id, now int64) error {
 	if err != nil {
 		return err
 	}
-	if kind != AgentWebhookType {
+	if kind.Valid && kind.String != AgentWebhookType {
 		return ErrChannelRetired
 	}
 	return ErrNotRetryable

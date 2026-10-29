@@ -59,9 +59,10 @@ func TestManualIncidentTimelineAndTasks(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE incident_id = $1 AND integration_id = $2`, inc.ID, good.ID); n != 1 {
+	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE incident_id = $1 AND integration_id IS NULL`, inc.ID); n != 1 {
 		t.Fatalf("agent tasks = %d", n)
 	}
+	_ = good
 	var payload string
 	if err := database.QueryRow(`SELECT payload::text FROM notification_deliveries WHERE incident_id = $1 LIMIT 1`, inc.ID).Scan(&payload); err != nil {
 		t.Fatal(err)
@@ -69,8 +70,8 @@ func TestManualIncidentTimelineAndTasks(t *testing.T) {
 	if !strings.Contains(payload, `"source": "manual"`) || !strings.Contains(payload, incidentOpenedKey(inc.ID)) {
 		t.Fatalf("payload = %s", payload)
 	}
-	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries`); n != 2 {
-		t.Fatalf("deliveries = %d, want 2", n)
+	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries`); n != 1 {
+		t.Fatalf("deliveries = %d, want 1", n)
 	}
 
 	open, err := database.CreateManualIncident(ManualIncident{ServiceID: "other", ServiceName: "Other", StartedAt: 3000})
@@ -93,7 +94,7 @@ func TestManualIncidentTimelineAndTasks(t *testing.T) {
 	if n := countRows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE incident_id = $1 AND event_type = 'incident.resolved'`, open.ID); n != 1 {
 		t.Fatalf("resolve timeline = %d", n)
 	}
-	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE incident_id = $1`, open.ID); n != 2 {
+	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE incident_id = $1`, open.ID); n != 1 {
 		t.Fatalf("resolve created another task: %d", n)
 	}
 	if err := database.DeleteIncident(open.ID); err != nil {

@@ -15,7 +15,7 @@ import logging
 import threading
 from datetime import datetime, timezone
 
-import httpx
+import grpc
 
 log = logging.getLogger("alertflow_agent")
 
@@ -212,12 +212,12 @@ class CallbackSender:
     def __init__(self, settings, store) -> None:
         self.settings = settings
         self.store = store
-        base = (settings.alertflow_base_url or "").rstrip("/")
-        self.url = settings.agent_callback_url or (f"{base}/webhooks/agent" if base else "")
-        self.token = settings.agent_callback_token
+        self.target = (settings.alertflow_grpc_target or "").strip()
+        self.token = settings.alertflow_agent_grpc_token or settings.agent_callback_token
+        self.submit = None
 
     def configured(self) -> bool:
-        return bool(self.url and self.token)
+        return bool(self.target and self.token)
 
     def run(self, stop: threading.Event) -> None:
         warned = False
@@ -254,14 +254,18 @@ class CallbackSender:
 
     def _send(self, row: dict) -> tuple[str | None, bool]:
         try:
-            response = httpx.post(
-                self.url,
-                json=row["payload"],
-                headers={"Authorization": f"Bearer {self.token}"},
-                timeout=15,
-            )
+            if self.submit is not None:
+                result = self.submit(row["payload"])
+            else:
+                from alertflow_agent.integrations.alertflow import AlertFlowClient
+
+                result = AlertFlowClient(self.target, self.token).submit_callback(row["payload"])
+        except grpc.RpcError as exc:
+            code = exc.code()
+            permanent = code in {grpc.StatusCode.INVALID_ARGUMENT, grpc.StatusCode.UNAUTHENTICATED, grpc.StatusCode.PERMISSION_DENIED}
+            return _clip(code.name, MAX_ERROR_CHARS), permanent
         except Exception as exc:  # noqa: BLE001 - 网络问题一律可重试
             return _clip(type(exc).__name__, MAX_ERROR_CHARS), False
-        if response.status_code >= 300:
-            return _clip(f"status {response.status_code}", MAX_ERROR_CHARS), _permanent(response.status_code)
-        return None, False
+        if isinstance(result, dict) and (result.get("stored") or result.get("duplicate")):
+            return None, False
+        return _clip("callback was not stored", MAX_ERROR_CHARS), True

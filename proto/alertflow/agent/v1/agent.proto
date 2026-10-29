@@ -1,0 +1,262 @@
+syntax = "proto3";
+
+package alertflow.agent.v1;
+
+option go_package = "github.com/ecakeman/alertflow/gen/alertflow/agent/v1;agentv1";
+
+import "google/protobuf/struct.proto";
+
+// AlertFlowControlService runs in the Go server process. The Agent calls it.
+service AlertFlowControlService {
+  rpc GetRuntimeConfig(GetRuntimeConfigRequest) returns (RuntimeConfig);
+  rpc ListIncidents(ListIncidentsRequest) returns (ListIncidentsResponse);
+  rpc GetIncident(GetIncidentRequest) returns (IncidentDetail);
+  rpc GetMetrics(GetMetricsRequest) returns (Metrics);
+  rpc ListChecks(ListChecksRequest) returns (ListChecksResponse);
+  rpc GetTimeline(GetTimelineRequest) returns (TimelinePage);
+  rpc GetSourceCoverage(GetSourceCoverageRequest) returns (SourceCoverage);
+  rpc GetKubernetesState(GetKubernetesStateRequest) returns (KubernetesState);
+  rpc SubmitAgentCallback(AgentCallback) returns (CallbackResult);
+}
+
+// AgentTaskService runs in the Agent process. Go delivery calls it.
+service AgentTaskService {
+  rpc StartInvestigation(InvestigationRequest) returns (TaskAccept);
+  rpc StartChat(ChatRequest) returns (TaskAccept);
+}
+
+message GetRuntimeConfigRequest {}
+
+message ModelEndpoint {
+  string base_url = 1;
+  string api_key = 2;
+  string model = 3;
+  int32 dim = 4;
+  string style = 5;
+}
+
+message RuntimeConfig {
+  bool memory_enabled = 1;
+  int32 context_budget_tokens = 2;
+  ModelEndpoint llm = 3;
+  ModelEndpoint embed = 4;
+  ModelEndpoint rerank = 5;
+}
+
+message ListIncidentsRequest {
+  string service_id = 1;
+  string status = 2;
+  string severity = 3;
+  int32 limit = 4;
+  int32 offset = 5;
+}
+
+message Incident {
+  int64 id = 1;
+  string service_id = 2;
+  string service_name = 3;
+  string status = 4;
+  string source = 5;
+  string severity = 6;
+  string title = 7;
+  int64 started_at = 8;
+  int64 resolved_at = 9;
+  bool has_resolved_at = 10;
+  int64 created_at = 11;
+  int64 updated_at = 12;
+}
+
+message IncidentComment {
+  int64 id = 1;
+  string username = 2;
+  string body = 3;
+  int64 created_at = 4;
+}
+
+message IncidentDetail {
+  Incident incident = 1;
+  repeated IncidentComment comments = 2;
+}
+
+message ListIncidentsResponse {
+  repeated Incident incidents = 1;
+  int64 total = 2;
+}
+
+message GetIncidentRequest {
+  int64 id = 1;
+}
+
+message SeriesPoint {
+  int64 ts = 1;
+  double avg_latency = 2;
+  bool has_avg_latency = 3;
+  int32 errors = 4;
+  int32 warnings = 5;
+}
+
+message Metrics {
+  string service_id = 1;
+  string name = 2;
+  string url = 3;
+  int64 from = 4;
+  int64 to = 5;
+  int64 bucket_seconds = 6;
+  double uptime_7d = 7;
+  double uptime_30d = 8;
+  double uptime_365d = 9;
+  repeated SeriesPoint series = 10;
+}
+
+message GetMetricsRequest {
+  string service_id = 1;
+  string range = 2;
+}
+
+message Check {
+  int64 id = 1;
+  int64 ts = 2;
+  string status = 3;
+  int32 latency_ms = 4;
+  bool has_latency_ms = 5;
+  int32 status_code = 6;
+  bool has_status_code = 7;
+  string error = 8;
+  int32 attempts = 9;
+}
+
+message ListChecksRequest {
+  string service_id = 1;
+  int64 before = 2;
+  int32 limit = 3;
+}
+
+message ListChecksResponse {
+  repeated Check checks = 1;
+  int64 next_before = 2;
+}
+
+message TimelineEvent {
+  int64 id = 1;
+  string event_key = 2;
+  string service_id = 3;
+  string source = 4;
+  string event_type = 5;
+  string severity = 6;
+  string title = 7;
+  string summary = 8;
+  int64 occurred_at = 9;
+  int64 observed_at = 10;
+  int64 recorded_at = 11;
+  int64 incident_id = 12;
+  bool has_incident_id = 13;
+  google.protobuf.Struct details = 14;
+}
+
+message SourceWindow {
+  string source = 1;
+  string status = 2;
+  int64 last_success_at = 3;
+  bool has_last_success_at = 4;
+  string last_error = 5;
+}
+
+message GetTimelineRequest {
+  string service_id = 1;
+  int64 from = 2;
+  int64 to = 3;
+  repeated string sources = 4;
+  repeated string types = 5;
+  int32 limit = 6;
+  int64 cursor_at = 7;
+  int64 cursor_id = 8;
+}
+
+message TimelinePage {
+  repeated TimelineEvent events = 1;
+  int64 next_cursor_at = 2;
+  int64 next_cursor_id = 3;
+  bool has_next = 4;
+  int64 from = 5;
+  int64 to = 6;
+  int32 retention_days = 7;
+  repeated SourceWindow coverage = 8;
+}
+
+message GetSourceCoverageRequest {
+  string service_id = 1;
+}
+
+message SourceCoverage {
+  repeated SourceWindow sources = 1;
+  int32 retention_days = 2;
+}
+
+message KubernetesObject {
+  string cluster_id = 1;
+  string namespace = 2;
+  string kind = 3;
+  string name = 4;
+  string uid = 5;
+  bool active = 6;
+  int64 last_seen_at = 7;
+  string status = 8;
+}
+
+message GetKubernetesStateRequest {
+  string service_id = 1;
+}
+
+message KubernetesState {
+  repeated KubernetesObject objects = 1;
+}
+
+message AgentCallback {
+  string schema_version = 1;
+  string message_id = 2;
+  string message_type = 3;
+  string correlation_id = 4;
+  string run_id = 5;
+  int64 incident_id = 6;
+  bool has_incident_id = 7;
+  string service_id = 8;
+  string event_type = 9;
+  string mode = 10;
+  string status = 11;
+  google.protobuf.Struct report = 12;
+  google.protobuf.Struct evidence = 13;
+  google.protobuf.Struct usage = 14;
+  string error = 15;
+  int64 started_at = 16;
+  int64 finished_at = 17;
+  string request_id = 18;
+  string reply = 19;
+  repeated string evidence_ids = 20;
+}
+
+message CallbackResult {
+  bool stored = 1;
+  bool duplicate = 2;
+}
+
+message InvestigationRequest {
+  string message_id = 1;
+  string message_type = 2;
+  string correlation_id = 3;
+  google.protobuf.Struct payload = 4;
+}
+
+message ChatRequest {
+  string message_id = 1;
+  string request_id = 2;
+  int64 incident_id = 3;
+  string message = 4;
+  google.protobuf.Struct payload = 5;
+}
+
+message TaskAccept {
+  bool accepted = 1;
+  bool duplicate = 2;
+  string run_id = 3;
+  string request_id = 4;
+}

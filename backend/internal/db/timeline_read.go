@@ -40,15 +40,15 @@ type RuntimeSource struct {
 // TimelineFilter is a keyset page of one service's events. OccurredAt is
 // inclusive on both ends. A cursor excludes that row and anything newer.
 type TimelineFilter struct {
-	ServiceID   string
-	From        int64
-	To          int64
-	Sources     []string
-	Types       []string
-	CursorAt    int64
-	CursorID    int64
-	HasCursor   bool
-	Limit       int
+	ServiceID string
+	From      int64
+	To        int64
+	Sources   []string
+	Types     []string
+	CursorAt  int64
+	CursorID  int64
+	HasCursor bool
+	Limit     int
 }
 
 // ListRuntimeEvents returns events newest first.

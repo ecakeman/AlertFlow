@@ -1,4 +1,6 @@
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 
@@ -84,7 +86,7 @@ def test_config_and_transport_failures_stay_on_the_diagnostic_source(tmp_path, m
     monkeypatch.setattr(httpx, "get", bad_json)
     assert fetch({"url": "https://diag.example"}, "2026-10-11T09:00:00+00:00", "2026-10-11T10:00:00+00:00")["coverage"] == "invalid"
 
-    runner = Runner(Settings(diagnostics_file=str(broken)), MemoryStore(), None, ScriptedModel())
+    runner = Runner(Settings(diagnostics_file=str(broken), agent_diagnostics_mode="legacy"), MemoryStore(), None, ScriptedModel())
     state = {
         "run_id": "1",
         "coverage": {"from": 1_791_709_200, "to": 1_791_712_800, "gaps": []},
@@ -93,3 +95,16 @@ def test_config_and_transport_failures_stay_on_the_diagnostic_source(tmp_path, m
     }
     assert runner.collect_diagnostics(state)["diagnostic_source"] == "invalid"
     assert "DIAGNOSTICS_INVALID" in state["coverage"]["gaps"]
+
+
+def test_shared_diagnostics_contract_fixtures():
+    root = Path(__file__).resolve().parents[2] / "docs" / "contracts" / "fixtures" / "application-diagnostics-v2"
+    when = datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc)
+    ok = validate(json.loads((root / "ok.json").read_text()), when)
+    empty = validate(json.loads((root / "empty.json").read_text()), when)
+    partial = validate(json.loads((root / "partial.json").read_text()), when)
+    invalid = validate(json.loads((root / "invalid.json").read_text()), when)
+    assert ok["coverage"] == "ok" and len(ok["items"]) == 1
+    assert empty["coverage"] == "empty"
+    assert partial["coverage"] == "partial" and len(partial["items"]) == 1
+    assert invalid["coverage"] == "invalid"

@@ -69,6 +69,9 @@ func runServer(addr, configDir string) {
 	}
 	defer srv.Close()
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	httpSrv := &http.Server{Addr: addr, Handler: srv.Handler()}
 	go func() {
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -76,10 +79,13 @@ func runServer(addr, configDir string) {
 			os.Exit(1)
 		}
 	}()
+	go func() {
+		if err := srv.ServeControl(ctx, envOr("ALERTFLOW_GRPC_ADDR", ":9090"), os.Getenv("ALERTFLOW_AGENT_GRPC_TOKEN")); err != nil && ctx.Err() == nil {
+			slog.Error("agent grpc stopped", "error", err)
+			os.Exit(1)
+		}
+	}()
 	slog.Info("listening", "addr", addr)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	<-ctx.Done()
 
 	slog.Info("shutting down")
@@ -166,11 +172,25 @@ func runRetireDeliveries() {
 func runDelivery() {
 	database := openRoleDB()
 	defer database.Close()
-	registerAgentSender(database, resolveConfigDir(""))
+	reads := registerAgentSender(database, resolveConfigDir(""))
 	worker := deliver.New(database, "")
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	slog.Info("delivery worker started")
+	target := os.Getenv("ALERTFLOW_AGENT_GRPC_TARGET")
+	if target == "" {
+		slog.Warn("delivery: ALERTFLOW_AGENT_GRPC_TARGET is unset; tasks stay pending")
+		<-ctx.Done()
+		return
+	}
+	tasks, err := deliver.DialTasks(ctx, target, os.Getenv("AGENT_TASK_GRPC_TOKEN"))
+	if err != nil {
+		slog.Error("delivery: agent grpc dial failed", "error", err)
+		os.Exit(1)
+	}
+	defer tasks.Close()
+	tasks.Q = reads
+	worker.Tasks = tasks
+	slog.Info("delivery worker started", "agent", target)
 	if err := worker.Run(ctx); err != nil && ctx.Err() == nil {
 		slog.Error("delivery worker stopped", "error", err)
 		os.Exit(1)
@@ -184,10 +204,10 @@ func runDelivery() {
 // whatever was on disk at startup. A reload that fails (the file is being
 // replaced atomically mid-read) falls back to the last good snapshot, which is
 // stale by at most one config edit rather than for the life of the process.
-func registerAgentSender(database *db.DB, dir string) {
+func registerAgentSender(database *db.DB, dir string) *query.Service {
 	if err := config.EnsureDir(dir); err != nil {
 		slog.Error("agent delivery: config directory unusable", "dir", dir, "error", err)
-		return
+		return query.New(database, func() *config.Config { return &config.Config{} })
 	}
 	current, err := config.Load(dir)
 	if err != nil {
@@ -195,10 +215,10 @@ func registerAgentSender(database *db.DB, dir string) {
 		current = &config.Config{}
 	}
 	live := &liveConfig{dir: dir, current: current}
-	notify.Register(notify.AgentWebhookType, notify.AgentSender{
-		Q: query.New(database, live.get),
-	})
+	reads := query.New(database, live.get)
+	notify.Register(notify.AgentWebhookType, notify.AgentSender{Q: reads})
 	slog.Info("agent delivery: registered", "type", notify.AgentWebhookType, "config_dir", dir)
+	return reads
 }
 
 // liveConfig serves the newest readable config snapshot.

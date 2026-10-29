@@ -1,5 +1,7 @@
 import uuid
 
+import grpc
+
 from alertflow_agent.callbacks import (
     MAX_EVIDENCE_ITEMS,
     CallbackSender,
@@ -23,7 +25,7 @@ def _run(store, run_id=None):
 
 
 def _settings(**overrides):
-    base = dict(agent_callback_token="cb", alertflow_base_url="http://alertflow:8080")
+    base = dict(agent_callback_token="cb", alertflow_grpc_target="alertflow:9090")
     base.update(overrides)
     return Settings(**base)
 
@@ -73,52 +75,46 @@ def test_claim_marks_dead_after_the_attempt_limit():
     assert store.callback_rows()[0]["status"] == "dead"
 
 
-def test_drain_posts_and_marks_sent(monkeypatch):
+def test_drain_posts_and_marks_sent():
     store = MemoryStore()
     run_id = _run(store)
     store.enqueue_callback(report_callback(run_id, store.get(run_id), 1, {"summary": "s"}, {}, {}))
     posted = {}
 
-    class Response:
-        status_code = 202
+    def fake_submit(payload):
+        posted["json"] = payload
+        return {"stored": True, "duplicate": False}
 
-    def fake_post(url, json=None, headers=None, timeout=None):
-        posted["url"] = url
-        posted["json"] = json
-        posted["headers"] = headers
-        return Response()
-
-    monkeypatch.setattr("alertflow_agent.callbacks.httpx.post", fake_post)
     sender = CallbackSender(_settings(), store)
+    sender.submit = fake_submit
     assert sender.configured() is True
     assert sender.drain() == 1
-    assert posted["url"] == "http://alertflow:8080/webhooks/agent"
-    assert posted["headers"]["Authorization"] == "Bearer cb"
     assert posted["json"]["message_id"] == f"run:{run_id}:v1"
     assert store.callback_rows()[0]["status"] == "sent"
 
 
-def test_drain_retries_on_transport_error_and_gives_up_on_4xx(monkeypatch):
+class _Rejected(grpc.RpcError):
+    def code(self):
+        return grpc.StatusCode.INVALID_ARGUMENT
+
+
+def test_drain_retries_on_transport_error_and_gives_up_on_4xx():
     store = MemoryStore()
     first, second = _run(store), _run(store)
     store.enqueue_callback(report_callback(first, store.get(first), 1, {"summary": "a"}, {}, {}))
     store.enqueue_callback(report_callback(second, store.get(second), 1, {"summary": "b"}, {}, {}))
 
-    class Response:
-        def __init__(self, code):
-            self.status_code = code
-
-    def boom(url, json=None, headers=None, timeout=None):
-        if json["payload"]["report"]["summary"] == "a":
+    def boom(payload):
+        if payload["payload"]["report"]["summary"] == "a":
             raise RuntimeError("connection refused")
-        return Response(422)
+        raise _Rejected()
 
-    monkeypatch.setattr("alertflow_agent.callbacks.httpx.post", boom)
     sender = CallbackSender(_settings(), store)
+    sender.submit = boom
     assert sender.drain() == 0
     statuses = {row["payload"]["payload"]["report"]["summary"]: row["status"] for row in store.callback_rows()}
     assert statuses["a"] == "retry_wait"
-    # 4xx 是永久失败：重试同样的请求没有意义。
+    # INVALID_ARGUMENT 是永久失败：重试同样的请求没有意义。
     assert statuses["b"] == "dead"
 
 

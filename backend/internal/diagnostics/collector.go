@@ -20,6 +20,10 @@ import (
 
 const maxBody = 512 * 1024
 
+// diagnosticOverlap is how far a later poll looks back before the previous
+// successful boundary, so a late item is not skipped.
+const diagnosticOverlap = 5 * time.Minute
+
 // Collector runs one loop per service that has a diagnostics URL.
 type Collector struct {
 	db     *db.DB
@@ -38,6 +42,9 @@ type Collector struct {
 	// Configured, when set, is called inside the store transaction after the
 	// service lock. A false result drops the snapshot.
 	Configured func(serviceID string) bool
+
+	// now, when set, freezes the poll clock. Tests use it.
+	now func() time.Time
 }
 
 type worker struct {
@@ -199,11 +206,8 @@ func (c *Collector) Poll(ctx context.Context, svc config.Service) error {
 	if err != nil {
 		return err
 	}
-	until := time.Now().UTC()
-	since := until.Add(-time.Duration(intervalSeconds(svc)) * time.Second)
-	if last > 0 {
-		since = time.Unix(last, 0).UTC()
-	}
+	until := c.clock()
+	since := diagnosticSince(until, last, intervalSeconds(svc))
 	pull, err := c.fetch(ctx, svc, since, until)
 	if err != nil {
 		return err
@@ -225,6 +229,27 @@ func (c *Collector) Poll(ctx context.Context, svc config.Service) error {
 		return err
 	}
 	return nil
+}
+
+func (c *Collector) clock() time.Time {
+	if c != nil && c.now != nil {
+		return c.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+// diagnosticSince is the start of one pull. The first pull looks back one
+// interval. Later pulls start five minutes before the previous success.
+func diagnosticSince(until time.Time, lastSuccess int64, intervalSec int) time.Time {
+	until = until.UTC()
+	since := until.Add(-time.Duration(intervalSec) * time.Second)
+	if lastSuccess > 0 {
+		since = time.Unix(lastSuccess, 0).UTC().Add(-diagnosticOverlap)
+	}
+	if !since.Before(until) {
+		since = until.Add(-time.Second)
+	}
+	return since
 }
 
 func (c *Collector) poll(ctx context.Context, svc config.Service) {

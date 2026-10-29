@@ -29,10 +29,16 @@ const (
 	LeaseSeconds = 45
 )
 
+// TaskClient accepts one internal agent task over gRPC. Duplicate is success.
+type TaskClient interface {
+	Accept(ctx context.Context, row db.ClaimedDelivery) error
+}
+
 // Worker claims due delivery tasks and sends each one outside a database transaction.
 type Worker struct {
 	DB    *db.DB
 	Owner string
+	Tasks TaskClient
 	// Now supplies unix seconds. Tests set it so backoff does not sleep.
 	Now func() int64
 }
@@ -113,6 +119,17 @@ func (w *Worker) sendOne(ctx context.Context, row db.ClaimedDelivery) error {
 		return w.fail(row, err, true)
 	}
 	msg.DeliveryID = row.ID
+	if row.IntegrationID == 0 {
+		if w.Tasks == nil {
+			return w.fail(row, errors.New("agent grpc target is not configured"), false)
+		}
+		sendCtx, cancel := context.WithTimeout(ctx, notify.SendTimeout)
+		defer cancel()
+		if err := w.Tasks.Accept(sendCtx, row); err != nil {
+			return w.fail(row, err, permanent(err))
+		}
+		return w.DB.SucceedDelivery(row.ID, w.Owner, w.now(), w.now())
+	}
 	sender, ok := notify.SenderFor(row.IntegrationType)
 	if !ok {
 		return w.fail(row, notify.ErrNoSender, true)

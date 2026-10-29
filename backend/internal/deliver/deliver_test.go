@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,25 +13,14 @@ import (
 
 	"database/sql"
 
-	"github.com/ecakeman/alertflow/internal/config"
 	"github.com/ecakeman/alertflow/internal/db"
 	"github.com/ecakeman/alertflow/internal/event"
 	"github.com/ecakeman/alertflow/internal/notify"
-	"github.com/ecakeman/alertflow/internal/query"
 )
 
 func TestDeliverSucceedsAndLogs(t *testing.T) {
 	database := db.OpenTest(t)
-	var hits atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		if r.Header.Get("Authorization") != "super-secret" {
-			t.Errorf("missing secret header")
-		}
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer srv.Close()
-	if _, err := database.CreateIntegration(db.AgentWebhookType, "hook", true, false, json.RawMessage(`{"url":"`+srv.URL+`","headers":{"Authorization":"super-secret"}}`)); err != nil {
+	if _, err := database.CreateIntegration(db.AgentWebhookType, "hook", true, false, json.RawMessage(`{"url":"http://example.invalid","headers":{"Authorization":"super-secret"}}`)); err != nil {
 		t.Fatal(err)
 	}
 	ev := mustOffline(t, database, "svc")
@@ -48,13 +36,13 @@ func TestDeliverSucceedsAndLogs(t *testing.T) {
 	if n, err := w.ProcessDue(context.Background()); err != nil || n != 1 {
 		t.Fatalf("process = %d, %v", n, err)
 	}
-	if hits.Load() != 1 {
-		t.Fatalf("hits = %d", hits.Load())
+	if w.Tasks.(*scriptedTasks).hits.Load() != 1 {
+		t.Fatalf("hits = %d", w.Tasks.(*scriptedTasks).hits.Load())
 	}
 	assertStatus(t, database, ev, "succeeded", 1)
 	var sent int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM notification_log WHERE status = 'sent' AND event = 'incident_start'`).Scan(&sent); err != nil || sent != 1 {
-		t.Fatalf("success log = %d, %v", sent, err)
+	if err := database.QueryRow(`SELECT COUNT(*) FROM notification_log WHERE status = 'sent' AND event = 'incident_start'`).Scan(&sent); err != nil || sent != 0 {
+		t.Fatalf("internal task wrote a notification log: %d, %v", sent, err)
 	}
 	var sentAt int
 	if err := database.QueryRow(`SELECT COUNT(*) FROM notification_deliveries WHERE sent_at IS NOT NULL AND status = 'succeeded'`).Scan(&sentAt); err != nil || sentAt != 1 {
@@ -68,19 +56,15 @@ func TestDeliverSucceedsAndLogs(t *testing.T) {
 
 func TestDeliverRetriesThenSucceeds(t *testing.T) {
 	database := db.OpenTest(t)
-	var hits atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if hits.Add(1) == 1 {
-			http.Error(w, "unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-	mustChannel(t, database, "hook", srv.URL, false)
+	mustChannel(t, database, "hook", "http://example.invalid", false)
 	ev := mustOffline(t, database, "svc")
 	clk := newClock()
-	w := &Worker{DB: database, Owner: "worker", Now: clk.now}
+	w := &Worker{DB: database, Owner: "worker", Now: clk.now, Tasks: &scriptedTasks{fail: func(n int32) error {
+		if n == 1 {
+			return errors.New("unavailable")
+		}
+		return nil
+	}}}
 	if _, err := w.ProcessDue(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -98,21 +82,19 @@ func TestDeliverRetriesThenSucceeds(t *testing.T) {
 		t.Fatalf("second process = %d, %v", n, err)
 	}
 	assertStatus(t, database, ev, "succeeded", 2)
-	if hits.Load() != 2 {
-		t.Fatalf("hits = %d", hits.Load())
+	if w.Tasks.(*scriptedTasks).hits.Load() != 2 {
+		t.Fatalf("hits = %d", w.Tasks.(*scriptedTasks).hits.Load())
 	}
 }
 
 func TestDeliverDiesAtMaxAttempts(t *testing.T) {
 	database := db.OpenTest(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "down", http.StatusBadGateway)
-	}))
-	defer srv.Close()
-	mustChannel(t, database, "hook", srv.URL, false)
+	mustChannel(t, database, "hook", "http://example.invalid", false)
 	ev := mustOffline(t, database, "svc")
 	clk := newClock()
-	w := &Worker{DB: database, Owner: "dead", Now: clk.now}
+	w := &Worker{DB: database, Owner: "dead", Now: clk.now, Tasks: &scriptedTasks{fail: func(int32) error {
+		return errors.New("unavailable")
+	}}}
 	for i := 0; i < MaxAttempts; i++ {
 		if _, err := w.ProcessDue(context.Background()); err != nil {
 			t.Fatal(err)
@@ -193,11 +175,11 @@ func TestClaimIsExclusiveAndLeaseExpires(t *testing.T) {
 
 func TestInvalidChannelDoesNotRetry(t *testing.T) {
 	database := db.OpenTest(t)
-	if _, err := database.CreateIntegration(db.AgentWebhookType, "bad", true, false, json.RawMessage(`{}`)); err != nil {
-		t.Fatal(err)
-	}
 	ev := mustOffline(t, database, "svc")
 	w := clocked(database, time.Now().Unix())
+	w.Tasks.(*scriptedTasks).fail = func(int32) error {
+		return &notify.StatusError{Code: http.StatusBadRequest, Body: "missing field"}
+	}
 	if _, err := w.ProcessDue(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -209,14 +191,8 @@ func TestInvalidChannelDoesNotRetry(t *testing.T) {
 
 func TestWarningGoesOnlyToOptedInChannel(t *testing.T) {
 	database := db.OpenTest(t)
-	var hits atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-	mustChannel(t, database, "quiet", srv.URL, false)
-	opted := mustChannel(t, database, "pages", srv.URL, true)
+	mustChannel(t, database, "quiet", "http://example.invalid", false)
+	mustChannel(t, database, "pages", "http://example.invalid/pages", true)
 	ev, err := event.NewCheckCompleted("svc", "Name", "https://example.com", 6_000, db.StatusWarning, nil, nil, "blip", 2)
 	if err != nil {
 		t.Fatal(err)
@@ -226,17 +202,18 @@ func TestWarningGoesOnlyToOptedInChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 	var n int
-	var integrationID int64
-	if err := database.QueryRow(`SELECT COUNT(*), MIN(integration_id) FROM notification_deliveries WHERE event_type = 'warning'`).Scan(&n, &integrationID); err != nil || n != 1 || integrationID != opted.ID {
-		t.Fatalf("warning deliveries = %d for %d, %v", n, integrationID, err)
+	var integrationID sql.NullInt64
+	if err := database.QueryRow(`SELECT COUNT(*), MIN(integration_id) FROM notification_deliveries WHERE event_type = 'warning'`).Scan(&n, &integrationID); err != nil || n != 1 || integrationID.Valid {
+		t.Fatalf("warning deliveries = %d integration %v, %v", n, integrationID, err)
 	}
 	w := clocked(database, time.Now().Unix())
 	if _, err := w.ProcessDue(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if hits.Load() != 1 {
-		t.Fatalf("hits = %d", hits.Load())
+	if w.Tasks.(*scriptedTasks).hits.Load() != 1 {
+		t.Fatalf("hits = %d", w.Tasks.(*scriptedTasks).hits.Load())
 	}
+	_ = ev
 }
 
 func TestDeletedIntegrationIsNotASuccessfulSend(t *testing.T) {
@@ -247,15 +224,18 @@ func TestDeletedIntegrationIsNotASuccessfulSend(t *testing.T) {
 		t.Fatal(err)
 	}
 	var deliveries, sent int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM notification_deliveries`).Scan(&deliveries); err != nil || deliveries != 0 {
-		t.Fatalf("deliveries after delete = %d, %v", deliveries, err)
+	if err := database.QueryRow(`SELECT COUNT(*) FROM notification_deliveries WHERE integration_id IS NULL`).Scan(&deliveries); err != nil || deliveries != 1 {
+		t.Fatalf("internal deliveries after delete = %d, %v", deliveries, err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM notification_deliveries WHERE integration_id IS NOT NULL`).Scan(&deliveries); err != nil || deliveries != 0 {
+		t.Fatalf("channel deliveries after delete = %d, %v", deliveries, err)
 	}
 	if err := database.QueryRow(`SELECT COUNT(*) FROM notification_log WHERE status = 'sent'`).Scan(&sent); err != nil || sent != 0 {
 		t.Fatalf("success log after delete = %d, %v", sent, err)
 	}
 	w := clocked(database, time.Now().Unix())
-	if n, err := w.ProcessDue(context.Background()); err != nil || n != 0 {
-		t.Fatalf("deleted task processed: %d, %v", n, err)
+	if n, err := w.ProcessDue(context.Background()); err != nil || n != 1 {
+		t.Fatalf("internal task processed = %d, %v", n, err)
 	}
 }
 
@@ -288,6 +268,9 @@ func TestManualRetryClearsAttempts(t *testing.T) {
 	}
 	ev := mustOffline(t, database, "svc")
 	w := clocked(database, time.Now().Unix())
+	w.Tasks.(*scriptedTasks).fail = func(int32) error {
+		return &notify.StatusError{Code: http.StatusBadRequest, Body: "missing field"}
+	}
 	if _, err := w.ProcessDue(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -310,11 +293,21 @@ func newClock() *clock { return &clock{sec: time.Now().Unix()} }
 
 func (c *clock) now() int64 { return c.sec }
 
+type scriptedTasks struct {
+	hits atomic.Int32
+	fail func(int32) error
+}
+
+func (s *scriptedTasks) Accept(context.Context, db.ClaimedDelivery) error {
+	n := s.hits.Add(1)
+	if s.fail != nil {
+		return s.fail(n)
+	}
+	return nil
+}
+
 func clocked(database *db.DB, now int64) *Worker {
-	notify.Register(notify.AgentWebhookType, notify.AgentSender{
-		Q: query.New(database, func() *config.Config { return &config.Config{} }),
-	})
-	return &Worker{DB: database, Owner: "worker", Now: func() int64 { return now }}
+	return &Worker{DB: database, Owner: "worker", Now: func() int64 { return now }, Tasks: &scriptedTasks{}}
 }
 
 func mustChannel(t *testing.T, database *db.DB, name, url string, warnings bool) *db.Integration {
@@ -359,16 +352,22 @@ func TestDisabledIntegrationIsLeftUntilEnabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := time.Now().Unix()
-	rows, err := database.ClaimDeliveries("worker", base, base+15, 1, MaxAttempts)
-	if err != nil || len(rows) != 0 {
-		t.Fatalf("disabled claim = %+v, %v", rows, err)
-	}
-	if _, err := database.UpdateIntegration(channel.ID, channel.Type, channel.Name, true, false, channel.Config); err != nil {
+	if _, err := database.Exec(
+		`INSERT INTO notification_deliveries (
+			event_id, integration_id, event_type, payload, status,
+			attempt_count, next_attempt_at, created_at, updated_at
+		 ) VALUES ('old-channel', $1, 'incident_start', '{}', 'pending', 0, $2, $2, $2)`,
+		channel.ID, base,
+	); err != nil {
 		t.Fatal(err)
 	}
-	rows, err = database.ClaimDeliveries("worker", base, base+15, 1, MaxAttempts)
-	if err != nil || len(rows) != 1 {
-		t.Fatalf("enabled claim = %+v, %v", rows, err)
+	rows, err := database.ClaimDeliveries("worker", base, base+15, 1, MaxAttempts)
+	if err != nil || len(rows) != 1 || rows[0].IntegrationID != 0 {
+		t.Fatalf("claim = %+v, %v", rows, err)
+	}
+	var old string
+	if err := database.QueryRow(`SELECT status FROM notification_deliveries WHERE event_id = 'old-channel'`).Scan(&old); err != nil || old != "pending" {
+		t.Fatalf("historical row = %s, %v", old, err)
 	}
 }
 
@@ -508,19 +507,15 @@ func TestConcurrentExhaustionIsSingleDead(t *testing.T) {
 
 func TestRateLimitRetriesThenSucceeds(t *testing.T) {
 	database := db.OpenTest(t)
-	var hits atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if hits.Add(1) == 1 {
-			w.WriteHeader(http.StatusTooManyRequests)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer srv.Close()
-	mustChannel(t, database, "hook", srv.URL, false)
+	mustChannel(t, database, "hook", "http://example.invalid", false)
 	ev := mustOffline(t, database, "svc")
 	clk := newClock()
-	w := &Worker{DB: database, Owner: "worker", Now: clk.now}
+	w := &Worker{DB: database, Owner: "worker", Now: clk.now, Tasks: &scriptedTasks{fail: func(n int32) error {
+		if n == 1 {
+			return &notify.StatusError{Code: http.StatusTooManyRequests}
+		}
+		return nil
+	}}}
 	if _, err := w.ProcessDue(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -538,16 +533,8 @@ func TestRateLimitRetriesThenSucceeds(t *testing.T) {
 
 func TestWarningLogsOmitIncidentID(t *testing.T) {
 	database := db.OpenTest(t)
-	okSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer okSrv.Close()
-	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "down", http.StatusBadGateway)
-	}))
-	defer failSrv.Close()
-	mustChannel(t, database, "ok", okSrv.URL, true)
-	mustChannel(t, database, "fail", failSrv.URL, true)
+	mustChannel(t, database, "ok", "http://example.invalid/ok", true)
+	mustChannel(t, database, "fail", "http://example.invalid/fail", true)
 	ev, err := event.NewCheckCompleted("svc", "Name", "https://example.com", 6_000, db.StatusWarning, nil, nil, "blip", 2)
 	if err != nil {
 		t.Fatal(err)
@@ -557,7 +544,7 @@ func TestWarningLogsOmitIncidentID(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := clocked(database, time.Now().Unix())
-	if n, err := w.ProcessDue(context.Background()); err != nil || n != 2 {
+	if n, err := w.ProcessDue(context.Background()); err != nil || n != 1 {
 		t.Fatalf("process = %d, %v", n, err)
 	}
 	var incidentID int64
@@ -565,14 +552,14 @@ func TestWarningLogsOmitIncidentID(t *testing.T) {
 	if err := database.QueryRow(`SELECT incident_id FROM notification_deliveries WHERE event_type = 'warning' LIMIT 1`).Scan(&incidentID); err != nil || incidentID == 0 {
 		t.Fatalf("delivery incident = %d, %v", incidentID, err)
 	}
-	if err := database.QueryRow(`SELECT COUNT(*) FROM notification_deliveries WHERE event_type = 'warning' AND incident_id IS NOT NULL`).Scan(&withIncident); err != nil || withIncident != 2 {
+	if err := database.QueryRow(`SELECT COUNT(*) FROM notification_deliveries WHERE event_type = 'warning' AND incident_id IS NOT NULL`).Scan(&withIncident); err != nil || withIncident != 1 {
 		t.Fatalf("deliveries with incident = %d, %v", withIncident, err)
 	}
-	if err := database.QueryRow(`SELECT COUNT(*) FROM notification_log WHERE event = 'warning' AND incident_id IS NULL`).Scan(&nullLogs); err != nil || nullLogs != 2 {
-		t.Fatalf("null warning logs = %d, %v", nullLogs, err)
+	if err := database.QueryRow(`SELECT COUNT(*) FROM notification_log WHERE event = 'warning'`).Scan(&nullLogs); err != nil || nullLogs != 0 {
+		t.Fatalf("warning logs = %d, %v", nullLogs, err)
 	}
 	views, err := database.ListDeliveriesByIncident(incidentID)
-	if err != nil || len(views) != 2 {
+	if err != nil || len(views) != 1 {
 		t.Fatalf("listed = %+v, %v", views, err)
 	}
 }
@@ -587,32 +574,20 @@ func TestDeliveryErrorHidesSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	ev := mustOffline(t, database, "refused-svc")
-	if _, err := clocked(database, time.Now().Unix()).ProcessDue(context.Background()); err != nil {
+	w := clocked(database, time.Now().Unix())
+	w.Tasks.(*scriptedTasks).fail = func(int32) error {
+		return errors.New("agent unavailable")
+	}
+	if _, err := w.ProcessDue(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	assertNoSecret(t, database, ev, pathSecret)
-	if !strings.Contains(storedError(t, database, ev), "dial") && !strings.Contains(storedError(t, database, ev), "connect") {
-		t.Fatalf("refused error lost its cause: %s", storedError(t, database, ev))
+	if strings.Contains(storedError(t, database, ev), pathSecret) || strings.Contains(storedError(t, database, ev), bodySecret) {
+		t.Fatalf("stored error kept a secret: %s", storedError(t, database, ev))
 	}
-	if _, err := database.UpdateIntegration(refusedChannel.ID, refusedChannel.Type, refusedChannel.Name, false, false, refusedChannel.Config); err != nil {
-		t.Fatal(err)
+	if !strings.Contains(storedError(t, database, ev), "unavailable") {
+		t.Fatalf("stored error = %s", storedError(t, database, ev))
 	}
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, bodySecret, http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-	if _, err := database.CreateIntegration(db.AgentWebhookType, "echo", true, false, json.RawMessage(`{"url":"`+srv.URL+`","headers":{"Authorization":"`+bodySecret+`"}}`)); err != nil {
-		t.Fatal(err)
-	}
-	echoEv := mustOffline(t, database, "echo-svc")
-	if _, err := clocked(database, time.Now().Unix()).ProcessDue(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	assertNoSecret(t, database, echoEv, bodySecret)
-	if !strings.Contains(storedError(t, database, echoEv), "500") {
-		t.Fatalf("status missing from %s", storedError(t, database, echoEv))
-	}
+	_ = refusedChannel
 }
 
 func mustEventID(t *testing.T, database *db.DB) string {

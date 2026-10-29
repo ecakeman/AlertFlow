@@ -144,16 +144,14 @@ Phase 7 才生成代码和切换传输。Phase 0 把地址、认证和切换规�
 
 | 变量 | 值 |
 | --- | --- |
-| `ALERTFLOW_GRPC_ADDR` | `:19090` |
-| `AGENT_GRPC_ADDR` | `:50051` |
-| `ALERTFLOW_AGENT_GRPC_TARGET` | `agent:50051` |
-| `AGENT_ALERTFLOW_GRPC_TARGET` | `alertflow:19090` |
-| `ALERTFLOW_AGENT_GRPC_TOKEN` | Delivery 调用 Agent |
-| `AGENT_ALERTFLOW_GRPC_TOKEN` | Agent 调用 Go |
-| `ALERTFLOW_AGENT_TRANSPORT` | Go 侧 `http` 或 `grpc` |
-| `AGENT_TRANSPORT` | Agent 侧 `http` 或 `grpc` |
+| `ALERTFLOW_GRPC_ADDR` | `:9090` |
+| `AGENT_GRPC_ADDR` | `:9000` |
+| `ALERTFLOW_AGENT_GRPC_TARGET` | `agent:9000` |
+| `ALERTFLOW_GRPC_TARGET` | `alertflow:9090` |
+| `AGENT_TASK_GRPC_TOKEN` | Delivery 调用 Agent |
+| `ALERTFLOW_AGENT_GRPC_TOKEN` | Agent 调用 Go |
 
-两枚 token 互相独立，也不复用 MCP 或模型密钥。两个传输开关必须相同。发送时读取当前值，不写进任务行。Phase 7 验收前默认 `http`。默认 Compose 不把这两个端口映射到宿主机。暂不启用 mTLS。
+两枚 token 互相独立，也不复用 MCP 或模型密钥。发送时读取当前值，不写进任务行。任务、查询和回调都走这一份 proto。默认 Compose 不把这两个端口映射到宿主机。暂不启用 mTLS。
 
 三条路径一起切换：Delivery 启动任务、Agent 查询 Go、Agent 提交报告和运行状态。不允许只切其中一条。HTTP 实现留在代码里，供回滚。可靠投递仍由数据库任务行、租约、重试和 callback Outbox 负责。gRPC 不是队列。
 

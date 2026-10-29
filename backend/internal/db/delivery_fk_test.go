@@ -3,8 +3,6 @@ package db
 import (
 	"encoding/json"
 	"testing"
-
-	"github.com/ecakeman/alertflow/internal/event"
 )
 
 func TestDeleteIntegrationRemovesPendingDeliveries(t *testing.T) {
@@ -30,17 +28,17 @@ func TestDeleteIntegrationRemovesPendingDeliveries(t *testing.T) {
 	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE integration_id = $1`, drop.ID); n != 0 {
 		t.Fatalf("deleted channel left %d deliveries", n)
 	}
-	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE integration_id = $1 AND status = 'pending'`, keep.ID); n != 2 {
-		t.Fatalf("kept channel deliveries = %d, want 2", n)
+	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE integration_id = $1 AND status = 'pending'`, keep.ID); n != 1 {
+		t.Fatalf("kept channel deliveries = %d, want 1", n)
 	}
 	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE event_id = $1 AND integration_id = $2`, keepEvent, keep.ID); n != 1 {
 		t.Fatalf("kept event delivery = %d", n)
 	}
-	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE event_id = $1 AND integration_id = $2`, dropEvent, keep.ID); n != 1 {
-		t.Fatalf("other event on kept channel = %d", n)
+	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE event_id = $1`, dropEvent); n != 0 {
+		t.Fatalf("deleted channel left event rows = %d", n)
 	}
-	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries d LEFT JOIN integrations i ON i.id = d.integration_id WHERE i.id IS NULL`); n != 0 {
-		t.Fatalf("orphan deliveries = %d", n)
+	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE integration_id IS NULL`); n != 0 {
+		t.Fatalf("internal tasks = %d", n)
 	}
 }
 
@@ -119,20 +117,15 @@ func mustChannel(t *testing.T, database *DB, name string, warnings bool) *Integr
 
 func mustDelivery(t *testing.T, database *DB, service string, integrationID int64) string {
 	t.Helper()
-	ev, err := event.NewCheckCompleted(service, "Name", "https://example.com/health", 1000, StatusOffline, nil, nil, "down", 1)
-	if err != nil {
+	eventID := "evt-" + service
+	if _, err := database.Exec(
+		`INSERT INTO notification_deliveries (
+			event_id, integration_id, event_type, payload, status,
+			attempt_count, next_attempt_at, created_at, updated_at
+		 ) VALUES ($1, $2, 'incident_start', '{}', 'pending', 0, 1, 1, 1)`,
+		eventID, integrationID,
+	); err != nil {
 		t.Fatal(err)
 	}
-	ev.CheckID = integrationID
-	if err := database.ApplyCheckEvent(ev); err != nil {
-		t.Fatal(err)
-	}
-	var n int
-	if err := database.QueryRow(
-		`SELECT COUNT(*) FROM notification_deliveries WHERE event_id = $1 AND integration_id = $2 AND status = 'pending'`,
-		ev.EventID, integrationID,
-	).Scan(&n); err != nil || n != 1 {
-		t.Fatalf("delivery for %d = %d, %v", integrationID, n, err)
-	}
-	return ev.EventID
+	return eventID
 }

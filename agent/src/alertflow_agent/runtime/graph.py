@@ -489,6 +489,9 @@ class Runner:
     def collect_diagnostics(self, state):
         if self._stop_if_cancelled(state):
             return state
+        if getattr(self.settings, "agent_diagnostics_mode", "timeline") != "legacy":
+            state["diagnostic_source"] = "timeline"
+            return state
         try:
             cfg = load_config(self.settings.diagnostics_file)
             start = datetime.fromtimestamp(state["coverage"]["from"], timezone.utc).isoformat()

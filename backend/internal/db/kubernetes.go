@@ -382,6 +382,29 @@ func upsertKubernetesSource(tx *sql.Tx, serviceID, status, errText string, at in
 	return err
 }
 
+// ListKubernetesObjects returns the stored objects for one service.
+func (db *DB) ListKubernetesObjects(serviceID string) ([]KubernetesObject, error) {
+	rows, err := db.Query(
+		`SELECT cluster_id, namespace, resource_kind, resource_name, resource_uid, active, last_seen_at
+		 FROM runtime_object_states WHERE service_id = $1 ORDER BY cluster_id, namespace, resource_name`,
+		serviceID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []KubernetesObject
+	for rows.Next() {
+		var obj KubernetesObject
+		if err := rows.Scan(&obj.ClusterID, &obj.Namespace, &obj.Kind, &obj.Name, &obj.UID, &obj.Active, &obj.ObservedAt); err != nil {
+			return nil, err
+		}
+		obj.ServiceID = serviceID
+		out = append(out, obj)
+	}
+	return out, rows.Err()
+}
+
 func kindKey(kind string) string {
 	switch kind {
 	case "Deployment":

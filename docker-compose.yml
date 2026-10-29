@@ -50,6 +50,8 @@ services:
       ALERTFLOW_DATABASE_URL: postgres://alertflow:${POSTGRES_PASSWORD:-alertflow}@postgres:5432/alertflow?sslmode=disable
       ALERTFLOW_CONFIG_DIR: /config
       ALERTFLOW_ADDR: :8080
+      ALERTFLOW_GRPC_ADDR: ${ALERTFLOW_GRPC_ADDR:-:9090}
+      ALERTFLOW_AGENT_GRPC_TOKEN: ${ALERTFLOW_AGENT_GRPC_TOKEN:-}
       ALERTFLOW_AGENT_TOKEN: ${ALERTFLOW_AGENT_TOKEN:-}
       # Agent 回传诊断结果用的独立令牌（POST /webhooks/agent）
       ALERTFLOW_AGENT_CALLBACK_TOKEN: ${ALERTFLOW_AGENT_CALLBACK_TOKEN:-}
@@ -142,6 +144,8 @@ services:
       # 诊断上下文要用当前的服务定义组装，所以 delivery 必须读得到 config.yaml。
       # 只读挂载：配置只由 server 写。
       ALERTFLOW_CONFIG_DIR: /config
+      ALERTFLOW_AGENT_GRPC_TARGET: ${ALERTFLOW_AGENT_GRPC_TARGET:-agent:9000}
+      AGENT_TASK_GRPC_TOKEN: ${AGENT_TASK_GRPC_TOKEN:-}
     volumes:
       - alertflow-config:/config:ro
     depends_on:
@@ -164,6 +168,11 @@ services:
       AGENT_API_TOKEN: ${AGENT_API_TOKEN:-}
       ALERTFLOW_AGENT_TOKEN: ${ALERTFLOW_AGENT_TOKEN:-}
       ALERTFLOW_BASE_URL: http://alertflow:8080
+      ALERTFLOW_GRPC_TARGET: ${ALERTFLOW_GRPC_TARGET:-alertflow:9090}
+      ALERTFLOW_AGENT_GRPC_TOKEN: ${ALERTFLOW_AGENT_GRPC_TOKEN:-}
+      AGENT_GRPC_ADDR: ${AGENT_GRPC_ADDR:-:9000}
+      AGENT_TASK_GRPC_TOKEN: ${AGENT_TASK_GRPC_TOKEN:-}
+      AGENT_DIAGNOSTICS_MODE: ${AGENT_DIAGNOSTICS_MODE:-timeline}
       # 诊断结果回传（Agent → AlertFlow）。未配置令牌时结果只留在 Agent 自己的库里。
       AGENT_CALLBACK_URL: ${AGENT_CALLBACK_URL:-http://alertflow:8080/webhooks/agent}
       AGENT_CALLBACK_TOKEN: ${AGENT_CALLBACK_TOKEN:-}

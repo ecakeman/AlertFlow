@@ -323,6 +323,45 @@ func agentStatus(msg Message) string {
 	}
 }
 
+// Encode builds the same v2 envelope Send posts, without an HTTP call.
+func (s AgentSender) Encode(ctx context.Context, msg Message) ([]byte, error) {
+	if s.Q == nil {
+		return nil, errors.New("agent_webhook: query service is not configured")
+	}
+	limit := s.MaxBytes
+	if limit <= 0 {
+		limit = AgentMaxPayloadBytes
+	}
+	if msg.Chat != nil {
+		history := msg.Chat.History
+		if len(history) == 0 {
+			history = json.RawMessage("[]")
+		}
+		body, err := json.Marshal(agentChatMessage{
+			SchemaVersion: AgentSchemaVersion,
+			MessageID:     "chat:" + msg.Chat.RequestID,
+			MessageType:   AgentMsgChatRequested,
+			CorrelationID: "incident:" + strconv.FormatInt(msg.IncidentID, 10),
+			SentAt:        time.Now().UTC().Format(time.RFC3339),
+			Payload: agentChatPayload{
+				RequestID:  msg.Chat.RequestID,
+				IncidentID: msg.IncidentID,
+				ServiceID:  msg.ServiceID,
+				Message:    clipRunes(msg.Chat.Message, maxChatMessageRunes),
+				History:    history,
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(body) > limit {
+			return nil, fmt.Errorf("agent_webhook: chat request is %d bytes, over the %d limit", len(body), limit)
+		}
+		return body, nil
+	}
+	return encodeAgentMessage(s.build(ctx, msg, webhookConfig{}), limit)
+}
+
 // encodeAgentMessage marshals the message, trimming the diagnostic context
 // until it fits. Each trimming step is recorded in coverage.truncated, so the
 // Agent can tell "the data does not exist" from "the data did not fit".

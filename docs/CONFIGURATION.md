@@ -5,7 +5,7 @@ upmonitor is configured by a single `config.yaml` in your config directory
 plain YAML you can edit by hand — it is validated and re-loaded whenever the app
 saves it.
 
-`ALERTFLOW_AGENT_TOKEN` is not a YAML field. An empty value makes `GET /internal/agent/v1/...` return 503. `ALERTFLOW_AGENT_CALLBACK_TOKEN` is the separate bearer for the agent's own inbound edge, `POST /webhooks/agent`.
+`ALERTFLOW_AGENT_TOKEN` is not a YAML field. An empty value makes `GET /internal/agent/v1/...` return 503. `ALERTFLOW_AGENT_CALLBACK_TOKEN` is the separate bearer for `POST /webhooks/agent`. The gRPC edges use different names: `ALERTFLOW_GRPC_ADDR` (default `:9090`) and `ALERTFLOW_AGENT_GRPC_TOKEN` on the Go server, `AGENT_GRPC_ADDR` (default `:9000`) and `AGENT_TASK_GRPC_TOKEN` on the Agent, `ALERTFLOW_AGENT_GRPC_TARGET` for delivery, and `ALERTFLOW_GRPC_TARGET` for the Agent's client. Compose does not publish `:9000` or `:9090`.
 
 **Not in this file** (they live in PostgreSQL, via `ALERTFLOW_DATABASE_URL`): users,
 sessions, metrics history, TLS snapshots, **incidents + comments**, and

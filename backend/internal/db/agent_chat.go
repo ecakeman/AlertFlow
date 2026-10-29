@@ -84,27 +84,14 @@ func (db *DB) CreateChatRequest(rec ChatRequestRow, payload []byte, now int64) (
 		return nil, false, err
 	}
 
-	var deliveryID sql.NullInt64
-	err = tx.QueryRow(
-		`INSERT INTO notification_deliveries (
-			event_id, incident_id, integration_id, event_type, payload, status,
-			attempt_count, next_attempt_at, created_at, updated_at
-		 )
-		 SELECT $1, $2, i.id, $3, $4, 'pending', 0, $5, $5, $5
-		 FROM integrations i
-		 WHERE i.type = $6 AND i.enabled
-		 ORDER BY i.id
-		 LIMIT 1
-		 RETURNING id`,
-		rec.RequestID, rec.IncidentID, EventChatRequested, string(payload), now, AgentWebhookType,
-	).Scan(&deliveryID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	deliveryID, err := InsertInternalAgentTask(tx, rec.RequestID, &rec.IncidentID, EventChatRequested, payload, now)
+	if err != nil {
 		return nil, false, err
 	}
-	if deliveryID.Valid {
+	if deliveryID != 0 {
 		if _, err := tx.Exec(
 			`UPDATE agent_chat_requests SET delivery_id = $1, updated_at = $2 WHERE id = $3`,
-			deliveryID.Int64, now, id,
+			deliveryID, now, id,
 		); err != nil {
 			return nil, false, err
 		}
@@ -156,6 +143,61 @@ func (db *DB) ListChatRequests(incidentID int64, limit int) ([]ChatRequestRow, e
 
 // CompleteChatRequest records the agent's answer. A repeated callback changes
 // nothing: the row is already answered, and the answer that won is kept.
+// ApplyChatCallback stores a chat result and, when the incident has a service,
+// the matching timeline row, in one transaction.
+func (db *DB) ApplyChatCallback(messageID, messageType, requestID, reply string, evidenceIDs json.RawMessage, reason string, now int64) (bool, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var res sql.Result
+	if messageType == "chat.failed" {
+		res, err = tx.Exec(
+			`UPDATE agent_chat_requests SET status = 'failed', error = $2, updated_at = $3
+			 WHERE request_id = $1 AND status = 'pending'`,
+			requestID, reason, now,
+		)
+	} else {
+		res, err = tx.Exec(
+			`UPDATE agent_chat_requests
+			 SET status = 'answered', reply = $2, evidence_ids = $3::jsonb, error = '', updated_at = $4
+			 WHERE request_id = $1 AND status = 'pending'`,
+			requestID, reply, jsonOrNil(evidenceIDs), now,
+		)
+	}
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	var serviceID string
+	var incidentID int64
+	err = tx.QueryRow(
+		`SELECT i.service_id, c.incident_id
+		 FROM agent_chat_requests c
+		 JOIN incidents i ON i.id = c.incident_id
+		 WHERE c.request_id = $1`, requestID,
+	).Scan(&serviceID, &incidentID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if serviceID != "" {
+		if err := insertAgentTimelineTx(tx, AgentRunRecord{
+			MessageID: messageID, MessageType: messageType, ServiceID: serviceID,
+			IncidentID: &incidentID, Error: reason, StartedAt: &now,
+		}, now); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
 func (db *DB) CompleteChatRequest(requestID, reply string, evidenceIDs json.RawMessage, now int64) (bool, error) {
 	res, err := db.Exec(
 		`UPDATE agent_chat_requests

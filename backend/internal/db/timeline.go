@@ -4,9 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -29,8 +27,8 @@ type timelineEvent struct {
 	Origin     string
 	// Source defaults to the incident source. Details, when set, replaces the
 	// origin object.
-	Source  string
-	Details json.RawMessage
+	Source       string
+	Details      json.RawMessage
 	ClusterID    string
 	Namespace    string
 	ResourceKind string
@@ -144,67 +142,18 @@ func (db *DB) CreateManualIncident(in ManualIncident) (*Incident, error) {
 }
 
 func insertManualDeliveriesTx(tx *sql.Tx, in ManualIncident, incidentID, now int64) error {
-	rows, err := tx.Query(
-		`SELECT id, config FROM integrations WHERE enabled AND type = $1 ORDER BY id`,
-		AgentWebhookType,
-	)
+	eventID := incidentOpenedKey(incidentID)
+	raw, err := json.Marshal(DeliverySnapshot{
+		Event: "incident_start", EventID: eventID, IncidentID: &incidentID,
+		ServiceID: in.ServiceID, ServiceName: in.ServiceName, ServiceURL: in.ServiceURL,
+		OccurredAt: in.StartedAt, StartedAt: in.StartedAt, ResolvedAt: in.ResolvedAt,
+		Source: "manual",
+	})
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	type channel struct {
-		id  int64
-		cfg []byte
-	}
-	var channels []channel
-	for rows.Next() {
-		var c channel
-		if err := rows.Scan(&c.id, &c.cfg); err != nil {
-			return err
-		}
-		if usableAgentURL(c.cfg) {
-			channels = append(channels, c)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	eventID := incidentOpenedKey(incidentID)
-	for _, c := range channels {
-		raw, err := json.Marshal(DeliverySnapshot{
-			Event: "incident_start", EventID: eventID, IncidentID: &incidentID,
-			ServiceID: in.ServiceID, ServiceName: in.ServiceName, ServiceURL: in.ServiceURL,
-			OccurredAt: in.StartedAt, StartedAt: in.StartedAt, ResolvedAt: in.ResolvedAt,
-			Source: "manual",
-		})
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(
-			`INSERT INTO notification_deliveries (
-				event_id, incident_id, integration_id, event_type, payload, status,
-				attempt_count, next_attempt_at, created_at, updated_at
-			) VALUES ($1, $2, $3, 'incident_start', $4, 'pending', 0, $5, $5, $5)`,
-			eventID, incidentID, c.id, string(raw), now,
-		); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func usableAgentURL(raw []byte) bool {
-	var cfg struct {
-		URL string `json:"url"`
-	}
-	if json.Unmarshal(raw, &cfg) != nil {
-		return false
-	}
-	parsed, err := url.Parse(strings.TrimSpace(cfg.URL))
-	if err != nil || parsed.Host == "" {
-		return false
-	}
-	return parsed.Scheme == "http" || parsed.Scheme == "https"
+	_, err = InsertInternalAgentTask(tx, eventID, &incidentID, "incident_start", raw, now)
+	return err
 }
 
 // TimelineRetentionDays is 7, 15, or 30. Any other value, including unset, is 30.

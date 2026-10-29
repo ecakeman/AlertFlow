@@ -59,29 +59,28 @@ func TestCreateChatRequestQueuesOneDeliveryAndDedupes(t *testing.T) {
 		t.Fatalf("queued %d deliveries, want 1", deliveries)
 	}
 	// The delivery must be addressed to the agent channel, not a notification one.
-	var kind, eventType string
+	var eventType string
+	var integrationID *int64
 	if err := database.QueryRow(
-		`SELECT i.type, d.event_type FROM notification_deliveries d
-		 JOIN integrations i ON i.id = d.integration_id WHERE d.event_id = $1`, "chat-1",
-	).Scan(&kind, &eventType); err != nil {
+		`SELECT integration_id, event_type FROM notification_deliveries WHERE event_id = $1`, "chat-1",
+	).Scan(&integrationID, &eventType); err != nil {
 		t.Fatalf("read delivery: %v", err)
 	}
-	if kind != AgentWebhookType || eventType != EventChatRequested {
-		t.Fatalf("delivery = %s/%s", kind, eventType)
+	if integrationID != nil || eventType != EventChatRequested {
+		t.Fatalf("delivery integration=%v type=%s", integrationID, eventType)
 	}
 }
 
 func TestCreateChatRequestWithoutAnAgentChannelFailsLoudly(t *testing.T) {
 	database, incidentID := chatFixture(t)
-	// No agent_webhook integration exists, so nothing will ever pick this up.
 	row, created, err := database.CreateChatRequest(
 		ChatRequestRow{RequestID: "chat-x", IncidentID: incidentID, Message: "hi"},
 		[]byte(`{"event":"chat_requested"}`), 1_700_000_000)
 	if err != nil || !created {
 		t.Fatalf("create: created=%v err=%v", created, err)
 	}
-	if row.DeliveryID != nil {
-		t.Fatalf("a delivery was queued with no agent channel: %+v", row)
+	if row.DeliveryID == nil {
+		t.Fatalf("internal task was not queued: %+v", row)
 	}
 }
 

@@ -24,7 +24,10 @@ def build(settings: Settings | None = None):
     else:
         store = MemoryStore()
     model = OpenAIModel(settings) if settings.llm_api_key else ScriptedModel()
-    client = AlertFlowClient(settings.alertflow_base_url, settings.alertflow_agent_token)
+    client = AlertFlowClient(
+        settings.alertflow_grpc_target,
+        settings.alertflow_agent_grpc_token or settings.alertflow_agent_token,
+    )
     memory = None
     if settings.memory_enabled:
         memory = MemoryRepo(settings.agent_database_url) if settings.agent_database_url else InMemoryMemoryRepo()
@@ -64,10 +67,17 @@ def serve(settings: Settings | None = None) -> None:
     chatter = threading.Thread(target=chat.run, args=(stop,), name="agent-chat")
     chatter.start()
     app = create_app(settings, store, runner)
+    tasks = None
+    if settings.agent_task_grpc_token:
+        from alertflow_agent.grpc_tasks import serve_tasks
+
+        tasks = serve_tasks(settings, store)
 
     @app.on_event("shutdown")
     def _shutdown():
         stop.set()
+        if tasks is not None:
+            tasks.stop(2)
         worker.join(timeout=settings.run_timeout_seconds)
         sender.join(timeout=5)
         chatter.join(timeout=5)

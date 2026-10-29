@@ -41,8 +41,8 @@ func TestApplyCheckEventTransitions(t *testing.T) {
 	if occurred != 1000 || observed != 1000 || recorded < occurred {
 		t.Fatalf("check times occurred=%d observed=%d recorded=%d", occurred, observed, recorded)
 	}
-	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE event_id = $1 AND status = 'pending' AND event_type = 'incident_start'`, down.EventID); n != 2 {
-		t.Fatalf("start deliveries = %d, want 2", n)
+	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE event_id = $1 AND status = 'pending' AND event_type = 'incident_start' AND integration_id IS NULL`, down.EventID); n != 1 {
+		t.Fatalf("start deliveries = %d, want 1", n)
 	}
 	var payload string
 	if err := database.QueryRow(`SELECT payload::text FROM notification_deliveries WHERE event_id = $1 LIMIT 1`, down.EventID).Scan(&payload); err != nil {
@@ -66,7 +66,7 @@ func TestApplyCheckEventTransitions(t *testing.T) {
 	if got, _ := database.GetOngoingIncident("svc"); got != nil {
 		t.Fatal("offline→warning left an ongoing incident")
 	}
-	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE event_id = $1 AND event_type = 'incident_resolve'`, back.EventID); n != 2 {
+	if n := countRows(t, database, `SELECT COUNT(*) FROM notification_deliveries WHERE event_id = $1 AND event_type = 'incident_resolve' AND integration_id IS NULL`, back.EventID); n != 1 {
 		t.Fatalf("resolve deliveries = %d", n)
 	}
 	var resolvePayload string

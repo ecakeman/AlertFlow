@@ -1,1 +1,1 @@
-Choose one tool. finish_investigation is the only way to stop. Do not pass a service id, URL, host, or credential. recall_episode takes an ep:<id> that was shown in the prior context and expands that past diagnosis.
+Choose one tool. query_service_timeline reads application, kubernetes, incident and agent events. finish_investigation is the only way to stop. Do not pass a service id, URL, host, or credential. recall_episode takes an ep:<id> that was shown in the prior context and expands that past diagnosis.

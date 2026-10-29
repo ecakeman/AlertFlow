@@ -313,68 +313,32 @@ type notifySubject struct {
 }
 
 func insertDeliveriesTx(tx *sql.Tx, ev notifySubject, kind string, incidentID, resolvedAt *int64, now int64) error {
-	rows, err := tx.Query(
-		`SELECT id, notify_warnings FROM integrations WHERE enabled AND type = $1`,
-		AgentWebhookType,
-	)
+	startedAt := ev.startedAt
+	resolved := resolvedAt
+	if kind == "warning" {
+		startedAt = 0
+		resolved = nil
+	}
+	snap := DeliverySnapshot{
+		Event:       kind,
+		EventID:     ev.eventID,
+		IncidentID:  incidentID,
+		ServiceID:   ev.serviceID,
+		ServiceName: ev.serviceName,
+		ServiceURL:  ev.serviceURL,
+		OccurredAt:  ev.occurredAt,
+		StartedAt:   startedAt,
+		ResolvedAt:  resolved,
+		Attempts:    ev.attempts,
+		Error:       ev.errText,
+		CheckID:     ev.checkID,
+	}
+	raw, err := json.Marshal(snap)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	type channel struct {
-		id       int64
-		warnings bool
-	}
-	var channels []channel
-	for rows.Next() {
-		var c channel
-		if err := rows.Scan(&c.id, &c.warnings); err != nil {
-			return err
-		}
-		channels = append(channels, c)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, c := range channels {
-		if kind == "warning" && !c.warnings {
-			continue
-		}
-		startedAt := ev.startedAt
-		resolved := resolvedAt
-		if kind == "warning" {
-			startedAt = 0
-			resolved = nil
-		}
-		snap := DeliverySnapshot{
-			Event:       kind,
-			EventID:     ev.eventID,
-			IncidentID:  incidentID,
-			ServiceID:   ev.serviceID,
-			ServiceName: ev.serviceName,
-			ServiceURL:  ev.serviceURL,
-			OccurredAt:  ev.occurredAt,
-			StartedAt:   startedAt,
-			ResolvedAt:  resolved,
-			Attempts:    ev.attempts,
-			Error:       ev.errText,
-			CheckID:     ev.checkID,
-		}
-		raw, err := json.Marshal(snap)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(
-			`INSERT INTO notification_deliveries (
-				event_id, incident_id, integration_id, event_type, payload, status,
-				attempt_count, next_attempt_at, created_at, updated_at
-			) VALUES ($1, $2, $3, $4, $5, 'pending', 0, $6, $6, $6)`,
-			ev.eventID, incidentID, c.id, kind, string(raw), now,
-		); err != nil {
-			return err
-		}
-	}
-	return nil
+	_, err = InsertInternalAgentTask(tx, ev.eventID, incidentID, kind, raw, now)
+	return err
 }
 
 // RecordDeadLetter keeps an unreadable Kafka message so the consumer can move past it.

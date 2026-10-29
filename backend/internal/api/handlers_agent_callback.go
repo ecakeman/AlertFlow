@@ -175,15 +175,14 @@ func (s *Server) handleAgentChatCallback(c *gin.Context, env agentCallbackEnvelo
 		applied bool
 		err     error
 	)
+	reason := ""
 	if env.MessageType == agentMsgChatFailed {
-		reason := strings.TrimSpace(payload.Error)
+		reason = strings.TrimSpace(payload.Error)
 		if reason == "" {
 			reason = "the agent could not answer"
 		}
-		applied, err = s.conn().FailChatRequest(payload.RequestID, reason, now)
-	} else {
-		applied, err = s.conn().CompleteChatRequest(payload.RequestID, payload.Reply, payload.EvidenceIDs, now)
 	}
+	applied, err = s.conn().ApplyChatCallback(env.MessageID, env.MessageType, payload.RequestID, payload.Reply, payload.EvidenceIDs, reason, now)
 	if err != nil {
 		slog.ErrorContext(c.Request.Context(), "agent callback: chat store failed", "request_id", payload.RequestID, "error", err)
 		return fail(http.StatusInternalServerError, "could not store the chat answer")

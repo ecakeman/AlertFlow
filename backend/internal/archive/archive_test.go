@@ -206,11 +206,11 @@ func TestImportReplacesIntegrationsThatHavePendingDeliveries(t *testing.T) {
 	}
 	var pending int
 	if err := database.QueryRow(
-		`SELECT COUNT(*) FROM notification_deliveries WHERE integration_id = $1 AND status = 'pending'`,
-		channel.ID,
+		`SELECT COUNT(*) FROM notification_deliveries WHERE integration_id IS NULL AND status = 'pending'`,
 	).Scan(&pending); err != nil || pending != 1 {
 		t.Fatalf("pending deliveries = %d, %v", pending, err)
 	}
+	_ = channel
 
 	fresh := `{"integrations":[{"ID":4,"Type":"webhook","Name":"imported","Enabled":true,` +
 		`"Config":{"url":"http://example.invalid/imported"},"CreatedAt":1,"UpdatedAt":1}]}`
@@ -225,8 +225,8 @@ func TestImportReplacesIntegrationsThatHavePendingDeliveries(t *testing.T) {
 	if err != nil || len(list) != 1 || list[0].ID != 4 || list[0].Name != "imported" {
 		t.Fatalf("integrations = %+v, %v", list, err)
 	}
-	if err := database.QueryRow(`SELECT COUNT(*) FROM notification_deliveries`).Scan(&pending); err != nil || pending != 0 {
-		t.Fatalf("deliveries after import = %d, %v", pending, err)
+	if err := database.QueryRow(`SELECT COUNT(*) FROM notification_deliveries WHERE integration_id IS NULL`).Scan(&pending); err != nil || pending != 1 {
+		t.Fatalf("internal deliveries after import = %d, %v", pending, err)
 	}
 	back, err := event.NewCheckCompleted("svc", "Name", "https://example.com/health", 2000, db.StatusOnline, nil, nil, "", 1)
 	if err != nil {
@@ -236,7 +236,7 @@ func TestImportReplacesIntegrationsThatHavePendingDeliveries(t *testing.T) {
 	if err := database.ApplyCheckEvent(back); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.QueryRow(`SELECT COUNT(*) FROM notification_deliveries`).Scan(&pending); err != nil || pending != 0 {
+	if err := database.QueryRow(`SELECT COUNT(*) FROM notification_deliveries WHERE integration_id IS NOT NULL`).Scan(&pending); err != nil || pending != 0 {
 		t.Fatalf("imported webhook was queued: %d, %v", pending, err)
 	}
 	next, err := database.CreateIntegration("webhook", "after", true, false, []byte(`{"url":"http://example.invalid/after"}`))

@@ -8,6 +8,14 @@ class Settings(BaseSettings):
     agent_api_token: str = ""
     alertflow_base_url: str = "http://127.0.0.1:8080"
     alertflow_agent_token: str = ""
+    # Go control plane. Empty target leaves queries unconfigured; there is no HTTP fallback.
+    alertflow_grpc_target: str = ""
+    alertflow_agent_grpc_token: str = ""
+    # This process's task server. Delivery dials it with AGENT_TASK_GRPC_TOKEN.
+    agent_grpc_addr: str = ":9000"
+    agent_task_grpc_token: str = ""
+    # timeline reads runtime events from Go. legacy polls the service diagnostics URL.
+    agent_diagnostics_mode: str = "timeline"
     agent_database_url: str = ""
     diagnostics_file: str = ""
     llm_api_key: str = ""

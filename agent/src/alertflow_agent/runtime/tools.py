@@ -32,6 +32,8 @@ def run_tool(name: str, args: dict, state: dict, settings, clients: dict) -> dic
             return _incident(args, state, settings, clients)
         if name == "get_project_diagnostics":
             return _diagnostics(args, state, settings)
+        if name == "query_service_timeline":
+            return _timeline(args, state, settings, clients)
         if name == "recall_episode":
             return _recall_episode(args, state, clients)
         if name == "load_skill":
@@ -154,7 +156,59 @@ def _incident(args, state, settings, clients) -> dict:
     return {"status": "success", "evidence_ids": added or [known], "data": {"comments": len(detail.get("comments") or [])}}
 
 
+def _timeline(args, state, settings, clients) -> dict:
+    """Read application, kubernetes, incident and agent events from Go.
+
+    The window grows 1h → 24h → retention. Empty is not treated as healthy.
+    """
+    if getattr(settings, "agent_diagnostics_mode", "timeline") == "legacy":
+        return {"status": "unavailable", "note": "timeline mode is off", "evidence_ids": []}
+    blocked = _charge_query(state, settings)
+    if blocked:
+        return {"status": "invalid_request", "note": blocked, "evidence_ids": []}
+    event = state["event"]
+    occurred = _epoch(event["occurred_at"])
+    retention_days = int(args.get("retention_days") or 30)
+    windows = [3600, 24 * 3600, retention_days * 24 * 3600]
+    sources = args.get("sources") or ["application_diagnostics", "kubernetes", "incident", "agent"]
+    limit = int(args.get("limit") or 50)
+    if limit < 1 or limit > 200:
+        return {"status": "invalid_request", "note": "limit", "evidence_ids": []}
+    client = clients["alertflow"]
+    page = {"events": [], "coverage": []}
+    for span in windows:
+        page = client.timeline(event["service_id"], occurred - span, occurred, sources, limit)
+        if page.get("events"):
+            break
+        if int(state.get("query_calls") or 0) >= settings.max_query_calls:
+            break
+        state["query_calls"] = int(state.get("query_calls") or 0) + 1
+    ids = []
+    for item in page.get("events") or []:
+        ident = item.get("eventKey") or f"tl:{item.get('id')}"
+        summary = item.get("summary") or item.get("title") or item.get("eventType") or ""
+        data = {
+            "source": item.get("source"),
+            "event_type": item.get("eventType"),
+            "occurred_at": item.get("occurredAt"),
+            "observed_at": item.get("observedAt"),
+            "query_from": page.get("from"),
+            "query_to": page.get("to"),
+        }
+        if _add(state, ident, item.get("source") or "timeline", ident, item.get("eventType") or "event", summary, data):
+            ids.append(ident)
+    coverage_rows = page.get("coverage") or []
+    if coverage_rows and _add(state, "tl:coverage", "timeline", "tl:coverage", "coverage", "source coverage", {"sources": coverage_rows}):
+        ids.append("tl:coverage")
+    if not page.get("events"):
+        state.setdefault("coverage", {}).setdefault("gaps", []).append("TIMELINE_EMPTY")
+        return {"status": "empty", "evidence_ids": ids, "data": {"coverage": coverage_rows}}
+    return {"status": "success", "evidence_ids": ids, "data": {"events": len(page.get("events") or [])}}
+
+
 def _diagnostics(args, state, settings) -> dict:
+    if getattr(settings, "agent_diagnostics_mode", "timeline") != "legacy":
+        return {"status": "unavailable", "note": "diagnostics mode is timeline", "evidence_ids": []}
     calls = int(state.get("diagnostic_calls") or 0)
     if calls >= 2:
         return {"status": "invalid_request", "note": "diagnostic call limit", "evidence_ids": []}
