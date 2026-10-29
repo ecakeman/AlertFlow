@@ -373,15 +373,11 @@ type slowTimeline struct {
 	agentv1.UnimplementedAlertFlowControlServiceServer
 }
 
-func (slowTimeline) GetTimeline(ctx context.Context, _ *agentv1.GetTimelineRequest) (*agentv1.TimelinePage, error) {
-	timer := time.NewTimer(5 * time.Second)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return nil, status.FromContextError(ctx.Err()).Err()
-	case <-timer.C:
-		return &agentv1.TimelinePage{}, nil
-	}
+func (slowTimeline) GetTimeline(context.Context, *agentv1.GetTimelineRequest) (*agentv1.TimelinePage, error) {
+	// 客户端超时后，gRPC 会取消这个处理函数的 context。如果这里立刻回
+	// CANCELLED，调用方看到的就是服务端状态，而不是自己的 DEADLINE_EXCEEDED。
+	time.Sleep(5 * time.Second)
+	return &agentv1.TimelinePage{}, nil
 }
 
 func serveSlowTimeline(t *testing.T, ctx context.Context, addr string) {
