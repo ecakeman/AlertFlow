@@ -18,7 +18,7 @@ docker compose -f docker-compose.yml up -d
 
 `docker/.env` sets `RAGFLOW_IMAGE=infiniflow/ragflow:v0.27.3`. `docker-compose.yml` starts RAGFlow. `docker-compose-base.yml` starts its MySQL, Redis, MinIO, and document engine. Their data stays in that Compose project's volumes. Stop it with `docker compose -f docker-compose.yml down` from `docker/`. Do not add `-v` unless you intend to delete those volumes.
 
-To turn this off, leave `RAGFLOW_BASE_URL` empty and do not pass `--profile ragflow`. Stopping the profile with `docker compose --profile ragflow down` keeps the volumes. Health is `GET http://127.0.0.1:9380/api/v1/system/healthz`. Create the dataset `AlertFlow Operations Docs` and the native agent `AlertFlow Runbook Specialist` in that UI after a model is configured.
+To turn this off, leave `RAGFLOW_BASE_URL` empty and do not pass `--profile ragflow`. Stopping the profile with `docker compose --profile ragflow down` keeps the volumes. The profile sets `API_PROXY_SCHEME=python`, the same value as that tag's `docker/.env`, so the Python API listens on 9380. Elasticsearch answers 401 when security is on; its healthcheck is `curl http://localhost:9200`, matching the tag, because `curl -f` treats that 401 as failure and the API never starts. Health is `GET http://127.0.0.1:9380/api/v1/system/healthz`. Create the dataset `AlertFlow Operations Docs` and the native agent `AlertFlow Runbook Specialist` in that UI after a model is configured.
 
 ## API
 

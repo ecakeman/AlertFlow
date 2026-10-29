@@ -40,10 +40,16 @@ class MemoryLedger:
         if message_id is None:
             return
         row = self.rows[message_id]
+        if row["task_id"] != task_id:
+            return
         row["status"] = status
         row["artifact"] = artifact
         row["task_json"] = task_json
         row["cancelled"] = cancelled
+
+    def alias(self, message_id: str, task_id: str) -> None:
+        if message_id in self.rows:
+            self.by_task[task_id] = message_id
 
     def cancel(self, task_id: str) -> None:
         row = self.get_task(task_id)
@@ -92,10 +98,28 @@ class PostgresLedger:
                 """
                 SELECT message_id, task_id, status, artifact, task_json, cancelled, deadline_at
                 FROM a2a_adapter_tasks WHERE task_id = %s
+                UNION ALL
+                SELECT t.message_id, t.task_id, t.status, t.artifact, t.task_json, t.cancelled, t.deadline_at
+                FROM a2a_adapter_task_aliases a
+                JOIN a2a_adapter_tasks t ON t.message_id = a.message_id
+                WHERE a.task_id = %s
+                LIMIT 1
                 """,
-                (task_id,),
+                (task_id, task_id),
             ).fetchone()
         return _row(row)
+
+    def alias(self, message_id: str, task_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO a2a_adapter_task_aliases (task_id, message_id)
+                VALUES (%s, %s)
+                ON CONFLICT (task_id) DO NOTHING
+                """,
+                (task_id, message_id),
+            )
+            conn.commit()
 
     def save_task(self, task_id: str, status: str, artifact: dict | None, task_json: dict | None, cancelled: bool = False) -> None:
         with self._connect() as conn:

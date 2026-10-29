@@ -624,6 +624,9 @@ def _consult_runbook(args, state, settings, clients) -> dict:
     except Exception:
         _gap(state, "runbook agent did not answer")
         return {"status": "error", "note": "runbook lookup failed", "evidence_ids": []}
+    if artifact.get("error"):
+        _gap(state, "runbook agent did not answer")
+        return {"status": "error", "note": "runbook lookup failed", "evidence_ids": []}
     ident = f"runbook:{message_id}"
     _add(state, ident, "runbook", message_id, "runbook", str(artifact.get("content") or "")[:400], {
         "schema": artifact.get("schema"),
@@ -634,11 +637,7 @@ def _consult_runbook(args, state, settings, clients) -> dict:
 
 
 def _gap(state, text: str) -> None:
-    plan = dict(state.get("plan") or {})
-    gaps = list(plan.get("gaps") or [])
-    gaps.append(text)
-    plan["gaps"] = gaps
-    state["plan"] = plan
+    state.setdefault("coverage", {}).setdefault("gaps", []).append(text)
 
 
 def clip(result: dict) -> dict:

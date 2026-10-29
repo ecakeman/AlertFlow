@@ -171,7 +171,7 @@ Phase 8 锁定（没有连接真实 Prometheus 或 Loki，也没有退到 `grafa
 - LangChain MCP adapter 记录的 `http` transport 就是 Streamable HTTP，两边都对得上。运行时用 MCP Python SDK `1.30.0` 的同一 transport，只在 URL 非空时创建客户端。每次调用先 `initialize`，再 `list_tools`，只调用服务器实际提供且本项目批准的只读工具。服务器没有该工具时记 `MISSING_TOOL`，不调用。`langchain-mcp-adapters` 已不再维护，不作为依赖。
 - 查询必须能映射到当前 `service_id`。`PROMETHEUS_SERVICE_SELECTORS` / `LOKI_SERVICE_SELECTORS` 没有该服务的条目时记 `UNMAPPED`，不把全局结果存成该服务的证据。PromQL 是否已包含服务条件按标签名、操作符和值判断；同名标签冲突或选择器无法解析时记 `UNSCOPED`，不发送。`MCP_MAX_WINDOW_SECONDS` 是相对事故时刻允许读取的最大历史时长。表达式里的 `offset`、`@`，以及区间和子查询累计回溯加外层窗口后仍超出该预算、或无法识别的时长，记 `UNSCOPED`，不发送。放得下时把范围查询的起点收到安全边界，evidence 只记实际发出的时间。即时 `query` 的证据记录 `timestamp` 和 `query_type=instant`，不把截断后的时间窗写成查询范围。`label_names` 和 `metric_metadata` 不写入 evidence。单次 run 最多 `MCP_MAX_CALLS`（4）次；时间窗最多 `MCP_MAX_WINDOW_SECONDS`（3600）；样本、日志行和响应字节分别不超过 100、100 和 65536。超时、断连、认证失败、429、空结果、畸形结果和超限只记该来源的 gap，调查继续。
 
-Phase 9 锁定稳定版镜像 `infiniflow/ragflow:v0.27.3`（该 tag 的 `docker/.env` 里 `RAGFLOW_IMAGE`）。不使用 `latest` 或 `nightly`。锁定依据是该 tag 的 `docs/references/http_api_reference.md` 和 `api/apps/restful_apis/agent_api.py`。预览版 `v1.0.0-rc1` 没有被选中，也不称作稳定版，因为稳定版已经有 completion 和文档引用字段。没有对运行中的 RAGFlow 做 HTTP smoke。
+Phase 9 锁定稳定版镜像 `infiniflow/ragflow:v0.27.3`（该 tag 的 `docker/.env` 里 `RAGFLOW_IMAGE`）。不使用 `latest` 或 `nightly`。锁定依据是该 tag 的 `docs/references/http_api_reference.md` 和 `api/apps/restful_apis/agent_api.py`。预览版 `v1.0.0-rc1` 没有被选中，也不称作稳定版，因为稳定版已经有 completion 和文档引用字段。`GET /api/v1/system/healthz` 对运行中的 `infiniflow/ragflow:v0.27.3` 返回 200，`db`、`doc_engine`、`redis`、`storage` 都是 `ok`。`RAGFLOW_API_KEY` 和 `RAGFLOW_AGENT_ID` 都没有配置，所以没有调用 completion，也没有做真实 A2A 任务。
 
 - 健康检查：`GET /api/v1/system/healthz`，不需要 `Authorization`。`GET /v1/system/healthz` 已废弃。
 - 认证：`Authorization: Bearer <API_KEY>`。
@@ -179,7 +179,7 @@ Phase 9 锁定稳定版镜像 `infiniflow/ragflow:v0.27.3`（该 tag 的 `docker
 - 可验证引用只来自 `reference.chunks` 里同时有 `document_id`（或 `doc_id`）和 `id`（或 `chunk_id`）的条目。`data.data.content` 是模型正文，不是引用。没有这些标识时，结果不能当作已证实文档。
 - `RAGFLOW_BASE_URL`、`RAGFLOW_API_KEY`、`RAGFLOW_AGENT_ID` 为空时不连接。`ragflow` profile 才启动 RAGFlow 及其自有依赖，默认 `docker compose up` 不启动它。
 
-A2A 使用 `a2a-sdk==1.3.0` 的 HTTP+JSON/REST（`TransportProtocol.HTTP_JSON`），非流式。Agent Card、`POST /message:send` 和 `GET /tasks/{id}` 由该 SDK 的路由提供。适配器只做协议翻译，不复制 RAGFlow 的检索或推理。任务行在现有 PostgreSQL 的 `a2a_adapter_tasks`。重复 message id 不第二次调用 RAGFlow。
+A2A 使用 `a2a-sdk==1.3.0` 的 HTTP+JSON/REST（`TransportProtocol.HTTP_JSON`），非流式。客户端 `SendMessage` 之后用同一个 SDK 客户端轮询 `GetTask`，直到 `COMPLETED`、`FAILED`、`CANCELED` 或超时。终态失败、超时和带 `error` 的 artifact 写入 `coverage.gaps`。Agent Card、`POST /message:send` 和 `GET /tasks/{id}` 由该 SDK 的路由提供。适配器只做协议翻译，不复制 RAGFlow 的检索或推理。任务行在现有 PostgreSQL 的 `a2a_adapter_tasks`。重复 `SendMessage` 会得到新的 SDK task id，`a2a_adapter_task_aliases` 把它指回原来的 message 行，不覆盖那一行的任务正文，也不第二次调用 RAGFlow。
 
 降级：
 
@@ -193,6 +193,6 @@ A2A 使用 `a2a-sdk==1.3.0` 的 HTTP+JSON/REST（`TransportProtocol.HTTP_JSON`�
 
 - Phase 7：`.proto` 字段。
 - Phase 8 已锁定：Prometheus `ghcr.io/tjhop/prometheus-mcp-server:v0.18.0`，Streamable HTTP `/mcp`，工具 `query`、`range_query`、`metric_metadata`、`label_names`、`label_values`。Loki `grafana/loki-mcp` `v0.6.0`，Streamable HTTP `/stream`，工具 `loki_query`。
-- Phase 9 已锁定：`infiniflow/ragflow:v0.27.3`。Completion 是 `POST /api/v1/agents/chat/completions`。没有 live HTTP smoke。
-- Phase 10 已锁定：`a2a-sdk==1.3.0`，技能只有 `runbook_research`。主 Agent 在 `A2A_ADAPTER_URL` 非空时最多委托一次。没有 live HTTP smoke 时不把该项记为端点验收。
+- Phase 9 已锁定：`infiniflow/ragflow:v0.27.3`。Completion 是 `POST /api/v1/agents/chat/completions`。healthz 已对运行中的实例返回 200。没有模型密钥，completion 未验收。
+- Phase 10 已锁定：`a2a-sdk==1.3.0`，技能只有 `runbook_research`。主 Agent 在 `A2A_ADAPTER_URL` 非空时最多委托一次，并轮询 `GetTask`。没有 live HTTP smoke 时不把该项记为端点验收。
 - HTTP 业务路由的删除日期。

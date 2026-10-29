@@ -70,7 +70,10 @@ class LedgerTaskStore(TaskStore):
         row = self.ledger.get_task(task_id)
         if not row or not row.get("task_json"):
             return None
-        return ParseDict(row["task_json"], Task())
+        task = ParseDict(row["task_json"], Task())
+        if task.id != task_id:
+            task.id = task_id
+        return task
 
     async def list(self, params: ListTasksRequest, context) -> ListTasksResponse:
         return ListTasksResponse(tasks=[], next_page_token="", page_size=0, total_size=0)
@@ -91,9 +94,15 @@ class RunbookExecutor(AgentExecutor):
         timeout = int(self.settings.get("timeout_seconds") or 30)
         if not self.ledger.claim(message_id, task_id, timeout):
             prior = self.ledger.get_message(message_id) or {}
-            stored = prior.get("task_json")
-            task = ParseDict(stored, Task()) if stored else Task(id=prior.get("task_id") or task_id)
-            await event_queue.enqueue_event(task)
+            self.ledger.alias(message_id, task_id)
+            artifact = prior.get("artifact") or {
+                "schema": "runbook-research.v1",
+                "content": "",
+                "citations": [],
+                "citations_available": False,
+            }
+            status = prior.get("status") if prior.get("status") in {"completed", "failed", "canceled"} else "completed"
+            await self._finish(event_queue, task_id, context.context_id, status, artifact, persist=False)
             return
         query = "\n".join(part.text for part in message.parts if part.text)[:8000]
         try:
@@ -123,7 +132,7 @@ class RunbookExecutor(AgentExecutor):
             status=TaskStatus(state=TaskState.TASK_STATE_CANCELED),
         ))
 
-    async def _finish(self, event_queue, task_id: str, context_id: str, status: str, artifact: dict) -> None:
+    async def _finish(self, event_queue, task_id: str, context_id: str, status: str, artifact: dict, persist: bool = True) -> None:
         state = {
             "completed": TaskState.TASK_STATE_COMPLETED,
             "failed": TaskState.TASK_STATE_FAILED,
@@ -141,7 +150,8 @@ class RunbookExecutor(AgentExecutor):
             artifacts=[proto_artifact],
         )
         body = MessageToDict(task, preserving_proto_field_name=True)
-        self.ledger.save_task(task_id, status, artifact, body, status == "canceled")
+        if persist:
+            self.ledger.save_task(task_id, status, artifact, body, status == "canceled")
         await event_queue.enqueue_event(TaskArtifactUpdateEvent(
             task_id=task_id, context_id=context_id or "", artifact=proto_artifact, last_chunk=True,
         ))

@@ -1,5 +1,12 @@
+import socket
+import threading
+import time
+
+import httpx
+import uvicorn
+
 from alertflow_agent.a2a_adapter.ragflow import parse_completion
-from alertflow_agent.a2a_adapter.server import RunbookExecutor, build_card
+from alertflow_agent.a2a_adapter.server import RunbookExecutor, build_app, build_card
 from alertflow_agent.a2a_adapter.store import MemoryLedger
 from alertflow_agent.config import Settings
 from alertflow_agent.runtime.context import build_blocks
@@ -82,5 +89,87 @@ def test_one_consult_records_a_gap_when_the_agent_fails():
     first = run_tool("consult_runbook_agent", {"question": "restart", "hypothesis": "disk"}, state, settings, {"a2a": fail})
     second = run_tool("consult_runbook_agent", {"question": "again"}, state, settings, {"a2a": fail})
     assert first["status"] == "error"
-    assert state["plan"]["gaps"] == ["runbook agent did not answer"]
+    assert state["coverage"]["gaps"] == ["runbook agent did not answer"]
     assert second["note"] == "runbook already consulted"
+
+
+def _port():
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
+def _listen(app, port):
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    server.install_signal_handlers = lambda: None
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), 0.2):
+                return server
+        except OSError:
+            time.sleep(0.05)
+    raise RuntimeError("a2a test server did not start")
+
+
+def test_send_message_then_get_task_and_a_duplicate_skips_ragflow():
+    calls = []
+
+    def research(base_url, api_key, agent_id, query, timeout):
+        calls.append(query)
+        return {
+            "schema": "runbook-research.v1",
+            "content": "restart the process",
+            "citations": [{"document_id": "doc", "id": "chunk"}],
+            "citations_available": True,
+        }
+
+    import alertflow_agent.a2a_adapter.server as server
+    server.research = research
+    port = _port()
+    url = f"http://127.0.0.1:{port}"
+    http = _listen(build_app(
+        MemoryLedger(),
+        {"ragflow_base_url": "http://ragflow.test", "ragflow_agent_id": "agent", "timeout_seconds": 5},
+        url,
+    ), port)
+    try:
+        card = httpx.get(f"{url}/.well-known/agent-card.json", timeout=5).json()
+        assert [skill["id"] for skill in card["skills"]] == ["runbook_research"]
+        from alertflow_agent.integrations.runbook import consult
+        payload = {"service_id": "api", "question": "restart"}
+        first = consult(url, payload, "message-1", timeout=5)
+        second = consult(url, payload, "message-1", timeout=5)
+        assert first["schema"] == "runbook-research.v1"
+        assert first["citations_available"] is True
+        assert second["content"] == first["content"]
+        assert len(calls) == 1
+    finally:
+        http.should_exit = True
+
+
+def test_failed_lookup_is_a_coverage_gap():
+    def research(base_url, api_key, agent_id, query, timeout):
+        raise RuntimeError("down")
+
+    import alertflow_agent.a2a_adapter.server as server
+    server.research = research
+    port = _port()
+    url = f"http://127.0.0.1:{port}"
+    http = _listen(build_app(MemoryLedger(), {"ragflow_base_url": "http://ragflow.test", "ragflow_agent_id": "agent", "timeout_seconds": 5}, url), port)
+    try:
+        state = {
+            "event": {"service_id": "api", "occurred_at": "2026-10-11T10:00:00Z"},
+            "evidence": {},
+            "run_id": "run-http",
+            "coverage": {"gaps": []},
+        }
+        result = run_tool("consult_runbook_agent", {"question": "restart"}, state, Settings(a2a_adapter_url=url), {})
+        assert result["status"] == "error"
+        assert state["coverage"]["gaps"] == ["runbook agent did not answer"]
+    finally:
+        http.should_exit = True
