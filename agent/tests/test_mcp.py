@@ -113,6 +113,13 @@ def test_unscoped_query_is_not_sent():
     assert scope_promql("sum by (code) (up)", 'service="api"') == 'sum by (code) (up{service="api"})'
     assert scope_promql("up or down", 'service="api"') is None
     assert scope_promql('foo{a="b"} + bar{c="d"}', 'service="api"') is None
+    assert scope_promql('up{notservice="api"}', 'service="api"') == 'up{notservice="api",service="api"}'
+    assert scope_promql('up{service="other"}', 'service="api"') is None
+    assert scope_promql('up{service=~"api"}', 'service="api"') is None
+    assert scope_promql('up{service="api"}', 'service="api"') == 'up{service="api"}'
+    assert scope_promql('up{service="api",job="a"}', 'service="api"') == 'up{service="api",job="a"}'
+    assert scope_promql('up{service=api}', 'service="api"') is None
+    assert scope_promql("up", "service=api") is None
     assert scope_logql('{job="x"} |= "e"', '{service="api"}') == '{job="x",service="api"} |= "e"'
 
 
@@ -131,6 +138,13 @@ def test_configured_query_writes_scoped_evidence_once():
     item = state["evidence"][result["evidence_ids"][0]]
     assert item["source_type"] == "prometheus"
     assert item["data"]["query"] == 'up{service="api"}'
+    assert item["data"]["timestamp"] == "2026-10-11T10:00:00Z"
+    assert item["data"]["query_type"] == "instant"
+    assert "start" not in item["data"] and "end" not in item["data"]
+    catalog = build_catalog(state["evidence"])
+    assert fact_id(catalog, result["evidence_ids"][0], "timestamp")
+    assert fact_id(catalog, result["evidence_ids"][0], "query_type")
+    assert fact_id(catalog, result["evidence_ids"][0], "start") is None
     assert item["data"]["samples"] == 1
     assert item["data"]["value"] == "1"
     assert "prom-secret" not in json.dumps(item)
@@ -156,6 +170,8 @@ def test_window_row_and_request_caps():
     assert sent["truncation_limit"] == 2
     assert "start" not in sent and "end" not in sent and "limit" not in sent
     item = state["evidence"][result["evidence_ids"][0]]
+    assert item["data"]["start"] == "2026-10-11T09:59:00Z"
+    assert item["data"]["end"] == "2026-10-11T10:00:00Z"
     assert item["data"]["samples"] == 2
     assert item["data"]["value"] == "alpha"
     assert "gamma" not in json.dumps(item)
@@ -168,6 +184,19 @@ def test_window_row_and_request_caps():
     assert "PROMETHEUS_TOO_LARGE" in _gaps(blocked)
     assert huge.calls == []
     assert refused["status"] == "error"
+
+
+def test_conflicting_service_matcher_is_not_sent():
+    client = Recorder()
+    state = _state()
+    result = run_tool("query", {"query": 'up{service="other"}'}, state, _settings(), {"mcp": client})
+    assert result["status"] == "error"
+    assert "PROMETHEUS_UNSCOPED" in _gaps(state)
+    assert client.calls == []
+    state = _state()
+    sent = run_tool("query", {"query": 'up{notservice="api"}'}, state, _settings(), {"mcp": client})
+    assert sent["status"] == "success"
+    assert client.calls[0][1]["query"] == 'up{notservice="api",service="api"}'
 
 
 def test_label_values_sends_matches_and_v018_times():

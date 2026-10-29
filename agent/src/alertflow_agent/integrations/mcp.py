@@ -184,16 +184,47 @@ def scope_promql(query: str, matcher: str) -> str | None:
         metrics.append(match)
     if len(metrics) != 1:
         return None
+    wanted = _parse_matchers(matcher)
+    if wanted is None or len(wanted) != 1:
+        return None
+    name, op, value = wanted[0]
+    piece = f'{name}{op}"{value}"'
     if "{" in text:
         open_at = text.index("{")
         close_at = text.index("}")
         inner = text[open_at + 1:close_at].strip()
-        if matcher in inner:
-            return text
-        merged = f"{inner},{matcher}" if inner else matcher
+        existing = _parse_matchers(inner)
+        if existing is None:
+            return None
+        for ename, eop, evalue in existing:
+            if ename != name:
+                continue
+            if (eop, evalue) == (op, value):
+                return text
+            return None
+        merged = f"{inner},{piece}" if inner else piece
         return text[:open_at] + "{" + merged + "}" + text[close_at + 1:]
     metric = metrics[0]
-    return text[:metric.end()] + "{" + matcher + "}" + text[metric.end():]
+    return text[:metric.end()] + "{" + piece + "}" + text[metric.end():]
+
+
+def _parse_matchers(text: str) -> list[tuple[str, str, str]] | None:
+    """把选择器拆成标签名、操作符和值。中间有无法识别的内容时返回 None。"""
+    source = text or ""
+    matches = list(_MATCHER.finditer(source))
+    cursor = 0
+    parsed: list[tuple[str, str, str]] = []
+    for match in matches:
+        gap = source[cursor:match.start()]
+        if gap.strip().strip(","):
+            return None
+        parsed.append((match.group(1), match.group(2), match.group(3)))
+        cursor = match.end()
+    if source[cursor:].strip().strip(","):
+        return None
+    if source.strip() and not parsed:
+        return None
+    return parsed
 
 
 def _mask_promql(text: str) -> str:

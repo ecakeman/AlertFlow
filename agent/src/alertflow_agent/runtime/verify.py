@@ -98,10 +98,11 @@ def _catalog_payload(ident: str, item: dict):
     if item.get("source_type") in {"prometheus", "loki"}:
         payload = {
             "query": data.get("query"),
-            "start": data.get("start"),
-            "end": data.get("end"),
             "limit": data.get("limit"),
         }
+        for key in ("start", "end", "timestamp", "query_type"):
+            if data.get(key) is not None:
+                payload[key] = data[key]
         if "samples" in data:
             payload["samples"] = data["samples"]
         if "lines" in data:

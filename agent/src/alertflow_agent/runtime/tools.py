@@ -391,11 +391,12 @@ def _mcp(name, args, state, settings, clients) -> dict:
     data = {
         "source": source,
         "query": _scrub(str(recorded.get("query") or ""), settings),
-        "start": recorded.get("start"),
-        "end": recorded.get("end"),
         "limit": recorded.get("limit") or limit,
         **summary,
     }
+    for key in ("start", "end", "timestamp", "query_type"):
+        if recorded.get(key) is not None:
+            data[key] = recorded[key]
     limitations = ["truncated to the configured row cap"] if truncated else []
     digest = hashlib.sha256(json.dumps(sent, sort_keys=True, default=str).encode()).hexdigest()[:8]
     ident = f"{source}:{name}:{digest}"
@@ -449,6 +450,14 @@ def _mcp_request(name, args, state, settings, source):
     if not scoped:
         raise MCPError("unscoped")
     recorded["query"] = scoped
+    if name == "query":
+        recorded = {
+            "query": scoped,
+            "timestamp": end_text,
+            "query_type": "instant",
+            "limit": cap,
+        }
+        return {"query": scoped, "timestamp": end_text, "truncation_limit": cap}, recorded
     if name == "loki_query":
         requested = args.get("limit")
         try:
@@ -458,8 +467,6 @@ def _mcp_request(name, args, state, settings, source):
         limit = max(1, min(requested, cap))
         recorded["limit"] = limit
         return {"query": scoped, "start": start_text, "end": end_text, "limit": limit}, recorded
-    if name == "query":
-        return {"query": scoped, "timestamp": end_text, "truncation_limit": cap}, recorded
     return {
         "query": scoped,
         "start_time": start_text,
