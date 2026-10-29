@@ -39,7 +39,10 @@ def test_completion_fixture_matches_v027_standard_request():
 
 def test_document_ids_are_citations_and_answer_text_is_not():
     cited = citations(_load("completion-response.json"))
-    assert cited == [{"document_id": "doc-1", "chunk_id": "chunk-1"}]
+    assert cited == [{
+        "document_id": "4bdd2ff65e1511f0907f09f583941b45",
+        "chunk_id": "4b8935ac0a22deb1",
+    }]
     uncited = _load("completion-response-uncited.json")
     assert citations(uncited) == []
     assert "doc-1" in uncited["data"]["data"]["content"]

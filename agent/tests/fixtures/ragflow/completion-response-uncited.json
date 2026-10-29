@@ -2,8 +2,11 @@
   "code": 0,
   "data": {
     "data": {
-      "content": "The runbook document doc-1 says to restart the API process.",
-      "reference": {}
-    }
+      "content": "The runbook doc-1 says to restart the service.",
+      "reference": {},
+      "trace": []
+    },
+    "message_id": "c4692a2683d911f0858253708ecb6573",
+    "session_id": "c39f6f9c83d911f0858253708ecb6573"
   }
 }
