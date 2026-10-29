@@ -164,14 +164,14 @@ Prometheus MCP 候选是 `prometheus/prometheus-mcp` `v0.18.0`。候选 transpor
 
 Loki MCP 候选是 `grafana/loki-mcp` `v0.6.0`。首批只开放 `loki_query`。它的 transport 比 Prometheus MCP 更需要在 Phase 8 做兼容验证。同样可以退到 `grafana/mcp-grafana`。
 
-Phase 8 锁定（没有连接真实 Prometheus 或 Loki，也没有退到 `grafana/mcp-grafana`）：
+Phase 8 锁定（没有退到 `grafana/mcp-grafana`）。Loki 已做过一次真实 `loki_query`。Prometheus MCP `ghcr.io/tjhop/prometheus-mcp-server:v0.18.0` 已做过一次映射到 `instance="http://alertflow:8080/api/setup/status"` 的即时 `query`，evidence 的 `timestamp` 与发出的参数一致。该版本的即时结果是 `{"result": "<text>", "warnings": null}`，没有 `data` 字段；缺这个字段不是空结果。
 
 - Prometheus：镜像 `ghcr.io/tjhop/prometheus-mcp-server:v0.18.0`。不要用 `latest`；v0.19.0 起二进制改名为 `prometheus-mcp`，环境变量前缀改为 `PROMETHEUS_MCP_`。Transport 是 Streamable HTTP，路径 `/mcp`（`--mcp.transport=http`）。Agent 只调用 `query`、`range_query`、`metric_metadata`、`label_names`、`label_values`。不调用 `series`，也不调用 TSDB admin。请求参数对齐该 tag 的工具定义：`query` 使用 `timestamp` 和 `truncation_limit`；`range_query` 使用 `start_time`、`end_time`、`step` 和 `truncation_limit`；`label_values` 使用 `matches`（字符串数组）、`start_time`、`end_time` 和 `truncation_limit`。时间是 RFC3339 字符串。`PROMETHEUS_MCP_TOKEN` 由该服务器转发到 Prometheus，不是 MCP 端点本身的访问控制。
 - Loki：发布物是 `grafana/loki-mcp` tag `v0.6.0` 的 `loki-mcp-server`。该 tag 的 `cmd/server/main.go` 同时提供 stdio、SSE（`/sse`，消息端点 `/mcp`）和 Streamable HTTP（`/stream`）。锁定 Streamable HTTP，配置的 URL 必须是 `/stream`。Agent 只调用 `loki_query`。该发布物的 README 没有单独的镜像名。
 - LangChain MCP adapter 记录的 `http` transport 就是 Streamable HTTP，两边都对得上。运行时用 MCP Python SDK `1.30.0` 的同一 transport，只在 URL 非空时创建客户端。每次调用先 `initialize`，再 `list_tools`，只调用服务器实际提供且本项目批准的只读工具。服务器没有该工具时记 `MISSING_TOOL`，不调用。`langchain-mcp-adapters` 已不再维护，不作为依赖。
 - 查询必须能映射到当前 `service_id`。`PROMETHEUS_SERVICE_SELECTORS` / `LOKI_SERVICE_SELECTORS` 没有该服务的条目时记 `UNMAPPED`，不把全局结果存成该服务的证据。PromQL 是否已包含服务条件按标签名、操作符和值判断；同名标签冲突或选择器无法解析时记 `UNSCOPED`，不发送。`MCP_MAX_WINDOW_SECONDS` 是相对事故时刻允许读取的最大历史时长。表达式里的 `offset`、`@`，以及区间和子查询累计回溯加外层窗口后仍超出该预算、或无法识别的时长，记 `UNSCOPED`，不发送。放得下时把范围查询的起点收到安全边界，evidence 只记实际发出的时间。即时 `query` 的证据记录 `timestamp` 和 `query_type=instant`，不把截断后的时间窗写成查询范围。`label_names` 和 `metric_metadata` 不写入 evidence。单次 run 最多 `MCP_MAX_CALLS`（4）次；时间窗最多 `MCP_MAX_WINDOW_SECONDS`（3600）；样本、日志行和响应字节分别不超过 100、100 和 65536。超时、断连、认证失败、429、空结果、畸形结果和超限只记该来源的 gap，调查继续。
 
-Phase 9 锁定稳定版镜像 `infiniflow/ragflow:v0.27.3`（该 tag 的 `docker/.env` 里 `RAGFLOW_IMAGE`）。不使用 `latest` 或 `nightly`。锁定依据是该 tag 的 `docs/references/http_api_reference.md` 和 `api/apps/restful_apis/agent_api.py`。预览版 `v1.0.0-rc1` 没有被选中，也不称作稳定版，因为稳定版已经有 completion 和文档引用字段。`GET /api/v1/system/healthz` 对运行中的 `infiniflow/ragflow:v0.27.3` 返回 200，`db`、`doc_engine`、`redis`、`storage` 都是 `ok`。`RAGFLOW_API_KEY` 和 `RAGFLOW_AGENT_ID` 都没有配置，所以没有调用 completion，也没有做真实 A2A 任务。
+Phase 9 锁定稳定版镜像 `infiniflow/ragflow:v0.27.3`（该 tag 的 `docker/.env` 里 `RAGFLOW_IMAGE`）。不使用 `latest` 或 `nightly`。锁定依据是该 tag 的 `docs/references/http_api_reference.md` 和 `api/apps/restful_apis/agent_api.py`。预览版 `v1.0.0-rc1` 没有被选中，也不称作稳定版，因为稳定版已经有 completion 和文档引用字段。`GET /api/v1/system/healthz` 对运行中的 `infiniflow/ragflow:v0.27.3` 返回 200，`db`、`doc_engine`、`redis`、`storage` 都是 `ok`。用 `.env` 里的聊天模型配好 `OpenAI-API-Compatible` 之后，`POST /api/v1/agents/chat/completions` 返回 HTTP 200、`code` 0。这次结果没有成对的文档 id 和 chunk id，正文不是已证实引用。
 
 - 健康检查：`GET /api/v1/system/healthz`，不需要 `Authorization`。`GET /v1/system/healthz` 已废弃。
 - 认证：`Authorization: Bearer <API_KEY>`。
@@ -192,7 +192,7 @@ A2A 使用 `a2a-sdk==1.3.0` 的 HTTP+JSON/REST（`TransportProtocol.HTTP_JSON`�
 ## 8. 留到对应阶段再定的事项
 
 - Phase 7：`.proto` 字段。
-- Phase 8 已锁定：Prometheus `ghcr.io/tjhop/prometheus-mcp-server:v0.18.0`，Streamable HTTP `/mcp`，工具 `query`、`range_query`、`metric_metadata`、`label_names`、`label_values`。Loki `grafana/loki-mcp` `v0.6.0`，Streamable HTTP `/stream`，工具 `loki_query`。
-- Phase 9 已锁定：`infiniflow/ragflow:v0.27.3`。Completion 是 `POST /api/v1/agents/chat/completions`。healthz 已对运行中的实例返回 200。没有模型密钥，completion 未验收。
-- Phase 10 已锁定：`a2a-sdk==1.3.0`，技能只有 `runbook_research`。主 Agent 在 `A2A_ADAPTER_URL` 非空时最多委托一次，并轮询 `GetTask`。没有 live HTTP smoke 时不把该项记为端点验收。
+- Phase 8 已锁定：Prometheus `ghcr.io/tjhop/prometheus-mcp-server:v0.18.0`，Streamable HTTP `/mcp`，工具 `query`、`range_query`、`metric_metadata`、`label_names`、`label_values`。一次真实即时 `query` 已写入 evidence，`timestamp` 与请求一致。Loki `grafana/loki-mcp` `v0.6.0`，Streamable HTTP `/stream`，工具 `loki_query`，已做过一次真实查询。
+- Phase 9 已锁定：`infiniflow/ragflow:v0.27.3`。Completion 是 `POST /api/v1/agents/chat/completions`。healthz 与一次非流式 completion 都已对运行中的实例返回 200。
+- Phase 10 已锁定：`a2a-sdk==1.3.0`，技能只有 `runbook_research`。主 Agent 在 `A2A_ADAPTER_URL` 非空时最多委托一次，并轮询 `GetTask`。一次真实 `SendMessage` 后 `GetTask` 到达 `COMPLETED`，任务行在 `a2a_adapter_tasks`，重启适配器后仍能读回。`citations_available` 为 false。
 - HTTP 业务路由的删除日期。

@@ -10,6 +10,7 @@ from alertflow_agent.integrations.mcp import (
     CappedTransport,
     HTTPSource,
     MCPError,
+    _is_empty_payload,
     expression_lookback,
     scope_logql,
     scope_promql,
@@ -446,6 +447,16 @@ def test_summarize_rejects_empty_and_keeps_a_short_value():
         summarize_result("[]", "prometheus", 10)
     assert caught.value.kind == "empty"
     assert summarize_result('[{"value": "9"}]', "loki", 10)["lines"] == 1
+    # prometheus-mcp-server v0.18.0 instant query: result is text, warnings may be null, no data key.
+    text = '{"result":"up{job=\\"blackbox\\"} => 0 @[1793284654]","warnings":null}'
+    assert _is_empty_payload(text) is False
+    summary = summarize_result(text, "prometheus", 10)
+    assert summary["samples"] == 1
+    assert "=> 0" in summary["value"]
+    assert _is_empty_payload('{"data":{"result":[]}}') is True
+    with pytest.raises(MCPError) as caught:
+        summarize_result('{"data":{"result":[]}}', "prometheus", 10)
+    assert caught.value.kind == "empty"
 
 
 def test_default_compose_keeps_optional_urls_empty():

@@ -416,11 +416,12 @@ def _is_empty_payload(text: str) -> bool:
         for key in ("result", "streams", "values", "logs"):
             if key in parsed and parsed[key] in ([], {}, None, ""):
                 return True
-        data = parsed.get("data")
-        if isinstance(data, dict) and data.get("result") in ([], {}, None, ""):
-            return True
-        if data in ([], {}, None, ""):
-            return True
+        if "data" in parsed:
+            data = parsed["data"]
+            if isinstance(data, dict) and data.get("result") in ([], {}, None, ""):
+                return True
+            if data in ([], {}, None, ""):
+                return True
     return False
 
 
