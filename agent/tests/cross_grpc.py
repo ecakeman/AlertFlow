@@ -1,124 +1,195 @@
-"""Process on the other side of a Go ServeControl test.
-
-The Go test starts this file. It serves AgentTaskService and calls back into
-Go. Commands arrive as one JSON object per stdin line.
-"""
-
-from __future__ import annotations
+"""Harness driven by the Go cross-language test. It uses the real Postgres store."""
 
 import json
 import sys
-import time
+import uuid
 
 import grpc
-from google.protobuf.json_format import ParseDict
-from google.protobuf.struct_pb2 import Struct
+from google.protobuf import struct_pb2
 
-from alertflow_agent.config import Settings
-from alertflow_agent.db import MemoryStore
-from alertflow_agent.generated.alertflow.agent.v1 import agent_pb2, agent_pb2_grpc
+from alertflow_agent import config
+from alertflow_agent.callbacks import CallbackSender
+from alertflow_agent.chat_worker import ChatWorker
+from alertflow_agent.db import PostgresStore, apply_schema
 from alertflow_agent.grpc_tasks import serve_tasks
 from alertflow_agent.integrations.alertflow import AlertFlowClient
+from alertflow_agent.runtime.graph import Runner
+from alertflow_agent.generated.alertflow.agent.v1 import agent_pb2, agent_pb2_grpc
 
 
-def main() -> None:
-    listen, task_token, go_target, go_token = sys.argv[1:5]
-    settings = Settings(agent_grpc_addr=listen, agent_task_grpc_token=task_token)
-    store = MemoryStore()
-    server = serve_tasks(settings, store)
-    client = AlertFlowClient(go_target, go_token, timeout=5)
-    tasks = agent_pb2_grpc.AgentTaskServiceStub(grpc.insecure_channel(listen))
-    print(json.dumps({"ready": True}), flush=True)
-    for line in sys.stdin:
-        if not line.strip():
-            continue
-        cmd = json.loads(line)
-        if cmd.get("op") == "shutdown":
-            break
-        try:
-            result = handle(cmd, store, client, tasks, task_token, go_target)
-        except grpc.RpcError as exc:
-            result = {"error": exc.code().name}
-        print(json.dumps(result), flush=True)
-    server.stop(0)
+class FixedModel:
+    def answer(self, prompt):
+        return "cross-language answer"
 
 
-def handle(cmd, store, client, tasks, task_token, go_target) -> dict:
-    op = cmd["op"]
-    if op == "accept":
-        payload = Struct()
-        ParseDict({"event": {
+def reply(payload):
+    sys.stdout.write(json.dumps(payload) + "\n")
+    sys.stdout.flush()
+
+
+def read_command():
+    line = sys.stdin.readline()
+    if not line:
+        return None
+    return json.loads(line)
+
+
+def investigation(message_id):
+    parsed = struct_pb2.Struct()
+    parsed.update({
+        "event": {
             "event": "incident_start",
-            "event_id": cmd["message_id"],
+            "event_id": message_id,
             "service_id": "svc",
             "service_name": "API",
             "occurred_at": "2026-10-28T12:00:00Z",
-        }}, payload)
-        resp = tasks.StartInvestigation(
-            agent_pb2.InvestigationRequest(
-                message_id=cmd["message_id"],
-                message_type="diagnostic.requested",
-                correlation_id=cmd["message_id"],
-                payload=payload,
-            ),
-            metadata=(("authorization", "Bearer " + task_token),),
-            timeout=5,
-        )
-        return {
-            "accepted": resp.accepted,
-            "duplicate": resp.duplicate,
-            "runs": len(store.runs),
-        }
-    if op == "query":
-        now = int(time.time())
-        page = client.timeline("svc", now - 3600, now + 60, ["incident", "kubernetes"], 20)
-        metrics = client.metrics("svc", "24h")
-        checks = client.checks("svc", None, 10)
-        event = (page.get("events") or [{}])[0]
-        return {
-            "events": len(page.get("events") or []),
-            "resourceUid": event.get("resourceUid"),
-            "details": event.get("details") or {},
-            "name": metrics.get("name"),
-            "checks": len(checks.get("checks") or []),
-        }
-    if op == "callback":
-        first = client.submit_callback(cmd["body"])
-        second = client.submit_callback(cmd["body"])
-        return {"first": first, "second": second}
-    if op == "bad_token":
-        try:
-            AlertFlowClient(go_target, "wrong-token", timeout=5).submit_callback(cmd["body"])
-        except grpc.RpcError as exc:
-            return {"error": exc.code().name}
-        return {"error": ""}
-    if op == "deadline":
-        import socket
-        import threading
+        },
+        "diagnostic_context": {"service": {"id": "svc"}},
+    })
+    return agent_pb2.InvestigationRequest(
+        message_id=message_id,
+        message_type="diagnostic.requested",
+        correlation_id=message_id,
+        payload=parsed,
+    )
 
-        sock = socket.socket()
-        sock.bind(("127.0.0.1", 0))
-        sock.listen(1)
 
-        def hold() -> None:
-            conn, _ = sock.accept()
-            time.sleep(2)
-            conn.close()
+def count_runs(url):
+    store = PostgresStore(url)
+    try:
+        return len(store.list_runs())
+    finally:
+        store.conn.close()
 
-        threading.Thread(target=hold, daemon=True).start()
-        host, port = sock.getsockname()
+
+def as_dict(payload):
+    if isinstance(payload, str):
+        return json.loads(payload)
+    return payload
+
+
+def main():
+    listen, task_token, go_target, go_token, database_url = sys.argv[1:6]
+    apply_schema(database_url)
+    store = PostgresStore(database_url)
+    settings = config.Settings(
+        agent_grpc_addr=listen,
+        agent_task_grpc_token=task_token,
+        alertflow_grpc_target=go_target,
+        alertflow_agent_grpc_token=go_token,
+        llm_api_key="test",
+    )
+    server = serve_tasks(settings, store)
+    hooks = Runner.__new__(Runner)
+    hooks.settings = settings
+    hooks.store = store
+    hooks.model = FixedModel()
+    hooks.memory = None
+    reply({"ready": True})
+    while True:
+        cmd = read_command()
+        if cmd is None or cmd.get("op") == "quit":
+            break
+        op = cmd["op"]
         try:
-            AlertFlowClient(f"{host}:{port}", "go-token", timeout=0.2).timeline("svc", 1, 2, ["incident"], 1)
-        except grpc.RpcError as exc:
-            return {"error": exc.code().name}
-        return {"error": ""}
-    if op == "db_down":
-        try:
-            client.submit_callback(cmd["body"])
-        except grpc.RpcError as exc:
-            return {"error": exc.code().name}
-        return {"stored": True}
-    raise ValueError(op)
+            if op == "accept":
+                message_id = cmd["message_id"]
+                channel = grpc.insecure_channel(listen)
+                stub = agent_pb2_grpc.AgentTaskServiceStub(channel)
+                result = stub.StartInvestigation(
+                    investigation(message_id),
+                    metadata=(("authorization", "Bearer " + task_token),),
+                )
+                channel.close()
+                reply({
+                    "accepted": result.accepted,
+                    "duplicate": result.duplicate,
+                    "persisted": count_runs(database_url),
+                })
+            elif op == "bad_token":
+                before = count_runs(database_url)
+                channel = grpc.insecure_channel(listen)
+                stub = agent_pb2_grpc.AgentTaskServiceStub(channel)
+                try:
+                    stub.StartInvestigation(
+                        investigation("bad-py"),
+                        metadata=(("authorization", "Bearer wrong"),),
+                    )
+                    reply({"stored": True, "persisted": count_runs(database_url)})
+                except grpc.RpcError as exc:
+                    reply({"code": exc.code().name, "persisted": count_runs(database_url), "before": before})
+                finally:
+                    channel.close()
+            elif op == "query":
+                client = AlertFlowClient(go_target, go_token, timeout=5)
+                timeline = client.timeline("svc", 1, 4_000_000_000, [])
+                event_row = next(row for row in timeline["events"] if row.get("eventKey") == "tl:1")
+                reply({
+                    "config": client.runtime_config(),
+                    "incidents": client.incidents("svc", 10),
+                    "incident": client.incident(int(cmd["incident_id"])),
+                    "metrics": client.metrics("svc", "24h"),
+                    "checks": client.checks("svc", None, 10),
+                    "timeline": event_row,
+                    "sources": client.source_coverage("svc"),
+                    "kubernetes": client.kubernetes_state("svc"),
+                })
+            elif op == "callbacks":
+                run_id = str(uuid.uuid4())
+                store.insert_run({
+                    "id": run_id,
+                    "dedupe_key": "graph-1",
+                    "service_id": "svc",
+                    "event_type": "incident_start",
+                    "mode": "agent",
+                    "status": "running",
+                    "input_event": {"event": "incident_start", "service_id": "svc"},
+                })
+                row = store.get(run_id)
+                bare = config.Settings(
+                    alertflow_grpc_target="",
+                    alertflow_agent_grpc_token="",
+                    agent_callback_token="",
+                )
+                hooks.settings = bare
+                before = len(store.callback_rows())
+                hooks._notify_started(run_id, row)
+                disabled = len(store.callback_rows()) == before
+                hooks.settings = settings
+                hooks._notify_started(run_id, row)
+                report = hooks._report_callback(
+                    row, 1, {"summary": "graph report", "status": "completed"}, [], {},
+                )
+                failed = hooks._failure_callback(run_id, "graph failed")
+                store.enqueue_callback(report)
+                store.enqueue_callback(failed)
+                sent = CallbackSender(settings, store).drain()
+                client = AlertFlowClient(go_target, go_token, timeout=5)
+                replay = [client.submit_callback(as_dict(item["payload"])) for item in store.callback_rows()]
+                reply({"disabled": disabled, "sent": sent, "replay": replay})
+            elif op == "chat_answer":
+                answered = ChatWorker(settings, store, hooks).drain()
+                sent = CallbackSender(settings, store).drain()
+                reply({"answered": answered, "sent": sent})
+            elif op == "deadline":
+                client = AlertFlowClient(cmd["target"], "token", timeout=0.2)
+                try:
+                    client.timeline("svc", 1, 2, [])
+                    reply({"code": "OK"})
+                except grpc.RpcError as exc:
+                    reply({"code": exc.code().name})
+            elif op == "break_store":
+                store.conn.close()
+                reply({"closed": True})
+            else:
+                reply({"error": "unknown op"})
+        except Exception as exc:  # noqa: BLE001 - the Go test prints this line
+            reply({"error": type(exc).__name__, "detail": str(exc)})
+    server.stop(0)
+    try:
+        store.conn.close()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

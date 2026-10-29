@@ -11,7 +11,7 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:16-alpine
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: alertflow
           POSTGRES_PASSWORD: alertflow
@@ -55,6 +55,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: backend/go.mod
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Agent client for the cross-language test
+        working-directory: agent
+        run: pip install -e ".[dev]"
       - name: Go tests
         working-directory: backend
         run: go test ./...

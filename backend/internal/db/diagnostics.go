@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -192,7 +193,8 @@ func insertDiagnosticEvent(tx *sql.Tx, pull DiagnosticPull, item DiagnosticItem,
 
 func diagnosticEventKey(serviceID string, item DiagnosticItem) string {
 	if item.EventID != "" {
-		return "diagnostics:" + item.EventID
+		// Length prefix keeps "svc:a"+"b" distinct from "svc"+"a:b".
+		return fmt.Sprintf("diagnostics:%d:%s:%s", len(serviceID), serviceID, item.EventID)
 	}
 	body, err := json.Marshal(struct {
 		ServiceID  string            `json:"service_id"`

@@ -204,7 +204,10 @@ func (c *controlServer) ListChecks(ctx context.Context, req *agentv1.ListChecksR
 	return out, nil
 }
 
-func (c *controlServer) GetTimeline(_ context.Context, req *agentv1.GetTimelineRequest) (*agentv1.TimelinePage, error) {
+func (c *controlServer) GetTimeline(ctx context.Context, req *agentv1.GetTimelineRequest) (*agentv1.TimelinePage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
 	if req.GetServiceId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "service_id is required")
 	}
@@ -251,11 +254,14 @@ func (c *controlServer) GetTimeline(_ context.Context, req *agentv1.GetTimelineR
 		}
 		out.Events = append(out.Events, item)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
 	return out, nil
 }
 
-func (c *controlServer) GetSourceCoverage(_ context.Context, req *agentv1.GetSourceCoverageRequest) (*agentv1.SourceCoverage, error) {
-	page, err := c.GetTimeline(context.Background(), &agentv1.GetTimelineRequest{ServiceId: req.GetServiceId(), Limit: 1})
+func (c *controlServer) GetSourceCoverage(ctx context.Context, req *agentv1.GetSourceCoverageRequest) (*agentv1.SourceCoverage, error) {
+	page, err := c.GetTimeline(ctx, &agentv1.GetTimelineRequest{ServiceId: req.GetServiceId(), Limit: 1})
 	if err != nil {
 		return nil, err
 	}
