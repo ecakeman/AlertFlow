@@ -85,4 +85,12 @@ class Settings(BaseSettings):
     prometheus_mcp_token: str = ""
     loki_mcp_url: str = ""
     loki_mcp_token: str = ""
+    # JSON：service_id -> PromQL 等值 matcher，或 LogQL 流选择器。没有条目就不查。
+    prometheus_service_selectors: str = ""
+    loki_service_selectors: str = ""
     mcp_timeout_seconds: float = 10
+    mcp_max_window_seconds: int = 3600
+    mcp_max_log_lines: int = 100
+    mcp_max_samples: int = 100
+    mcp_max_response_bytes: int = 65536
+    mcp_max_calls: int = 4

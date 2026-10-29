@@ -7,7 +7,18 @@ from alertflow_agent.analysis.errors import classify_error
 from alertflow_agent.analysis.stats import error_stats, latency_stats
 from alertflow_agent.analysis.timeline import coverage, key_checks, segments, status_counts
 from alertflow_agent.integrations.alertflow import collect_checks, iso_now
-from alertflow_agent.integrations.mcp import LOKI_TOOLS, MCPError, PROMETHEUS_TOOLS
+from alertflow_agent.integrations.mcp import (
+    EVIDENCE_TOOLS,
+    LOKI_TOOLS,
+    MCPError,
+    PROMETHEUS_TOOLS,
+    SCOPED_TOOLS,
+    clamp_window,
+    scope_logql,
+    scope_promql,
+    selector_for,
+    summarize_result,
+)
 from alertflow_agent.integrations.project_diagnostics import fetch, load_config
 from alertflow_agent.runtime.model import call_model
 
@@ -336,44 +347,146 @@ def _recall_episode(args, state, clients) -> dict:
 
 
 def _mcp(name, args, state, settings, clients) -> dict:
-    """配置了 URL 才调用。失败只记覆盖缺口，不抛出。"""
+    """配置了 URL 才调用。失败只记本源的 coverage gap，不抛出。"""
     configured = (settings.prometheus_mcp_url if name in PROMETHEUS_TOOLS else settings.loki_mcp_url) or ""
     if not str(configured).strip():
         return {"status": "invalid_request", "note": "unknown tool", "evidence_ids": []}
     source = "prometheus" if name in PROMETHEUS_TOOLS else "loki"
+    try:
+        sent = _mcp_request(name, args, state, settings, source)
+    except MCPError as exc:
+        _mcp_gap(state, source, exc.kind)
+        return {"status": "error", "note": _mcp_note(source, exc.kind), "evidence_ids": []}
+    if sent is None:
+        return {"status": "invalid_request", "note": "unknown tool", "evidence_ids": []}
     client = clients.get("mcp")
     try:
         if client is None:
-            raise MCPError("unreadable")
-        text = client.call(name, args)
-        if not isinstance(text, str) or not text.strip():
-            raise MCPError("unreadable")
+            raise MCPError("malformed")
+        if int(state.get("mcp_calls") or 0) >= int(settings.mcp_max_calls):
+            raise MCPError("budget")
+        encoded = json.dumps(sent, sort_keys=True, default=str).encode()
+        if len(encoded) > int(settings.mcp_max_response_bytes):
+            raise MCPError("too_large")
+        state["mcp_calls"] = int(state.get("mcp_calls") or 0) + 1
+        text = client.call(name, sent)
+        if not isinstance(text, str):
+            raise MCPError("malformed")
+        text = _scrub(text, settings)
+        if name not in EVIDENCE_TOOLS:
+            return {
+                "status": "success",
+                "evidence_ids": [],
+                "data": {"note": "not stored as service evidence", "text": text[:400]},
+            }
+        limit = settings.mcp_max_log_lines if source == "loki" else settings.mcp_max_samples
+        summary = summarize_result(text, source, limit)
     except MCPError as exc:
-        _mcp_gap(state, source)
+        _mcp_gap(state, source, exc.kind)
         return {"status": "error", "note": _mcp_note(source, exc.kind), "evidence_ids": []}
     except Exception:
-        _mcp_gap(state, source)
-        return {"status": "error", "note": _mcp_note(source, "unreadable"), "evidence_ids": []}
-    text = text.strip()[:2000]
-    digest = hashlib.sha256(json.dumps(args, sort_keys=True, default=str).encode()).hexdigest()[:8]
+        _mcp_gap(state, source, "malformed")
+        return {"status": "error", "note": _mcp_note(source, "malformed"), "evidence_ids": []}
+    truncated = summary.pop("truncated", False)
+    data = {
+        "source": source,
+        "query": _scrub(str(sent.get("query") or sent.get("matchers") or ""), settings),
+        "start": sent.get("start"),
+        "end": sent.get("end"),
+        "limit": sent.get("limit") or limit,
+        **summary,
+    }
+    limitations = ["truncated to the configured row cap"] if truncated else []
+    digest = hashlib.sha256(json.dumps(sent, sort_keys=True, default=str).encode()).hexdigest()[:8]
     ident = f"{source}:{name}:{digest}"
-    _add(state, ident, source, name, name, text, {"text": text})
-    return {"status": "success", "evidence_ids": [ident], "data": {"text": text[:400]}}
+    value = data.get("value") or ""
+    _add(state, ident, source, name, name, f"{source} {data['query']} => {value}", data, limitations)
+    return {"status": "success", "evidence_ids": [ident], "data": {"text": str(value)[:400]}}
 
 
-def _mcp_gap(state, source: str) -> None:
-    code = "PROMETHEUS_NO_EVIDENCE" if source == "prometheus" else "LOKI_NO_EVIDENCE"
+def _mcp_request(name, args, state, settings, source):
+    service_id = (state.get("event") or {}).get("service_id") or ""
+    if name in SCOPED_TOOLS:
+        raw = settings.prometheus_service_selectors if source == "prometheus" else settings.loki_service_selectors
+        selector = selector_for(raw, service_id)
+        if not selector:
+            raise MCPError("unmapped")
+    else:
+        selector = ""
+    occurred = _epoch(state["event"]["occurred_at"])
+    start, end = clamp_window(
+        occurred,
+        _optional_epoch(args.get("start", args.get("from"))),
+        _optional_epoch(args.get("end", args.get("to", args.get("time")))),
+        settings.mcp_max_window_seconds,
+    )
+    if name in {"label_names", "metric_metadata"}:
+        sent = {"start": start, "end": end}
+        if name == "metric_metadata":
+            sent["metric"] = str(args.get("metric") or args.get("name") or "")
+        return sent
+    if name == "label_values":
+        matchers = selector if selector.startswith("{") else "{" + selector + "}"
+        return {"label": str(args.get("label") or "job"), "matchers": matchers, "start": start, "end": end}
+    query = str(args.get("query") or "")
+    scoped = scope_promql(query, selector) if source == "prometheus" else scope_logql(query, selector)
+    if not scoped:
+        raise MCPError("unscoped")
+    sent = {"query": scoped, "start": start, "end": end}
+    if name == "query":
+        sent["time"] = end
+    if name == "loki_query":
+        requested = args.get("limit")
+        try:
+            requested = int(requested) if requested is not None else settings.mcp_max_log_lines
+        except (TypeError, ValueError):
+            requested = settings.mcp_max_log_lines
+        sent["limit"] = max(1, min(requested, int(settings.mcp_max_log_lines)))
+    else:
+        sent["limit"] = int(settings.mcp_max_samples)
+    return sent
+
+
+def _optional_epoch(value):
+    if value is None or value == "":
+        return None
+    try:
+        return _epoch(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _scrub(text: str, settings) -> str:
+    for token in (getattr(settings, "prometheus_mcp_token", ""), getattr(settings, "loki_mcp_token", "")):
+        if token:
+            text = text.replace(token, "[REDACTED]")
+    return text
+
+
+def _mcp_gap(state, source: str, kind: str) -> None:
+    code = ("PROMETHEUS_" if source == "prometheus" else "LOKI_") + kind.upper()
     gaps = state.setdefault("coverage", {}).setdefault("gaps", [])
     if code not in gaps:
         gaps.append(code)
 
 
+_MCP_NOTES = {
+    "timeout": "{source} timed out; this source has no evidence",
+    "disconnect": "{source} connection failed; this source has no evidence",
+    "auth": "{source} rejected the request; this source has no evidence",
+    "rate_limit": "{source} was rate limited; this source has no evidence",
+    "empty": "{source} returned no rows; this source has no evidence",
+    "malformed": "{source} response could not be read; this source has no evidence",
+    "too_large": "{source} response exceeded the size limit; this source has no evidence",
+    "missing_tool": "{source} does not provide this tool; this source has no evidence",
+    "unmapped": "{source} has no service selector; this source has no evidence",
+    "unscoped": "{source} query could not be scoped; this source has no evidence",
+    "budget": "{source} call budget is exhausted; this source has no evidence",
+}
+
+
 def _mcp_note(source: str, kind: str) -> str:
-    if kind == "timeout":
-        return f"{source} timed out; this source has no evidence"
-    if kind == "auth":
-        return f"{source} rejected the request; this source has no evidence"
-    return f"{source} response could not be read; this source has no evidence"
+    return _MCP_NOTES.get(kind, "{source} response could not be read; this source has no evidence").format(source=source)
 
 
 def _add_checks(state, rows) -> list[str]:

@@ -65,9 +65,9 @@ def verify(draft: dict, evidence: dict, tokens: list[str], gaps: list[str] | Non
 
 
 def _gap_text(gap: str) -> str:
-    if gap == "PROMETHEUS_NO_EVIDENCE":
+    if gap.startswith("PROMETHEUS_"):
         return "Prometheus has no evidence."
-    if gap == "LOKI_NO_EVIDENCE":
+    if gap.startswith("LOKI_"):
         return "Loki has no evidence."
     return f"Coverage gap {gap}."
 
@@ -95,6 +95,20 @@ def _catalog_payload(ident: str, item: dict):
         return data
     if kind in {"http_check", "analysis", "tls", "service_info"}:
         return data
+    if item.get("source_type") in {"prometheus", "loki"}:
+        payload = {
+            "query": data.get("query"),
+            "start": data.get("start"),
+            "end": data.get("end"),
+            "limit": data.get("limit"),
+        }
+        if "samples" in data:
+            payload["samples"] = data["samples"]
+        if "lines" in data:
+            payload["lines"] = data["lines"]
+        if data.get("value") is not None:
+            payload["value"] = data["value"]
+        return payload
     if item.get("source_type") == "project_diagnostic":
         # Internal evidence (v2): identity and state plus the structured detail,
         # so pool depths, dependency latencies, error counts, etc. become citable.

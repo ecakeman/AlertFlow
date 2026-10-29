@@ -167,7 +167,8 @@ Phase 8 锁定（没有连接真实 Prometheus 或 Loki，也没有退到 `grafa
 
 - Prometheus：镜像 `ghcr.io/tjhop/prometheus-mcp-server:v0.18.0`。不要用 `latest`；v0.19.0 起二进制改名为 `prometheus-mcp`，环境变量前缀改为 `PROMETHEUS_MCP_`。Transport 是 Streamable HTTP，路径 `/mcp`（`--mcp.transport=http`）。Agent 只调用 `query`、`range_query`、`metric_metadata`、`label_names`、`label_values`。不调用 `series`，也不调用 TSDB admin。
 - Loki：发布物是 `grafana/loki-mcp` tag `v0.6.0` 的 `loki-mcp-server`。该 tag 的 `cmd/server/main.go` 同时提供 stdio、SSE（`/sse`，消息端点 `/mcp`）和 Streamable HTTP（`/stream`）。锁定 Streamable HTTP，配置的 URL 必须是 `/stream`。Agent 只调用 `loki_query`。该发布物的 README 没有单独的镜像名。
-- LangChain MCP adapter 记录的 `http` transport 就是 Streamable HTTP，两边都对得上。运行时用 MCP Python SDK 的同一 transport，只在 URL 非空时创建客户端，并在一次工具调用里打开会话。`langchain-mcp-adapters` 已不再维护，不作为依赖。
+- LangChain MCP adapter 记录的 `http` transport 就是 Streamable HTTP，两边都对得上。运行时用 MCP Python SDK `1.30.0` 的同一 transport，只在 URL 非空时创建客户端。每次调用先 `initialize`，再 `list_tools`，只调用服务器实际提供且本项目批准的只读工具。服务器没有该工具时记 `MISSING_TOOL`，不调用。`langchain-mcp-adapters` 已不再维护，不作为依赖。
+- 查询必须能映射到当前 `service_id`。`PROMETHEUS_SERVICE_SELECTORS` / `LOKI_SERVICE_SELECTORS` 没有该服务的条目时记 `UNMAPPED`，不把全局结果存成该服务的证据。`label_names` 和 `metric_metadata` 不写入 evidence。单次 run 最多 `MCP_MAX_CALLS`（4）次；时间窗最多 `MCP_MAX_WINDOW_SECONDS`（3600）；样本、日志行和响应字节分别不超过 100、100 和 65536。超时、断连、认证失败、429、空结果、畸形结果和超限只记该来源的 gap，调查继续。
 
 RAGFlow 候选是稳定版 `v0.27.3` 和预览版 `v1.0.0-rc1`。Phase 9 先做 API smoke test 再固定 tag。不把 RC 称作稳定版，也不使用 `latest`。当前研究没有确认 RAGFlow 原生 A2A。
 

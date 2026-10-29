@@ -9,7 +9,7 @@ from alertflow_agent.analysis.errors import classify_error
 from alertflow_agent.analysis.stats import error_stats, latency_stats
 from alertflow_agent.analysis.timeline import coverage, key_checks, segments, status_counts
 from alertflow_agent.integrations.alertflow import collect_checks, iso_now, normalize_check
-from alertflow_agent.integrations.mcp import enabled_mcp_tools, sources_from_settings
+from alertflow_agent.integrations.mcp import enabled_mcp_tools, scope_hint, sources_from_settings
 from alertflow_agent.integrations.project_diagnostics import fetch, load_config
 from alertflow_agent.runtime.guards import before_lead, fresh_guard, note_tool
 from alertflow_agent.runtime.model import call_model
@@ -247,6 +247,7 @@ class Runner:
                 "failure_reason": "",
                 "stop_reason": "",
                 "script": event.get("script") or ["finish"],
+                "script_args": event.get("script_args") or {},
                 "analysis_n": 0,
                 "interval": None,
                 "started": datetime.now(timezone.utc).timestamp(),
@@ -669,6 +670,7 @@ class Runner:
             state["finished"] = True
             return state
         state["mcp_tools"] = enabled_mcp_tools(self.settings)
+        state["mcp_scope"] = scope_hint(self.settings, (state.get("event") or {}).get("service_id"))
         decision = call_model(self.model, "lead", state, self.settings, self.store)
         if decision is None:
             return state
@@ -783,7 +785,11 @@ class Runner:
     def verify_node(self, state):
         if state.get("failure_reason") or state.get("cancelled") or not state.get("report"):
             return state
-        tokens = [self.settings.agent_webhook_token, self.settings.agent_api_token, self.settings.alertflow_agent_token, self.settings.llm_base_url, self.settings.llm_api_key]
+        tokens = [
+            self.settings.agent_webhook_token, self.settings.agent_api_token, self.settings.alertflow_agent_token,
+            self.settings.llm_base_url, self.settings.llm_api_key,
+            self.settings.prometheus_mcp_token, self.settings.loki_mcp_token,
+        ]
         result = verify(
             state["report"], state["evidence"], tokens, state["coverage"].get("gaps") or [],
             state.get("fact_catalog") or build_catalog(state.get("evidence") or {}),
