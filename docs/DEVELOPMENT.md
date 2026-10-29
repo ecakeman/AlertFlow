@@ -36,6 +36,19 @@ Open **http://localhost:5173**. Vite proxies `/api` and `/images` to the backend
 (see `web-ui/vite.config.ts`), so cookies and requests work end to end. Edits to
 either side hot-reload.
 
+## Optional Compose profiles
+
+`docker compose up` starts the core services only. The scripts set an in-network URL only when that profile is part of the command and the variable is unset. A value already exported, including an empty string, is left as it is.
+
+```bash
+scripts/up-core.sh
+scripts/up-agent-observability.sh
+scripts/up-agent-ragflow.sh
+scripts/up-all.sh
+```
+
+Stop a profile with the same `docker compose --profile ... down`. Do not pass `-v` unless you mean to delete volumes. The observability Docker socket is for local development. RAGFlow uses its own volumes and does not share AlertFlow's Postgres, Redis, or Kafka.
+
 ## Build the single binary (production layout)
 
 The Go binary embeds `backend/internal/web/dist`. Build the SPA, copy it in, then

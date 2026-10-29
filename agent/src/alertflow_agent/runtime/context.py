@@ -47,6 +47,10 @@ def build_blocks(node: str, state: dict) -> list[Block]:
             + ". " + (state.get("mcp_scope") or "")
             + " A failure means that source has no evidence. Do not send credentials.",
         ], protect=True)] if node == "lead" and state.get("mcp_tools") else []),
+        *([Block("runbook_tool", PIN, [
+            "consult_runbook_agent is available once this run. Call it only when evidence is "
+            "insufficient or a runbook is needed. Pass question and hypothesis. Do not pass secrets, logs, or the timeline.",
+        ], protect=True)] if node == "lead" and state.get("runbook_available") else []),
         Block("semantics", PIN, [_read("skills/_semantics.md")], protect=True),
         Block("event", PIN, [_event_block(state.get("event") or {})], protect=True),
     ]

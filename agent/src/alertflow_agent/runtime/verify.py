@@ -100,7 +100,7 @@ def _catalog_payload(ident: str, item: dict):
             "query": data.get("query"),
             "limit": data.get("limit"),
         }
-        for key in ("start", "end", "timestamp", "query_type"):
+        for key in ("start", "end", "timestamp", "query_type", "lookback_seconds", "budget_seconds", "window_truncated"):
             if data.get(key) is not None:
                 payload[key] = data[key]
         if "samples" in data:

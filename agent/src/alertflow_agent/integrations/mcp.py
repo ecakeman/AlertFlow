@@ -233,23 +233,54 @@ def _parse_matchers(text: str) -> list[tuple[str, str, str]] | None:
     return parsed
 
 
-def _promql_window_ok(text: str, max_window_seconds: int) -> bool:
-    """拒绝 offset、@，以及超出预算或无法识别的区间选择器。"""
-    visible = _blank_quotes(text)
+def expression_lookback(text: str) -> int | None:
+    """累计所有区间和子查询时长。offset、@ 或无法识别的语法返回 None。"""
+    visible = _blank_quotes(text or "")
     if "@" in visible or re.search(r"\boffset\b", visible, re.IGNORECASE):
-        return False
+        return None
     if visible.count("[") != visible.count("]"):
-        return False
-    limit = max(int(max_window_seconds), 0)
+        return None
+    total = 0
     for match in re.finditer(r"\[([^\]]*)\]", visible):
         parts = [part.strip() for part in match.group(1).split(":")]
         if not match.group(1).strip() or len(parts) not in (1, 2):
-            return False
+            return None
         for part in parts:
             seconds = _duration_seconds(part)
-            if seconds is None or seconds > limit:
-                return False
-    return True
+            if seconds is None:
+                return None
+            total += seconds
+    return total
+
+
+def fit_promql_window(query: str, occurred: int, start: int, end: int, budget: int, instant: bool):
+    """按事故时刻收紧窗口。放不下时返回 None。"""
+    lookback = expression_lookback(query)
+    if lookback is None:
+        return None
+    budget = max(int(budget), 0)
+    end_at = min(int(end), int(occurred))
+    gap = max(int(occurred) - end_at, 0)
+    if instant:
+        if lookback + gap > budget:
+            return None
+        return end_at, end_at, lookback, False
+    room = budget - lookback
+    if room <= 0:
+        return None
+    start_at = int(start)
+    truncated = False
+    if end_at - start_at + lookback > budget:
+        start_at = end_at - room
+        truncated = True
+    if start_at > end_at:
+        return None
+    return start_at, end_at, lookback, truncated
+
+
+def _promql_window_ok(text: str, max_window_seconds: int) -> bool:
+    lookback = expression_lookback(text)
+    return lookback is not None and lookback <= max(int(max_window_seconds), 0)
 
 
 def _duration_seconds(token: str) -> int | None:

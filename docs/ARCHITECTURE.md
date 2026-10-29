@@ -18,7 +18,7 @@ common design mistake here.
 | Store | Path | Holds | Written by |
 | --- | --- | --- | --- |
 | `config.yaml` | `<config-dir>/config.yaml` | services, app settings, **widget mode + grid layout** | `config.Save` (atomic temp-file + rename) |
-| PostgreSQL | `ALERTFLOW_DATABASE_URL` | users, sessions, checks history, `outbox_events`, `service_tls`, **incidents + comments**, **integrations + notification log** | `internal/db/*.go` |
+| PostgreSQL | `ALERTFLOW_DATABASE_URL` | users, sessions, checks history, `outbox_events`, `service_tls`, **incidents + comments**, **integrations + notification log**, `a2a_adapter_tasks` | `internal/db/*.go` |
 | images | `<config-dir>/images/<id>.webp` | service icons | `internal/image` |
 | `state.json` | outside the config dir | which config dir is active | `internal/state` |
 

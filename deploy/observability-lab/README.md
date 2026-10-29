@@ -1,6 +1,6 @@
 # Observability lab
 
-A Kind cluster can produce the metrics and logs that the locked MCP servers read. This file is the path and a minimal check. Bringing the cluster up is an operator step; the Agent tests do not start Kind, Prometheus, or Loki.
+The `observability` profile is the local path. A Kind cluster is a separate operator step. The Agent tests do not start Kind, Prometheus, or Loki.
 
 ## Path
 

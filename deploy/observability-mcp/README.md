@@ -1,6 +1,10 @@
 # Observability MCP
 
-Optional evidence for the Agent. These processes are not part of the core Compose file. An empty `PROMETHEUS_MCP_URL` or `LOKI_MCP_URL` does not open a connection.
+Optional evidence for the Agent. The `observability` profile starts Prometheus `v3.15.1`, Blackbox `v0.29.1`, Loki `3.5.12`, Alloy `v1.21.3`, `ghcr.io/tjhop/prometheus-mcp-server:v0.18.0`, and a local image of `grafana/loki-mcp` tag `v0.6.0`. A default `docker compose up` does not start them. An empty `PROMETHEUS_MCP_URL` or `LOKI_MCP_URL` does not open a connection.
+
+Blackbox probes `http://alertflow:8080/api/setup/status`. Prometheus scrapes that probe. Alloy reads the local Docker socket and pushes container logs to Loki. That socket is for local development only. This profile is not a production logging pipeline and it is not highly available. Host ports bind `127.0.0.1`. There is no Alertmanager and no Grafana.
+
+`scripts/up-agent-observability.sh` sets the in-network MCP URLs when those variables are unset. Stop with `docker compose --profile agent --profile observability down`. Do not add `-v` unless the volumes should be deleted.
 
 The Agent uses MCP Python SDK 1.30.0 and Streamable HTTP. After `initialize` it lists tools and calls only a tool that both the server and this project allow.
 
@@ -43,7 +47,7 @@ docker run --rm -p 8080:8080 \
   --mcp.transport=http --web.listen-address=:8080
 ```
 
-Stop that container with `docker stop` on its id, or Ctrl-C if it is attached. It is not started by `docker compose up`.
+Stop that container with `docker stop` on its id, or Ctrl-C if it is attached. A default `docker compose up` does not start it. `scripts/up-agent-observability.sh` does.
 
 Loki MCP from the locked tag:
 
@@ -55,7 +59,7 @@ LOKI_URL=http://loki:3100 PORT=8080 ./loki-mcp-server
 
 The Streamable HTTP endpoint is `http://<host>:8080/stream`. Stop the process with SIGINT.
 
-Point the Agent at those URLs with the selector JSON above. Leave the URLs empty to turn the integration off. Core Compose does not gain a Prometheus, Loki, or MCP service.
+Point the Agent at those URLs with the selector JSON above. Leave the URLs empty to turn the integration off. The services are in the `observability` profile, not the default project.
 
 ## Smoke test
 

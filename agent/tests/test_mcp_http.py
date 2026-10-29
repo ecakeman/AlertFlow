@@ -145,9 +145,9 @@ def test_v018_schema_server_receives_incident_time_and_selector():
     assert SCHEMA[1] == (
         "range_query",
         'rate(http_requests_total{service="api"}[5m])',
-        "2026-10-11T09:00:00Z",
+        "2026-10-11T09:05:00Z",
         "2026-10-11T10:00:00Z",
-        "36s",
+        "33s",
         100,
     )
     assert SCHEMA[2] == (

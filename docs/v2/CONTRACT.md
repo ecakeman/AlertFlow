@@ -169,7 +169,7 @@ Phase 8 锁定（没有连接真实 Prometheus 或 Loki，也没有退到 `grafa
 - Prometheus：镜像 `ghcr.io/tjhop/prometheus-mcp-server:v0.18.0`。不要用 `latest`；v0.19.0 起二进制改名为 `prometheus-mcp`，环境变量前缀改为 `PROMETHEUS_MCP_`。Transport 是 Streamable HTTP，路径 `/mcp`（`--mcp.transport=http`）。Agent 只调用 `query`、`range_query`、`metric_metadata`、`label_names`、`label_values`。不调用 `series`，也不调用 TSDB admin。请求参数对齐该 tag 的工具定义：`query` 使用 `timestamp` 和 `truncation_limit`；`range_query` 使用 `start_time`、`end_time`、`step` 和 `truncation_limit`；`label_values` 使用 `matches`（字符串数组）、`start_time`、`end_time` 和 `truncation_limit`。时间是 RFC3339 字符串。`PROMETHEUS_MCP_TOKEN` 由该服务器转发到 Prometheus，不是 MCP 端点本身的访问控制。
 - Loki：发布物是 `grafana/loki-mcp` tag `v0.6.0` 的 `loki-mcp-server`。该 tag 的 `cmd/server/main.go` 同时提供 stdio、SSE（`/sse`，消息端点 `/mcp`）和 Streamable HTTP（`/stream`）。锁定 Streamable HTTP，配置的 URL 必须是 `/stream`。Agent 只调用 `loki_query`。该发布物的 README 没有单独的镜像名。
 - LangChain MCP adapter 记录的 `http` transport 就是 Streamable HTTP，两边都对得上。运行时用 MCP Python SDK `1.30.0` 的同一 transport，只在 URL 非空时创建客户端。每次调用先 `initialize`，再 `list_tools`，只调用服务器实际提供且本项目批准的只读工具。服务器没有该工具时记 `MISSING_TOOL`，不调用。`langchain-mcp-adapters` 已不再维护，不作为依赖。
-- 查询必须能映射到当前 `service_id`。`PROMETHEUS_SERVICE_SELECTORS` / `LOKI_SERVICE_SELECTORS` 没有该服务的条目时记 `UNMAPPED`，不把全局结果存成该服务的证据。PromQL 是否已包含服务条件按标签名、操作符和值判断；同名标签冲突或选择器无法解析时记 `UNSCOPED`，不发送。表达式里的 `offset`、`@`，以及长于 `MCP_MAX_WINDOW_SECONDS` 或无法识别的区间选择器和子查询，同样记 `UNSCOPED`，不发送。即时 `query` 的证据记录 `timestamp` 和 `query_type=instant`，不把截断后的时间窗写成查询范围。`label_names` 和 `metric_metadata` 不写入 evidence。单次 run 最多 `MCP_MAX_CALLS`（4）次；时间窗最多 `MCP_MAX_WINDOW_SECONDS`（3600）；样本、日志行和响应字节分别不超过 100、100 和 65536。超时、断连、认证失败、429、空结果、畸形结果和超限只记该来源的 gap，调查继续。
+- 查询必须能映射到当前 `service_id`。`PROMETHEUS_SERVICE_SELECTORS` / `LOKI_SERVICE_SELECTORS` 没有该服务的条目时记 `UNMAPPED`，不把全局结果存成该服务的证据。PromQL 是否已包含服务条件按标签名、操作符和值判断；同名标签冲突或选择器无法解析时记 `UNSCOPED`，不发送。`MCP_MAX_WINDOW_SECONDS` 是相对事故时刻允许读取的最大历史时长。表达式里的 `offset`、`@`，以及区间和子查询累计回溯加外层窗口后仍超出该预算、或无法识别的时长，记 `UNSCOPED`，不发送。放得下时把范围查询的起点收到安全边界，evidence 只记实际发出的时间。即时 `query` 的证据记录 `timestamp` 和 `query_type=instant`，不把截断后的时间窗写成查询范围。`label_names` 和 `metric_metadata` 不写入 evidence。单次 run 最多 `MCP_MAX_CALLS`（4）次；时间窗最多 `MCP_MAX_WINDOW_SECONDS`（3600）；样本、日志行和响应字节分别不超过 100、100 和 65536。超时、断连、认证失败、429、空结果、畸形结果和超限只记该来源的 gap，调查继续。
 
 Phase 9 锁定稳定版镜像 `infiniflow/ragflow:v0.27.3`（该 tag 的 `docker/.env` 里 `RAGFLOW_IMAGE`）。不使用 `latest` 或 `nightly`。锁定依据是该 tag 的 `docs/references/http_api_reference.md` 和 `api/apps/restful_apis/agent_api.py`。预览版 `v1.0.0-rc1` 没有被选中，也不称作稳定版，因为稳定版已经有 completion 和文档引用字段。没有对运行中的 RAGFlow 做 HTTP smoke。
 
@@ -177,9 +177,9 @@ Phase 9 锁定稳定版镜像 `infiniflow/ragflow:v0.27.3`（该 tag 的 `docker
 - 认证：`Authorization: Bearer <API_KEY>`。
 - Agent completion：`POST /api/v1/agents/chat/completions`。非流式标准请求体是 `agent_id`、`query`、`stream: false`。`POST /api/v1/agents/{agent_id}/completions` 已废弃。
 - 可验证引用只来自 `reference.chunks` 里同时有 `document_id`（或 `doc_id`）和 `id`（或 `chunk_id`）的条目。`data.data.content` 是模型正文，不是引用。没有这些标识时，结果不能当作已证实文档。
-- `RAGFLOW_BASE_URL`、`RAGFLOW_API_KEY`、`RAGFLOW_AGENT_ID` 为空时不连接。核心 Compose 不加入 RAGFlow。当前没有原生 A2A。
+- `RAGFLOW_BASE_URL`、`RAGFLOW_API_KEY`、`RAGFLOW_AGENT_ID` 为空时不连接。`ragflow` profile 才启动 RAGFlow 及其自有依赖，默认 `docker compose up` 不启动它。
 
-A2A 使用 1.0 的 HTTP+JSON/REST，非流式，轮询任务。官方 Python SDK 的具体版本留到 Phase 10，用 Agent Card 和 SendMessage/GetTask 做一致性验证。适配器只做协议翻译，不复制 RAGFlow 的检索或推理。
+A2A 使用 `a2a-sdk==1.3.0` 的 HTTP+JSON/REST（`TransportProtocol.HTTP_JSON`），非流式。Agent Card、`POST /message:send` 和 `GET /tasks/{id}` 由该 SDK 的路由提供。适配器只做协议翻译，不复制 RAGFlow 的检索或推理。任务行在现有 PostgreSQL 的 `a2a_adapter_tasks`。重复 message id 不第二次调用 RAGFlow。
 
 降级：
 
@@ -194,5 +194,5 @@ A2A 使用 1.0 的 HTTP+JSON/REST，非流式，轮询任务。官方 Python SDK
 - Phase 7：`.proto` 字段。
 - Phase 8 已锁定：Prometheus `ghcr.io/tjhop/prometheus-mcp-server:v0.18.0`，Streamable HTTP `/mcp`，工具 `query`、`range_query`、`metric_metadata`、`label_names`、`label_values`。Loki `grafana/loki-mcp` `v0.6.0`，Streamable HTTP `/stream`，工具 `loki_query`。
 - Phase 9 已锁定：`infiniflow/ragflow:v0.27.3`。Completion 是 `POST /api/v1/agents/chat/completions`。没有 live HTTP smoke。
-- Phase 10：A2A Python SDK 的最终版本。
+- Phase 10 已锁定：`a2a-sdk==1.3.0`，技能只有 `runbook_research`。主 Agent 在 `A2A_ADAPTER_URL` 非空时最多委托一次。没有 live HTTP smoke 时不把该项记为端点验收。
 - HTTP 业务路由的删除日期。

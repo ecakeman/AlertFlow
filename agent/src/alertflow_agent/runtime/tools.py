@@ -14,6 +14,7 @@ from alertflow_agent.integrations.mcp import (
     PROMETHEUS_TOOLS,
     SCOPED_TOOLS,
     clamp_window,
+    fit_promql_window,
     scope_logql,
     scope_promql,
     selector_for,
@@ -55,6 +56,8 @@ def run_tool(name: str, args: dict, state: dict, settings, clients: dict) -> dic
             return _delegate(args, state, settings, clients)
         if name in PROMETHEUS_TOOLS or name in LOKI_TOOLS:
             return _mcp(name, args, state, settings, clients)
+        if name == "consult_runbook_agent":
+            return _consult_runbook(args, state, settings, clients)
     except Exception:
         return {"status": "error", "note": "tool failed", "evidence_ids": []}
     return {"status": "invalid_request", "note": "unknown tool", "evidence_ids": []}
@@ -394,7 +397,7 @@ def _mcp(name, args, state, settings, clients) -> dict:
         "limit": recorded.get("limit") or limit,
         **summary,
     }
-    for key in ("start", "end", "timestamp", "query_type"):
+    for key in ("start", "end", "timestamp", "query_type", "lookback_seconds", "budget_seconds", "window_truncated"):
         if recorded.get(key) is not None:
             data[key] = recorded[key]
     limitations = ["truncated to the configured row cap"] if truncated else []
@@ -446,8 +449,19 @@ def _mcp_request(name, args, state, settings, source):
             "truncation_limit": cap,
         }, recorded
     query = str(args.get("query") or "")
+    budget = int(settings.mcp_max_window_seconds)
+    if source == "prometheus" and name in {"query", "range_query"}:
+        fitted = fit_promql_window(query, occurred, start, end, budget, name == "query")
+        if fitted is None:
+            raise MCPError("unscoped")
+        start, end, lookback, truncated = fitted
+        start_text = _rfc3339(start)
+        end_text = _rfc3339(end)
+        recorded["lookback_seconds"] = lookback
+        recorded["budget_seconds"] = budget
+        recorded["window_truncated"] = truncated
     scoped = (
-        scope_promql(query, selector, settings.mcp_max_window_seconds)
+        scope_promql(query, selector, budget)
         if source == "prometheus"
         else scope_logql(query, selector)
     )
@@ -460,6 +474,9 @@ def _mcp_request(name, args, state, settings, source):
             "timestamp": end_text,
             "query_type": "instant",
             "limit": cap,
+            "lookback_seconds": recorded.get("lookback_seconds", 0),
+            "budget_seconds": budget,
+            "window_truncated": False,
         }
         return {"query": scoped, "timestamp": end_text, "truncation_limit": cap}, recorded
     if name == "loki_query":
@@ -477,7 +494,7 @@ def _mcp_request(name, args, state, settings, source):
         "end_time": end_text,
         "step": _prom_step(start, end, cap),
         "truncation_limit": cap,
-    }, recorded
+    }, {**recorded, "start": start_text, "end": end_text}
 
 
 def _rfc3339(epoch: int) -> str:
@@ -577,6 +594,51 @@ def _put_analysis(state, n: int, rows=None, window_from=None) -> None:
             "service_id": state["event"]["service_id"], "observed_at": state["event"]["occurred_at"],
             "collected_at": iso_now(), "kind": "analysis", "summary": summary, "data": data, "limitations": [],
         }
+
+
+def _consult_runbook(args, state, settings, clients) -> dict:
+    url = str(getattr(settings, "a2a_adapter_url", "") or "").strip()
+    if not url:
+        return {"status": "invalid_request", "note": "runbook agent is not configured", "evidence_ids": []}
+    if state.get("runbook_consulted"):
+        return {"status": "error", "note": "runbook already consulted", "evidence_ids": []}
+    state["runbook_consulted"] = True
+    event = state.get("event") or {}
+    observations = []
+    for item in list((state.get("evidence") or {}).values())[:8]:
+        observations.append({"id": item.get("id"), "summary": str(item.get("summary") or "")[:200]})
+    payload = {
+        "service_id": event.get("service_id"),
+        "occurred_at": event.get("occurred_at"),
+        "observations": observations,
+        "hypothesis": str(args.get("hypothesis") or "")[:500],
+        "question": str(args.get("question") or "")[:500],
+    }
+    message_id = f"runbook:{state.get('run_id') or event.get('service_id')}"
+    try:
+        sender = clients.get("a2a")
+        if sender is None:
+            from alertflow_agent.integrations.runbook import consult
+            sender = consult
+        artifact = sender(url, payload, message_id)
+    except Exception:
+        _gap(state, "runbook agent did not answer")
+        return {"status": "error", "note": "runbook lookup failed", "evidence_ids": []}
+    ident = f"runbook:{message_id}"
+    _add(state, ident, "runbook", message_id, "runbook", str(artifact.get("content") or "")[:400], {
+        "schema": artifact.get("schema"),
+        "citations_available": bool(artifact.get("citations_available")),
+        "citations": artifact.get("citations") or [],
+    })
+    return {"status": "success", "data": {"citations_available": bool(artifact.get("citations_available"))}, "evidence_ids": [ident]}
+
+
+def _gap(state, text: str) -> None:
+    plan = dict(state.get("plan") or {})
+    gaps = list(plan.get("gaps") or [])
+    gaps.append(text)
+    plan["gaps"] = gaps
+    state["plan"] = plan
 
 
 def clip(result: dict) -> dict:

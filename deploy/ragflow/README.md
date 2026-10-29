@@ -1,6 +1,6 @@
 # RAGFlow
 
-AlertFlow does not start RAGFlow. The locked image is the stable tag `infiniflow/ragflow:v0.27.3`. Do not use `latest`, `nightly`, or call `v1.0.0-rc1` a stable release.
+The `ragflow` Compose profile starts the stable tag `infiniflow/ragflow:v0.27.3` with the dependency images from that tag's `docker/docker-compose-base.yml`: Elasticsearch `8.11.3`, MySQL `8.0.40`, `pgsty/silo:RELEASE.2026-08-06T00-00-00Z`, and `valkey/valkey:8`. Do not use `latest`, `nightly`, or call `v1.0.0-rc1` a stable release. A default `docker compose up` does not start this profile. Its volumes are `ragflow-mysql` and `ragflow-minio`. They are not AlertFlow's Postgres, Redis, or Kafka.
 
 This note records the HTTP API from that tag. It is not a record of a live completion call.
 
@@ -18,7 +18,7 @@ docker compose -f docker-compose.yml up -d
 
 `docker/.env` sets `RAGFLOW_IMAGE=infiniflow/ragflow:v0.27.3`. `docker-compose.yml` starts RAGFlow. `docker-compose-base.yml` starts its MySQL, Redis, MinIO, and document engine. Their data stays in that Compose project's volumes. Stop it with `docker compose -f docker-compose.yml down` from `docker/`. Do not add `-v` unless you intend to delete those volumes.
 
-To turn this off, stop that Compose project and leave AlertFlow's `RAGFLOW_BASE_URL` empty. Core AlertFlow Compose does not depend on it.
+To turn this off, leave `RAGFLOW_BASE_URL` empty and do not pass `--profile ragflow`. Stopping the profile with `docker compose --profile ragflow down` keeps the volumes. Health is `GET http://127.0.0.1:9380/api/v1/system/healthz`. Create the dataset `AlertFlow Operations Docs` and the native agent `AlertFlow Runbook Specialist` in that UI after a model is configured.
 
 ## API
 

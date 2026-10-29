@@ -95,7 +95,8 @@ class Settings(BaseSettings):
     mcp_max_response_bytes: int = 65536
     mcp_max_calls: int = 4
 
-    # 可选 RAGFlow。空 URL 不创建客户端，本阶段也不拨号。
+    # 可选 RAGFlow 与 A2A。空 URL 不创建客户端，也不拨号。
     ragflow_base_url: str = ""
     ragflow_api_key: str = ""
     ragflow_agent_id: str = ""
+    a2a_adapter_url: str = ""

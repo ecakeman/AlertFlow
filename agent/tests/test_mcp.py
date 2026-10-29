@@ -10,6 +10,7 @@ from alertflow_agent.integrations.mcp import (
     CappedTransport,
     HTTPSource,
     MCPError,
+    expression_lookback,
     scope_logql,
     scope_promql,
     sources_from_settings,
@@ -203,6 +204,44 @@ def test_promql_time_modifiers_are_not_sent():
     allowed = run_tool("query", {"query": "max_over_time(up[5m:1m])"}, _state(), _settings(), {"mcp": client})
     assert allowed["status"] == "success"
     assert client.calls[0][1]["query"] == 'max_over_time(up{service="api"}[5m:1m])'
+
+
+def test_range_lookback_truncates_to_the_incident_budget():
+    assert expression_lookback("max_over_time(rate(up[5m])[10m:1m])") == 960
+    client = Recorder(text='[{"value": "1"}]')
+    state = _state()
+    settings = _settings(mcp_max_window_seconds=3600)
+    result = run_tool(
+        "range_query",
+        {"query": "rate(http_requests_total[5m])", "start": 1, "end": 10**12},
+        state,
+        settings,
+        {"mcp": client},
+    )
+    sent = client.calls[0][1]
+    assert sent["start_time"] == "2026-10-11T09:05:00Z"
+    assert sent["end_time"] == "2026-10-11T10:00:00Z"
+    item = state["evidence"][result["evidence_ids"][0]]
+    assert item["data"]["start"] == sent["start_time"]
+    assert item["data"]["end"] == sent["end_time"]
+    assert item["data"]["lookback_seconds"] == 300
+    assert item["data"]["budget_seconds"] == 3600
+    assert item["data"]["window_truncated"] is True
+    blocked = Recorder()
+    other = _state()
+    refused = run_tool(
+        "query",
+        {"query": "max_over_time(rate(up[5m])[10m:1m])"},
+        other,
+        _settings(mcp_max_window_seconds=600),
+        {"mcp": blocked},
+    )
+    assert refused["status"] == "error"
+    assert blocked.calls == []
+    loki = Recorder(text='[{"line":"ok"}]')
+    finished = run_tool("loki_query", {"query": '{job="x"}'}, other, _settings(mcp_max_window_seconds=600), {"mcp": loki})
+    assert finished["status"] == "success"
+    assert loki.calls
 
 
 def test_conflicting_service_matcher_is_not_sent():
@@ -409,11 +448,16 @@ def test_summarize_rejects_empty_and_keeps_a_short_value():
     assert summarize_result('[{"value": "9"}]', "loki", 10)["lines"] == 1
 
 
-def test_default_compose_has_empty_mcp_urls_and_no_mcp_service():
+def test_default_compose_keeps_optional_urls_empty():
     document = __import__("yaml").safe_load(Path(__file__).resolve().parents[2].joinpath("docker-compose.yml").read_text())
-    names = set(document["services"])
-    assert {"prometheus", "loki", "prometheus-mcp", "loki-mcp"}.isdisjoint(names)
-    env = document["services"]["agent"]["environment"]
+    services = document["services"]
+    assert services["prometheus"]["profiles"] == ["observability"]
+    assert services["loki"]["profiles"] == ["observability"]
+    assert services["prometheus-mcp"]["profiles"] == ["observability"]
+    assert services["loki-mcp"]["profiles"] == ["observability"]
+    assert services["ragflow"]["profiles"] == ["ragflow"]
+    assert services["a2a-adapter"]["profiles"] == ["multi-agent"]
+    env = services["agent"]["environment"]
     assert env["PROMETHEUS_MCP_URL"] == "${PROMETHEUS_MCP_URL:-}"
     assert env["PROMETHEUS_MCP_TOKEN"] == "${PROMETHEUS_MCP_TOKEN:-}"
     assert env["LOKI_MCP_URL"] == "${LOKI_MCP_URL:-}"
@@ -421,7 +465,7 @@ def test_default_compose_has_empty_mcp_urls_and_no_mcp_service():
     assert env["MCP_TIMEOUT_SECONDS"] == "${MCP_TIMEOUT_SECONDS:-10}"
     assert env["PROMETHEUS_SERVICE_SELECTORS"] == "${PROMETHEUS_SERVICE_SELECTORS:-}"
     assert env["LOKI_SERVICE_SELECTORS"] == "${LOKI_SERVICE_SELECTORS:-}"
-    assert "ragflow" not in names
     assert env["RAGFLOW_BASE_URL"] == "${RAGFLOW_BASE_URL:-}"
     assert env["RAGFLOW_API_KEY"] == "${RAGFLOW_API_KEY:-}"
     assert env["RAGFLOW_AGENT_ID"] == "${RAGFLOW_AGENT_ID:-}"
+    assert env["A2A_ADAPTER_URL"] == "${A2A_ADAPTER_URL:-}"

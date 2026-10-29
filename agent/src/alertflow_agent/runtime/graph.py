@@ -671,6 +671,7 @@ class Runner:
             return state
         state["mcp_tools"] = enabled_mcp_tools(self.settings)
         state["mcp_scope"] = scope_hint(self.settings, (state.get("event") or {}).get("service_id"))
+        state["runbook_available"] = bool(str(getattr(self.settings, "a2a_adapter_url", "") or "").strip())
         decision = call_model(self.model, "lead", state, self.settings, self.store)
         if decision is None:
             return state
