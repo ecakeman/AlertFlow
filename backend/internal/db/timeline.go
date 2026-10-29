@@ -142,6 +142,9 @@ func (db *DB) CreateManualIncident(in ManualIncident) (*Incident, error) {
 }
 
 func insertManualDeliveriesTx(tx *sql.Tx, in ManualIncident, incidentID, now int64) error {
+	if !AgentTasksEnabled() {
+		return nil
+	}
 	eventID := incidentOpenedKey(incidentID)
 	raw, err := json.Marshal(DeliverySnapshot{
 		Event: "incident_start", EventID: eventID, IncidentID: &incidentID,

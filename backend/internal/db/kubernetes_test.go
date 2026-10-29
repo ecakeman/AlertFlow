@@ -42,6 +42,38 @@ func TestKubernetesStateCanReturnWithoutDroppingTheEvent(t *testing.T) {
 	}
 }
 
+func TestListKubernetesObjectsReturnsBoundedStatus(t *testing.T) {
+	database := openTestDB(t)
+	snapshot := []byte(`{"status":{"phase":"Running","readyReplicas":1,"noise":"` + string(make([]byte, 800)) + `"}}`)
+	for i := range snapshot {
+		if snapshot[i] == 0 {
+			snapshot[i] = 'a'
+		}
+	}
+	err := database.ApplyKubernetesObject(KubernetesObject{
+		ServiceID: "svc", ClusterID: "local", Namespace: "lab", Kind: "Pod",
+		Name: "api-0", UID: "pod-1", Fingerprint: "fp", ResourceVersion: "9",
+		Active: true, Live: true, ObservedAt: time.Now().Unix(),
+		Snapshot: snapshot,
+	}, func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := database.ListKubernetesObjects("svc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].ResourceVersion != "9" || rows[0].Fingerprint != "fp" || !rows[0].Active {
+		t.Fatalf("row = %+v", rows)
+	}
+	if len(rows[0].Summary) == 0 || len(rows[0].Summary) > 400 || len(rows[0].Snapshot) != 0 {
+		t.Fatalf("summary = %q snapshot = %d", rows[0].Summary, len(rows[0].Snapshot))
+	}
+	if !json.Valid([]byte(rows[0].Summary)) && len(rows[0].Summary) < 400 {
+		t.Fatalf("summary = %s", rows[0].Summary)
+	}
+}
+
 func TestKubernetesSourceWriteDropsWhenTheServiceIsGone(t *testing.T) {
 	database := openTestDB(t)
 	tx, err := database.Begin()

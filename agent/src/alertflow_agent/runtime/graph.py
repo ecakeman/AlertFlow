@@ -13,7 +13,7 @@ from alertflow_agent.integrations.project_diagnostics import fetch, load_config
 from alertflow_agent.runtime.guards import before_lead, fresh_guard, note_tool
 from alertflow_agent.runtime.model import call_model
 from alertflow_agent.runtime.planner import validate_plan_diff
-from alertflow_agent.runtime.tools import clip, run_tool
+from alertflow_agent.runtime.tools import _add, clip, run_tool
 from alertflow_agent.runtime.verify import build_catalog, cited, verify
 
 log = logging.getLogger("alertflow_agent")
@@ -259,9 +259,10 @@ class Runner:
 
         不入事务：丢了只是少一个进行中的提示。message_id 固定，重跑/恢复不会重复。
         """
-        if not self.settings.agent_callback_token:
+        from alertflow_agent.callbacks import callbacks_enabled, started_callback
+
+        if not callbacks_enabled(self.settings):
             return
-        from alertflow_agent.callbacks import started_callback
 
         try:
             self.store.enqueue_callback(started_callback(run_id, row))
@@ -284,9 +285,10 @@ class Runner:
 
         只回传报告引用到的证据——完整证据留在 Agent 自己这边。
         """
-        if not self.settings.agent_callback_token:
+        from alertflow_agent.callbacks import callbacks_enabled, report_callback
+
+        if not callbacks_enabled(self.settings):
             return None
-        from alertflow_agent.callbacks import report_callback
 
         used = set(cited_ids)
         return report_callback(
@@ -295,9 +297,10 @@ class Runner:
         )
 
     def _failure_callback(self, run_id: str, reason: str):
-        if not self.settings.agent_callback_token:
+        from alertflow_agent.callbacks import callbacks_enabled, failure_callback
+
+        if not callbacks_enabled(self.settings):
             return None
-        from alertflow_agent.callbacks import failure_callback
 
         return failure_callback(run_id, self.store.get(run_id) or {}, reason)
 
@@ -486,11 +489,71 @@ class Runner:
         status[name] = "empty" if value in (None, [], {}) else "ok"
         return value
 
+    def _collect_timeline(self, state) -> None:
+        """Timeline mode reads Go's stored events and a bounded Kubernetes view.
+
+        Both go through the same evidence registry as the timeline tool. An empty
+        window is a gap, not a successful diagnosis.
+        """
+        client = self.alertflow
+        if client is None:
+            state.setdefault("coverage", {}).setdefault("gaps", []).append("TIMELINE_EMPTY")
+            return
+        event = state.get("event") or {}
+        service_id = event.get("service_id") or ""
+        try:
+            occurred = _epoch(event["occurred_at"])
+            page = client.timeline(
+                service_id, occurred - 3600, occurred,
+                ["application_diagnostics", "kubernetes", "incident", "agent"], 50,
+            )
+        except Exception:
+            log.warning("timeline read failed")
+            page = {"events": []}
+        for item in page.get("events") or []:
+            ident = item.get("eventKey") or f"tl:{item.get('id')}"
+            _add(state, ident, item.get("source") or "timeline", ident, item.get("eventType") or "event",
+                 item.get("summary") or item.get("title") or "", {
+                     "source": item.get("source"),
+                     "event_type": item.get("eventType"),
+                     "occurred_at": item.get("occurredAt"),
+                     "observed_at": item.get("observedAt"),
+                     "recorded_at": item.get("recordedAt"),
+                     "cluster_id": item.get("clusterId"),
+                     "namespace": item.get("namespace"),
+                     "resource_kind": item.get("resourceKind"),
+                     "resource_name": item.get("resourceName"),
+                     "resource_uid": item.get("resourceUid"),
+                     "details": item.get("details") or {},
+                 })
+        try:
+            objects = client.kubernetes_state(service_id).get("objects") or []
+        except Exception:
+            log.warning("kubernetes state read failed")
+            objects = []
+        for obj in objects:
+            ident = "k8s:" + str(obj.get("uid") or obj.get("name") or "")
+            _add(state, ident, "kubernetes", ident, obj.get("kind") or "object",
+                 obj.get("summary") or obj.get("status") or obj.get("name") or "", {
+                     "cluster_id": obj.get("clusterId"),
+                     "namespace": obj.get("namespace"),
+                     "resource_kind": obj.get("kind"),
+                     "resource_name": obj.get("name"),
+                     "resource_uid": obj.get("uid"),
+                     "active": obj.get("active"),
+                     "resource_version": obj.get("resourceVersion"),
+                     "fingerprint": obj.get("fingerprint"),
+                     "summary": obj.get("summary") or obj.get("status"),
+                 })
+        if not page.get("events") and not objects:
+            state.setdefault("coverage", {}).setdefault("gaps", []).append("TIMELINE_EMPTY")
+
     def collect_diagnostics(self, state):
         if self._stop_if_cancelled(state):
             return state
         if getattr(self.settings, "agent_diagnostics_mode", "timeline") != "legacy":
             state["diagnostic_source"] = "timeline"
+            self._collect_timeline(state)
             return state
         try:
             cfg = load_config(self.settings.diagnostics_file)

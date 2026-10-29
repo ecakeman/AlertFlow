@@ -1114,6 +1114,11 @@ type TimelineEvent struct {
 	IncidentId    int64                  `protobuf:"varint,12,opt,name=incident_id,json=incidentId,proto3" json:"incident_id,omitempty"`
 	HasIncidentId bool                   `protobuf:"varint,13,opt,name=has_incident_id,json=hasIncidentId,proto3" json:"has_incident_id,omitempty"`
 	Details       *structpb.Struct       `protobuf:"bytes,14,opt,name=details,proto3" json:"details,omitempty"`
+	ClusterId     string                 `protobuf:"bytes,15,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
+	Namespace     string                 `protobuf:"bytes,16,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	ResourceKind  string                 `protobuf:"bytes,17,opt,name=resource_kind,json=resourceKind,proto3" json:"resource_kind,omitempty"`
+	ResourceName  string                 `protobuf:"bytes,18,opt,name=resource_name,json=resourceName,proto3" json:"resource_name,omitempty"`
+	ResourceUid   string                 `protobuf:"bytes,19,opt,name=resource_uid,json=resourceUid,proto3" json:"resource_uid,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1244,6 +1249,41 @@ func (x *TimelineEvent) GetDetails() *structpb.Struct {
 		return x.Details
 	}
 	return nil
+}
+
+func (x *TimelineEvent) GetClusterId() string {
+	if x != nil {
+		return x.ClusterId
+	}
+	return ""
+}
+
+func (x *TimelineEvent) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+func (x *TimelineEvent) GetResourceKind() string {
+	if x != nil {
+		return x.ResourceKind
+	}
+	return ""
+}
+
+func (x *TimelineEvent) GetResourceName() string {
+	if x != nil {
+		return x.ResourceName
+	}
+	return ""
+}
+
+func (x *TimelineEvent) GetResourceUid() string {
+	if x != nil {
+		return x.ResourceUid
+	}
+	return ""
 }
 
 type SourceWindow struct {
@@ -1619,17 +1659,20 @@ func (x *SourceCoverage) GetRetentionDays() int32 {
 }
 
 type KubernetesObject struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ClusterId     string                 `protobuf:"bytes,1,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
-	Namespace     string                 `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	Kind          string                 `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
-	Name          string                 `protobuf:"bytes,4,opt,name=name,proto3" json:"name,omitempty"`
-	Uid           string                 `protobuf:"bytes,5,opt,name=uid,proto3" json:"uid,omitempty"`
-	Active        bool                   `protobuf:"varint,6,opt,name=active,proto3" json:"active,omitempty"`
-	LastSeenAt    int64                  `protobuf:"varint,7,opt,name=last_seen_at,json=lastSeenAt,proto3" json:"last_seen_at,omitempty"`
-	Status        string                 `protobuf:"bytes,8,opt,name=status,proto3" json:"status,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	ClusterId       string                 `protobuf:"bytes,1,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
+	Namespace       string                 `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	Kind            string                 `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
+	Name            string                 `protobuf:"bytes,4,opt,name=name,proto3" json:"name,omitempty"`
+	Uid             string                 `protobuf:"bytes,5,opt,name=uid,proto3" json:"uid,omitempty"`
+	Active          bool                   `protobuf:"varint,6,opt,name=active,proto3" json:"active,omitempty"`
+	LastSeenAt      int64                  `protobuf:"varint,7,opt,name=last_seen_at,json=lastSeenAt,proto3" json:"last_seen_at,omitempty"`
+	Status          string                 `protobuf:"bytes,8,opt,name=status,proto3" json:"status,omitempty"`
+	ResourceVersion string                 `protobuf:"bytes,9,opt,name=resource_version,json=resourceVersion,proto3" json:"resource_version,omitempty"`
+	Fingerprint     string                 `protobuf:"bytes,10,opt,name=fingerprint,proto3" json:"fingerprint,omitempty"`
+	Summary         string                 `protobuf:"bytes,11,opt,name=summary,proto3" json:"summary,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *KubernetesObject) Reset() {
@@ -1714,6 +1757,27 @@ func (x *KubernetesObject) GetLastSeenAt() int64 {
 func (x *KubernetesObject) GetStatus() string {
 	if x != nil {
 		return x.Status
+	}
+	return ""
+}
+
+func (x *KubernetesObject) GetResourceVersion() string {
+	if x != nil {
+		return x.ResourceVersion
+	}
+	return ""
+}
+
+func (x *KubernetesObject) GetFingerprint() string {
+	if x != nil {
+		return x.Fingerprint
+	}
+	return ""
+}
+
+func (x *KubernetesObject) GetSummary() string {
+	if x != nil {
+		return x.Summary
 	}
 	return ""
 }
@@ -2370,7 +2434,7 @@ const file_alertflow_agent_v1_agent_proto_rawDesc = "" +
 	"\x12ListChecksResponse\x121\n" +
 	"\x06checks\x18\x01 \x03(\v2\x19.alertflow.agent.v1.CheckR\x06checks\x12\x1f\n" +
 	"\vnext_before\x18\x02 \x01(\x03R\n" +
-	"nextBefore\"\xbd\x03\n" +
+	"nextBefore\"\xe7\x04\n" +
 	"\rTimelineEvent\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x1b\n" +
 	"\tevent_key\x18\x02 \x01(\tR\beventKey\x12\x1d\n" +
@@ -2392,7 +2456,13 @@ const file_alertflow_agent_v1_agent_proto_rawDesc = "" +
 	"\vincident_id\x18\f \x01(\x03R\n" +
 	"incidentId\x12&\n" +
 	"\x0fhas_incident_id\x18\r \x01(\bR\rhasIncidentId\x121\n" +
-	"\adetails\x18\x0e \x01(\v2\x17.google.protobuf.StructR\adetails\"\xb4\x01\n" +
+	"\adetails\x18\x0e \x01(\v2\x17.google.protobuf.StructR\adetails\x12\x1d\n" +
+	"\n" +
+	"cluster_id\x18\x0f \x01(\tR\tclusterId\x12\x1c\n" +
+	"\tnamespace\x18\x10 \x01(\tR\tnamespace\x12#\n" +
+	"\rresource_kind\x18\x11 \x01(\tR\fresourceKind\x12#\n" +
+	"\rresource_name\x18\x12 \x01(\tR\fresourceName\x12!\n" +
+	"\fresource_uid\x18\x13 \x01(\tR\vresourceUid\"\xb4\x01\n" +
 	"\fSourceWindow\x12\x16\n" +
 	"\x06source\x18\x01 \x01(\tR\x06source\x12\x16\n" +
 	"\x06status\x18\x02 \x01(\tR\x06status\x12&\n" +
@@ -2424,7 +2494,7 @@ const file_alertflow_agent_v1_agent_proto_rawDesc = "" +
 	"service_id\x18\x01 \x01(\tR\tserviceId\"s\n" +
 	"\x0eSourceCoverage\x12:\n" +
 	"\asources\x18\x01 \x03(\v2 .alertflow.agent.v1.SourceWindowR\asources\x12%\n" +
-	"\x0eretention_days\x18\x02 \x01(\x05R\rretentionDays\"\xdb\x01\n" +
+	"\x0eretention_days\x18\x02 \x01(\x05R\rretentionDays\"\xc2\x02\n" +
 	"\x10KubernetesObject\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\tR\tclusterId\x12\x1c\n" +
@@ -2435,7 +2505,11 @@ const file_alertflow_agent_v1_agent_proto_rawDesc = "" +
 	"\x06active\x18\x06 \x01(\bR\x06active\x12 \n" +
 	"\flast_seen_at\x18\a \x01(\x03R\n" +
 	"lastSeenAt\x12\x16\n" +
-	"\x06status\x18\b \x01(\tR\x06status\":\n" +
+	"\x06status\x18\b \x01(\tR\x06status\x12)\n" +
+	"\x10resource_version\x18\t \x01(\tR\x0fresourceVersion\x12 \n" +
+	"\vfingerprint\x18\n" +
+	" \x01(\tR\vfingerprint\x12\x18\n" +
+	"\asummary\x18\v \x01(\tR\asummary\":\n" +
 	"\x19GetKubernetesStateRequest\x12\x1d\n" +
 	"\n" +
 	"service_id\x18\x01 \x01(\tR\tserviceId\"Q\n" +

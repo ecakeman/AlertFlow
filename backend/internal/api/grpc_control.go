@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -21,6 +22,9 @@ import (
 	"github.com/ecakeman/alertflow/internal/db"
 	"github.com/ecakeman/alertflow/internal/query"
 )
+
+// agentCallbackBodyLimit is the largest callback or query message accepted.
+const agentCallbackBodyLimit = 1 << 20
 
 // ServeControl listens for Agent reads and callbacks. An empty token refuses
 // every call before any row is written.
@@ -236,7 +240,10 @@ func (c *controlServer) GetTimeline(_ context.Context, req *agentv1.GetTimelineR
 			Id: ev.ID, EventKey: ev.EventKey, ServiceId: ev.ServiceID, Source: ev.Source,
 			EventType: ev.EventType, Severity: ev.Severity, Title: ev.Title, Summary: ev.Summary,
 			OccurredAt: ev.OccurredAt, ObservedAt: ev.ObservedAt, RecordedAt: ev.RecordedAt,
-			Details: rawStruct(ev.Details),
+			Details:   rawStruct(ev.Details),
+			ClusterId: nullText(ev.ClusterID), Namespace: nullText(ev.Namespace),
+			ResourceKind: nullText(ev.ResourceKind), ResourceName: nullText(ev.ResourceName),
+			ResourceUid: nullText(ev.ResourceUID),
 		}
 		if ev.IncidentID.Valid {
 			item.IncidentId = ev.IncidentID.Int64
@@ -268,13 +275,17 @@ func (c *controlServer) GetKubernetesState(_ context.Context, req *agentv1.GetKu
 	}
 	out := &agentv1.KubernetesState{}
 	for _, row := range rows {
-		statusText := "inactive"
-		if row.Active {
-			statusText = "active"
+		statusText := row.Summary
+		if statusText == "" {
+			statusText = "inactive"
+			if row.Active {
+				statusText = "active"
+			}
 		}
 		out.Objects = append(out.Objects, &agentv1.KubernetesObject{
 			ClusterId: row.ClusterID, Namespace: row.Namespace, Kind: row.Kind, Name: row.Name,
 			Uid: row.UID, Active: row.Active, LastSeenAt: row.ObservedAt, Status: statusText,
+			ResourceVersion: row.ResourceVersion, Fingerprint: row.Fingerprint, Summary: row.Summary,
 		})
 	}
 	return out, nil
@@ -342,6 +353,13 @@ func incidentProto(inc db.Incident, name string) *agentv1.Incident {
 		out.HasResolvedAt = true
 	}
 	return out
+}
+
+func nullText(value sql.NullString) string {
+	if !value.Valid {
+		return ""
+	}
+	return value.String
 }
 
 func coverageProto(in map[string]query.TimelineCoverage) []*agentv1.SourceWindow {

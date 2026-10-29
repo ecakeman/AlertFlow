@@ -5,7 +5,6 @@ package api
 
 import (
 	"context"
-	"crypto/subtle"
 	"io/fs"
 	"log/slog"
 	"mime"
@@ -54,10 +53,8 @@ type Server struct {
 	app    *gin.Engine
 	webFS  fs.FS
 	logins *loginLimiter
-	// agentToken is ALERTFLOW_AGENT_TOKEN. Empty means the internal agent routes reject every request.
-	agentToken string
-	// agentCallbackToken is ALERTFLOW_AGENT_CALLBACK_TOKEN: the bearer the Agent
-	// uses to push a run result to POST /webhooks/agent. Empty disables that edge.
+	// agentCallbackToken is set when the agent gRPC callback token is configured.
+	// The incident report page uses it only as an "agent is configured" flag.
 	agentCallbackToken string
 	// agentBaseURL/agentAPIToken point at the diagnostic agent's API (AGENT_BASE_URL /
 	// AGENT_API_TOKEN). Only the legacy synchronous chat proxy still uses them;
@@ -93,8 +90,7 @@ func New(configDir string) (*Server, error) {
 		dispatcher:         dispatcher,
 		webFS:              web.FS(),
 		logins:             newLoginLimiter(),
-		agentToken:         os.Getenv("ALERTFLOW_AGENT_TOKEN"),
-		agentCallbackToken: os.Getenv("ALERTFLOW_AGENT_CALLBACK_TOKEN"),
+		agentCallbackToken: os.Getenv("ALERTFLOW_AGENT_GRPC_TOKEN"),
 		agentBaseURL:       os.Getenv("AGENT_BASE_URL"),
 		agentAPIToken:      os.Getenv("AGENT_API_TOKEN"),
 		stop:               make(chan struct{}),
@@ -138,7 +134,7 @@ func (s *Server) newEngine() *gin.Engine {
 	engine := gin.New()
 	_ = engine.SetTrustedProxies(nil)
 	// A known path with the wrong method must reach NoRoute, same as Fiber.
-	// /internal/ checks the agent token before it chooses 405 or 404.
+	// /internal/ is no longer an API. An unknown path stays JSON.
 	engine.HandleMethodNotAllowed = false
 	// Keep Fiber's behaviour: an unmatched path is 404 JSON or the SPA, not a redirect.
 	engine.RedirectTrailingSlash = false
@@ -170,8 +166,6 @@ func (s *Server) routes() {
 	app.POST("/api/setup", adapt(s.handleSetup))
 	app.POST("/api/auth/login", adapt(s.handleLogin))
 	app.POST("/api/auth/logout", adapt(s.handleLogout))
-	// The agent's inbound edge: its own token, body limit and idempotency key.
-	app.POST("/webhooks/agent", adapt(s.handleAgentCallback))
 
 	// Authenticated.
 	app.GET("/api/auth/me", auth, adapt(s.handleMe))
@@ -221,19 +215,12 @@ func (s *Server) routes() {
 	app.POST("/api/integrations/:id/test", auth, admin, adapt(s.handleTestIntegration))
 	app.POST("/api/deliveries/:id/retry", auth, admin, adapt(s.handleRetryDelivery))
 
-	agent := s.agentAuth
-	app.GET("/internal/agent/v1/config", agent, adapt(s.handleAgentRuntimeConfig))
-	app.GET("/internal/agent/v1/incidents", agent, adapt(s.handleListIncidents))
-	app.GET("/internal/agent/v1/incidents/:id", agent, adapt(s.handleGetIncident))
-	app.GET("/internal/agent/v1/services/:id/metrics", agent, adapt(s.handleServiceMetrics))
-	app.GET("/internal/agent/v1/services/:id/checks", agent, adapt(s.handleServiceChecks))
-
 	// Images (authenticated; the handler gates itself rather than via middleware
 	// so a missing cookie renders as a 401 body instead of a redirect).
 	app.GET("/images/:file", adapt(s.handleServeImage))
 
 	// SPA fallback — must be registered last. Wrong methods land here too, so
-	// /api and /webhooks stay JSON 404 and /internal/ still checks the token.
+	// /api, /webhooks and /internal stay JSON instead of the SPA.
 	app.NoRoute(adapt(s.serveSPA))
 }
 
@@ -250,12 +237,6 @@ func (s *Server) serveSPA(c *gin.Context) error {
 		return fail(http.StatusNotFound, "not found")
 	}
 	if strings.HasPrefix(p, "/internal/") {
-		if err := s.requireAgent(c); err != nil {
-			return err
-		}
-		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
-			return fail(http.StatusMethodNotAllowed, "method not allowed")
-		}
 		return fail(http.StatusNotFound, "not found")
 	}
 	clean := strings.TrimPrefix(path.Clean(p), "/")
@@ -276,39 +257,6 @@ func (s *Server) serveSPA(c *gin.Context) error {
 		}
 	}
 	return writeBytes(c, ctype, data)
-}
-
-// bearerMatch compares an Authorization header against a token in constant
-// time. A malformed or differently-sized header still burns a comparison, so
-// the response time does not leak the token's length.
-func bearerMatch(header, token string) bool {
-	const prefix = "Bearer "
-	if len(header) < len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
-		subtle.ConstantTimeCompare([]byte(token), []byte(token))
-		return false
-	}
-	got := header[len(prefix):]
-	if len(got) != len(token) {
-		subtle.ConstantTimeCompare([]byte(token), []byte(token))
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
-}
-
-func (s *Server) requireAgent(c *gin.Context) error {
-	if s.agentToken == "" {
-		return fail(http.StatusServiceUnavailable, "agent token is not configured")
-	}
-	if !bearerMatch(c.GetHeader("Authorization"), s.agentToken) {
-		return fail(http.StatusUnauthorized, "unauthorized")
-	}
-	return nil
-}
-
-func (s *Server) agentAuth(c *gin.Context) {
-	if err := s.requireAgent(c); err != nil {
-		writeError(c, err)
-	}
 }
 
 func (s *Server) sendIndex(c *gin.Context) error {

@@ -22,7 +22,11 @@ class StubRunner:
 
 
 def _settings(**overrides):
-    base = dict(agent_callback_token="cb", alertflow_base_url="http://af", llm_api_key="k")
+    base = dict(
+        alertflow_grpc_target="alertflow:9090",
+        alertflow_agent_grpc_token="grpc-token",
+        llm_api_key="k",
+    )
     base.update(overrides)
     return Settings(**base)
 

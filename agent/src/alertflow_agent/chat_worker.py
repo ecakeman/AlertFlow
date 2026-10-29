@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import threading
 
-from alertflow_agent.callbacks import backoff_seconds, chat_callback, chat_failed_callback
+from alertflow_agent.callbacks import backoff_seconds, callbacks_enabled, chat_callback, chat_failed_callback
 
 log = logging.getLogger("alertflow_agent")
 
@@ -47,13 +47,13 @@ class ChatWorker:
             if error is None:
                 self.store.finish_chat_request(
                     request_id, "answered", reply=reply, evidence_ids=evidence,
-                    callback=chat_callback(request_id, incident_id, reply, evidence),
+                    callback=self._chat_callback(chat_callback, request_id, incident_id, reply, evidence),
                 )
                 answered += 1
             elif attempts >= self.settings.chat_max_attempts:
                 self.store.finish_chat_request(
                     request_id, "failed", error=error,
-                    callback=chat_failed_callback(request_id, incident_id, error),
+                    callback=self._chat_callback(chat_failed_callback, request_id, incident_id, error),
                 )
             else:
                 self.store.finish_chat_request(
@@ -61,6 +61,11 @@ class ChatWorker:
                     retry_after_seconds=backoff_seconds(attempts),
                 )
         return answered
+
+    def _chat_callback(self, build, request_id, incident_id, *args):
+        if not callbacks_enabled(self.settings):
+            return None
+        return build(request_id, incident_id, *args)
 
     def _answer(self, row: dict) -> tuple[str | None, list | None, str | None]:
         """返回 (reply, evidence_ids, error)；error 非空表示这次没答出来。"""

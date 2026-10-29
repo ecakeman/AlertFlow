@@ -323,7 +323,8 @@ func (c *Collector) fetch(ctx context.Context, svc config.Service, since, until 
 	for _, item := range snap.Items {
 		pull.Items = append(pull.Items, db.DiagnosticItem{
 			Kind: item.Kind, Name: item.Name, Status: item.Status, Summary: item.Summary,
-			ObservedAt: item.ObservedAt.Unix(),
+			ObservedAt: item.ObservedAt.Unix(), EventID: item.EventID,
+			Attributes: item.Attributes, Detail: item.Detail,
 		})
 	}
 	return pull, nil

@@ -95,7 +95,7 @@ invent a test command.
 - **The agent has its own two edges, and they are not the notification channels.**
   Outbound: integration type `agent_webhook` (not `webhook`), encoded by `notify.AgentSender` into
   the versioned v2 envelope — it is the only channel that receives the diagnostic context.
-  Inbound: `POST /webhooks/agent` (bearer `ALERTFLOW_AGENT_CALLBACK_TOKEN`), which stores results in
+  Inbound: `SubmitAgentCallback` (bearer `ALERTFLOW_AGENT_GRPC_TOKEN`) stores results in
   `agent_runs` / `agent_chat_requests` keyed by a unique `message_id`, so a redelivery is a no-op.
   `/api/incidents/:id/agent-report` reads that local copy — it does not call the agent.
   External alert ingestion (`POST /api/alerts/webhook`) no longer exists.

@@ -20,34 +20,33 @@ Phase 0 验收通过后才能改核心代码。一次只做一个阶段。
 - Phase 7：Go 与 Agent 的三条内部业务路径一次性切到 gRPC。HTTP 留作回滚。
 - Phase 8–10：Prometheus/Loki MCP、RAGFlow、A2A。某一项验证失败只停该项。
 - Phase 11：不实施，除非另下指令。
-- 删除 `/webhooks/agent`、`/internal/agent/v1/...` 和 Agent 入站 webhook：Phase 7 观察稳定之后另一次改动，不编进 Phase 7。
+- `/webhooks/agent`、`/internal/agent/v1/...` 和 Agent 的 `POST /webhooks/alertflow` 已删除。浏览器用的 `/api/...` 还在。
 
 ## 2. 当前代码事实
 
 审计对象是上面的基线提交，不是目标架构。
 
 - 角色有 `server`、`monitor`、`publisher`、`consumer`、`delivery`，以及一次性的 `retire-deliveries`（`backend/cmd/alertflow/main.go`）。`monitor` 每秒重读配置并跑周期检查和诊断采集。`api.New` 不 `Sync`。`POST /api/services/:id/check` 仍是一次性 `CheckNow`。删除服务先改 `config.yaml`，再在 `pg_advisory_xact_lock` 里写 `retired_services` 并删运行数据。检查和诊断拿到同一把锁后重读文件，服务已不在就不写。TLS 快照和检查在同一个事务里。Publisher 与删除抢同一把服务级 advisory lock，持锁完成退役检查、租约校验、Kafka 发送和 `published_at` 更新。带 `epoch` 的事件在代际不比退役代际新时不发送；没有 `epoch` 的旧事件仍按 `retired_at` 比较。删除把当前代际写入退役行，并把下一次检查的代际加一，所以同一秒内加回的服务不会被丢掉。Kafka 超时未确认时仍可能重复，Consumer 用同一规则只记 `processed_events`，不再建 Incident 或运行状态。`retire-deliveries` 不在启动时运行。
-- HTTP 是 Gin v1.10.1。`HandleMethodNotAllowed` 为 false，错误方法进入 `serveSPA`。模块声明 Go 1.25.7。没有 gRPC。`k8s.io/client-go`、`k8s.io/api`、`k8s.io/apimachinery` 固定为 v0.35.9。Redis 只是可降级读缓存。
-- Goose 迁移嵌入二进制，在 `db.Open` 时自动执行，并有 advisory lock。已有 `00001`–`00016`。下一号是 `00017`。`00013` 让退役审计在投递行删除后仍然保留，并记录取消原因。`00014` 新增 Timeline 三张表。`00015` 新增 `retired_services`。`00016` 增加 `service_epochs`，并给退役行补上代际。不要改已应用的迁移。
+- HTTP 是 Gin v1.10.1。`HandleMethodNotAllowed` 为 false，错误方法进入 `serveSPA`。模块声明 Go 1.25.7。Agent 业务走双向 unary gRPC：Go 提供 `AlertFlowControlService`，Agent 提供 `AgentTaskService`。`k8s.io/client-go`、`k8s.io/api`、`k8s.io/apimachinery` 固定为 v0.35.9。Redis 只是可降级读缓存。
+- Goose 迁移嵌入二进制，在 `db.Open` 时自动执行，并有 advisory lock。已有 `00001`–`00017`。`00013` 让退役审计在投递行删除后仍然保留，并记录取消原因。`00014` 新增 Timeline 三张表。`00015` 新增 `retired_services`。`00016` 增加 `service_epochs`，并给退役行补上代际。`00017` 允许内部 Agent 任务的 `integration_id` 为空。不要改已应用的迁移。
 - `integrations.type` 仍允许 `telegram`、`slack`、`email`、`webhook`、`agent_webhook`（`00010`）。创建、更新和测试只接受 `agent_webhook`。这四种外发渠道没有发送器，`Dispatcher.Notify` 已删除。
 - `notification_deliveries.status` 允许 `pending`、`running`、`retry_wait`、`succeeded`、`dead`、`cancelled`（`00012`）。
-- `insertDeliveriesTx` 只给启用的 `agent_webhook` 插入任务（`backend/internal/db/apply.go`）。`ClaimDeliveries` 只领取这种渠道。检查真正打开或解决故障时，同一事务写 `runtime_events`，键是 `incident:{id}:opened` 和 `incident:{id}:resolved`。手动创建走 `CreateManualIncident`，不经过 Kafka。
+- `insertDeliveriesTx`、`insertManualDeliveriesTx` 和 `CreateChatRequest` 只在 `ALERTFLOW_AGENT_GRPC_TARGET` 非空时插入 `integration_id` 为空的任务。空目标仍写 Incident 和 Timeline。`ClaimDeliveries` 只领取这种内部任务。检查真正打开或解决故障时，同一事务写 `runtime_events`。手动创建走 `CreateManualIncident`，不经过 Kafka。
 - 前端集成表单只创建 `agent_webhook`。历史四种渠道仍可列出和删除。
 - `POST /api/incidents` 在一个事务里写 Incident、Timeline 和可用 Agent 的调查任务（`backend/internal/db/timeline.go`）。只改标题或开始时间不写 Timeline。首次解决写解决事件，不建新任务。
-- `ALERTFLOW_K8S_ENABLED` 为 `true` 或 `1` 时，`monitor` 只读观察已映射的 Deployment。client-go 为 v0.35.9。空的 `kubernetes` 块不采集。连接失败、权限错误或 15 秒内缓存未同步，只把来源标成 `unavailable` 并在后台重试，不卡住配置重载或退出。Pod 和 Deployment 的新增事件在缓存同步之后写入；四类 informer 的 Watch 错误都会标来源并再协调一次。去掉映射只把对象标成不再活动、来源标成 `disabled`（`mapping removed`），Timeline 保留。采集开关关闭时对当前映射做同样收口，`last_error` 为 `collection disabled`，配置没变就不再写。同一 `cluster_id`、命名空间和工作负载名不能配给两个服务。语义指纹变化才写 Timeline，后续事件键带 `resourceVersion`，`source` 为 `kubernetes`。来源状态和对象写入都在服务锁之后确认服务仍在配置里。不调用 `event.Decide`，不建 Incident，不提供 `GetKubernetesState`。
+- `ALERTFLOW_K8S_ENABLED` 为 `true` 或 `1` 时，`monitor` 只读观察已映射的 Deployment。client-go 为 v0.35.9。空的 `kubernetes` 块不采集。连接失败、权限错误或 15 秒内缓存未同步，只把来源标成 `unavailable` 并在后台重试，不卡住配置重载或退出。Pod 和 Deployment 的新增事件在缓存同步之后写入；四类 informer 的 Watch 错误都会标来源并再协调一次。去掉映射只把对象标成不再活动、来源标成 `disabled`（`mapping removed`），Timeline 保留。采集开关关闭时对当前映射做同样收口，`last_error` 为 `collection disabled`，配置没变就不再写。同一 `cluster_id`、命名空间和工作负载名不能配给两个服务。语义指纹变化才写 Timeline，后续事件键带 `resourceVersion`，`source` 为 `kubernetes`。来源状态和对象写入都在服务锁之后确认服务仍在配置里。不调用 `event.Decide`，不建 Incident。`GetKubernetesState` 返回身份、active、resourceVersion、fingerprint 和裁剪后的状态摘要。
 - `GET /api/services/:id/timeline` 给已登录用户返回该服务的 Timeline。默认最近 24 小时，窗口不超过 `ALERTFLOW_TIMELINE_RETENTION_DAYS`。按 `(occurred_at, id)` 做 keyset。`title` 和 `summary` 最多 1024 个字符。来源覆盖来自 `runtime_source_state`。不缓存，不写事件，不挂到 `/internal/agent/v1`。
 - `monitor` 对配置了 `diagnostics.url` 的服务按间隔拉取应用诊断。种类与 Agent 相同，其中 `saturation` 和 `resource` 一样必须带 `status`：`unhealthy` 记为 `error`，`degraded` 记为 `warning`。失败只更新 `runtime_source_state`。成功时把异常项和恢复写进 `runtime_events`，`source` 为 `application_diagnostics`。替换或去掉采集时会等旧循环退出。不调用 `event.Decide`，不建 Incident。Agent 仍用 `DIAGNOSTICS_FILE` 直连。
 - `CheckNow` 在没有常驻 worker 时会造一个临时 worker 做一次性检查（`backend/internal/monitor/scheduler.go`）。
-- Agent 任务今天经 `agent_webhook` 发到 Agent 的 webhook。结果经 `POST /webhooks/agent` 回来。Agent 只读查询走 `/internal/agent/v1/...`。Agent 自己的回调出站表是 `agent_callback_outbox`（`agent/schema.sql`），靠 `message_id` 唯一。
+- Agent 任务经 gRPC `StartInvestigation` / `StartChat` 发出。结果经 `SubmitAgentCallback` 回来。查询走 `AlertFlowControlService`。Agent 回调出站表仍是 `agent_callback_outbox`，靠 `message_id` 唯一。回调只在 gRPC target 和 `ALERTFLOW_AGENT_GRPC_TOKEN` 都存在时入队，并只在 `stored` 或 `duplicate` 时标 sent。
 - 检查与 Outbox 同一事务。Publisher 在 broker ack 之后才标记已发布。Consumer 在一个事务里写 `processed_events`、Incident、运行状态和投递任务，提交之后才提交 Kafka offset。这些边界在 V2 里保持。
 
 公开路由以 `Server.routes` 为准。Gin 迁移必须保持这些路径和方法：
 
-- 公开：`GET /api/setup/status`，`POST /api/setup`，`POST /api/auth/login`，`POST /api/auth/logout`，`POST /webhooks/agent`
+- 公开：`GET /api/setup/status`，`POST /api/setup`，`POST /api/auth/login`，`POST /api/auth/logout`
 - 登录用户：`GET /api/auth/me`，服务列表/指标/检查，设置、仪表盘、Incident 查询与评论，投递列表，Agent 报告和聊天读写
 - 管理员：服务和布局的写操作、立即检查、Incident 写操作、图片、设置、原始配置、用户、导出导入、集成 CRUD 和测试发送、投递重试
-- Agent token：`GET /internal/agent/v1/config`、`/incidents`、`/incidents/:id`、`/services/:id/metrics`、`/services/:id/checks`
-- `GET /images/:file`，以及 `/api/`、`/webhooks/` 不落到 SPA 的静态回退
+- `GET /images/:file`。`/api/`、`/webhooks/`、`/internal/` 不落到 SPA
 
 错误体保持 `{ "error": "..." }`。
 

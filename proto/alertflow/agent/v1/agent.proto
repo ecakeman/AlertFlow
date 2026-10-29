@@ -151,6 +151,11 @@ message TimelineEvent {
   int64 incident_id = 12;
   bool has_incident_id = 13;
   google.protobuf.Struct details = 14;
+  string cluster_id = 15;
+  string namespace = 16;
+  string resource_kind = 17;
+  string resource_name = 18;
+  string resource_uid = 19;
 }
 
 message SourceWindow {
@@ -201,6 +206,9 @@ message KubernetesObject {
   bool active = 6;
   int64 last_seen_at = 7;
   string status = 8;
+  string resource_version = 9;
+  string fingerprint = 10;
+  string summary = 11;
 }
 
 message GetKubernetesStateRequest {

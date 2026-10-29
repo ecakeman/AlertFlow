@@ -7,6 +7,7 @@ keys the rest of the agent already reads. There is no HTTP fallback.
 from datetime import datetime, timezone
 
 import grpc
+from google.protobuf.json_format import MessageToDict
 
 from alertflow_agent.generated.alertflow.agent.v1 import agent_pb2, agent_pb2_grpc
 
@@ -159,6 +160,8 @@ class AlertFlowClient:
                     "clusterId": row.cluster_id, "namespace": row.namespace, "kind": row.kind,
                     "name": row.name, "uid": row.uid, "active": row.active,
                     "lastSeenAt": row.last_seen_at, "status": row.status,
+                    "resourceVersion": row.resource_version, "fingerprint": row.fingerprint,
+                    "summary": row.summary,
                 }
                 for row in msg.objects
             ]
@@ -250,6 +253,12 @@ def _timeline_event(row) -> dict:
         "observedAt": row.observed_at,
         "recordedAt": row.recorded_at,
         "incidentId": row.incident_id if row.has_incident_id else None,
+        "clusterId": row.cluster_id,
+        "namespace": row.namespace,
+        "resourceKind": row.resource_kind,
+        "resourceName": row.resource_name,
+        "resourceUid": row.resource_uid,
+        "details": MessageToDict(row.details) if row.HasField("details") else {},
     }
 
 

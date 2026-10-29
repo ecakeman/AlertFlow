@@ -192,6 +192,13 @@ def _timeline(args, state, settings, clients) -> dict:
             "event_type": item.get("eventType"),
             "occurred_at": item.get("occurredAt"),
             "observed_at": item.get("observedAt"),
+            "recorded_at": item.get("recordedAt"),
+            "cluster_id": item.get("clusterId"),
+            "namespace": item.get("namespace"),
+            "resource_kind": item.get("resourceKind"),
+            "resource_name": item.get("resourceName"),
+            "resource_uid": item.get("resourceUid"),
+            "details": item.get("details") or {},
             "query_from": page.get("from"),
             "query_to": page.get("to"),
         }

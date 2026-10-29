@@ -124,6 +124,61 @@ def test_backoff_is_bounded():
     assert backoff_seconds(20) == 300
 
 
+def test_only_the_new_grpc_credentials_enqueue_every_callback():
+    from alertflow_agent.chat_worker import ChatWorker
+    from alertflow_agent.runtime.graph import Runner
+    from alertflow_agent.runtime.llm import ScriptedModel
+
+    settings = Settings(alertflow_grpc_target="alertflow:9090", alertflow_agent_grpc_token="tok", llm_api_key="k")
+    store = MemoryStore()
+    run_id = _run(store)
+    runner = Runner(settings, store, None, ScriptedModel())
+    row = store.get(run_id)
+    runner._notify_started(run_id, row)
+    report = runner._report_callback(row, 1, {"status": "completed", "summary": "s"}, [], {})
+    failed = runner._failure_callback(run_id, "boom")
+    assert report["message_type"] == "run.completed"
+    assert failed["message_type"] == "run.failed"
+    store.enqueue_callback(report)
+    store.enqueue_callback(failed)
+    store.enqueue_chat_request({"request_id": "chat-1", "incident_id": 7, "message": "why?", "history": []})
+
+    class Answer:
+        def answer(self, prompt):
+            return "because"
+
+    assert ChatWorker(settings, store, type("R", (), {"settings": settings, "model": Answer(), "memory": None})()).drain() == 1
+    kinds = {item["message_type"] for item in store.callback_rows()}
+    assert kinds == {"run.started", "run.completed", "run.failed", "chat.completed"}
+
+
+def test_callbacks_stay_out_without_a_grpc_target_or_token():
+    from alertflow_agent.runtime.graph import Runner
+    from alertflow_agent.runtime.llm import ScriptedModel
+
+    for settings in (
+        Settings(alertflow_agent_grpc_token="tok"),
+        Settings(alertflow_grpc_target="alertflow:9090"),
+    ):
+        store = MemoryStore()
+        run_id = _run(store)
+        runner = Runner(settings, store, None, ScriptedModel())
+        runner._notify_started(run_id, store.get(run_id))
+        assert runner._report_callback(store.get(run_id), 1, {"status": "completed"}, [], {}) is None
+        assert runner._failure_callback(run_id, "boom") is None
+        assert store.callback_rows() == []
+
+
+def test_unconfirmed_callback_stays_retryable():
+    store = MemoryStore()
+    run_id = _run(store)
+    store.enqueue_callback(report_callback(run_id, store.get(run_id), 1, {"summary": "s"}, {}, {}))
+    sender = CallbackSender(_settings(), store)
+    sender.submit = lambda payload: {"stored": False, "duplicate": False}
+    assert sender.drain() == 0
+    assert store.callback_rows()[0]["status"] == "retry_wait"
+
+
 def test_unconfigured_sender_is_inert():
     sender = CallbackSender(Settings(agent_callback_token="", alertflow_base_url=""), MemoryStore())
     assert sender.configured() is False

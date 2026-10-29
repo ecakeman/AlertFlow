@@ -1,10 +1,11 @@
 package db
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 )
 
@@ -17,6 +18,9 @@ type DiagnosticItem struct {
 	Status     string
 	Summary    string
 	ObservedAt int64
+	EventID    string
+	Attributes map[string]string
+	Detail     json.RawMessage
 }
 
 // DiagnosticPull is one fetch of a service's diagnostics snapshot.
@@ -156,7 +160,7 @@ func insertDiagnosticEvent(tx *sql.Tx, pull DiagnosticPull, item DiagnosticItem,
 	eventType := "diagnostics." + item.Kind
 	title := item.Name
 	severity := "info"
-	key := fmt.Sprintf("diagnostics:%s:%s:%s:%d", pull.ServiceID, item.Kind, item.Name, item.ObservedAt)
+	key := diagnosticEventKey(pull.ServiceID, item)
 	if recovered {
 		eventType += ".recovered"
 		title += " recovered"
@@ -172,8 +176,9 @@ func insertDiagnosticEvent(tx *sql.Tx, pull DiagnosticPull, item DiagnosticItem,
 			title = item.Name + " " + item.Status
 		}
 	}
-	details, err := json.Marshal(map[string]string{
+	details, err := json.Marshal(map[string]any{
 		"kind": item.Kind, "name": item.Name, "status": item.Status,
+		"event_id": item.EventID, "attributes": item.Attributes, "detail": json.RawMessage(item.Detail),
 	})
 	if err != nil {
 		return err
@@ -183,6 +188,30 @@ func insertDiagnosticEvent(tx *sql.Tx, pull DiagnosticPull, item DiagnosticItem,
 		Severity: severity, Title: title, Summary: item.Summary,
 		OccurredAt: item.ObservedAt, ObservedAt: pull.ObservedAt, Details: details,
 	}, now)
+}
+
+func diagnosticEventKey(serviceID string, item DiagnosticItem) string {
+	if item.EventID != "" {
+		return "diagnostics:" + item.EventID
+	}
+	body, err := json.Marshal(struct {
+		ServiceID  string            `json:"service_id"`
+		Kind       string            `json:"kind"`
+		Name       string            `json:"name"`
+		Status     string            `json:"status"`
+		Summary    string            `json:"summary"`
+		ObservedAt int64             `json:"observed_at"`
+		Attributes map[string]string `json:"attributes"`
+		Detail     json.RawMessage   `json:"detail"`
+	}{
+		ServiceID: serviceID, Kind: item.Kind, Name: item.Name, Status: item.Status,
+		Summary: item.Summary, ObservedAt: item.ObservedAt, Attributes: item.Attributes, Detail: item.Detail,
+	})
+	if err != nil {
+		body = []byte(serviceID + item.Kind + item.Name)
+	}
+	sum := sha256.Sum256(body)
+	return "diagnostics:" + hex.EncodeToString(sum[:])
 }
 
 func diagnosticStatusKind(kind string) bool {

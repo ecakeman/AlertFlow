@@ -224,24 +224,31 @@ def test_concurrent_resume_queues_once():
 
 
 def test_resolve_queues_one_revision_and_v2_cites_recovery():
-    from fastapi.testclient import TestClient
+    import json
 
-    from alertflow_agent.api.app import create_app
+    from fastapi.responses import JSONResponse
+
+    from alertflow_agent.api.app import _ingest_v1
+
+    def posted(store, body):
+        response = _ingest_v1(body, store, Settings(agent_revise_on_resolve=True))
+        if isinstance(response, JSONResponse):
+            return response.status_code, json.loads(response.body)
+        return 200, response
 
     store, row, _, runner = _run("baseline", settings=Settings(agent_revise_on_resolve=True))
-    client = TestClient(create_app(Settings(agent_webhook_token="hook", agent_revise_on_resolve=True), store, runner=None))
     body = {
         "schema_version": "v1", "event_id": "incident_resolve:1", "event": "incident_resolve",
         "incident_id": 1, "service_id": "api", "service": "API", "url": "https://example.com/health",
         "status": "recovered", "occurred_at": "2026-10-11T10:05:00Z", "resolved_at": "2026-10-11T10:05:00Z", "message": "up",
     }
     store.update(row["id"], status="running")
-    recorded = client.post("/webhooks/alertflow", json=body, headers={"Authorization": "Bearer hook"})
-    assert recorded.status_code == 202
-    assert recorded.json()["action"] == "recorded"
+    status, recorded = posted(store, body)
+    assert status == 202
+    assert recorded["action"] == "recorded"
     assert store.get(row["id"])["status"] == "running"
-    again = client.post("/webhooks/alertflow", json=body, headers={"Authorization": "Bearer hook"})
-    assert again.json()["action"] == "duplicate"
+    _, again = posted(store, body)
+    assert again["action"] == "duplicate"
     store.update(row["id"], status="completed", stage="persist")
     store.save_report(row["id"], 1, {"summary": "v1"})
     before = [event["seq"] for event in store.list_events(row["id"]) if event["type"] == "report.saved"]
@@ -252,15 +259,15 @@ def test_resolve_queues_one_revision_and_v2_cites_recovery():
     assert any(event["type"] == "run.failed" and event["payload"].get("reason") == "report_conflict" for event in store.list_events(row["id"]))
 
     store2, row2, _, runner2 = _run("baseline", settings=Settings(agent_revise_on_resolve=True))
-    done = client_for(store2).post("/webhooks/alertflow", json=body, headers={"Authorization": "Bearer hook"})
-    assert done.json()["action"] == "revise"
+    _, done = posted(store2, body)
+    assert done["action"] == "revise"
     saved = store2.get(row2["id"])
     assert saved["status"] == "queued"
     assert saved["stage"] == "revise"
     assert saved["mode"] == "baseline"
     assert saved["input_event"]["event"] == "incident_resolve"
-    duplicate = client_for(store2).post("/webhooks/alertflow", json=body, headers={"Authorization": "Bearer hook"})
-    assert duplicate.json()["action"] == "duplicate"
+    _, duplicate = posted(store2, body)
+    assert duplicate["action"] == "duplicate"
     assert store2.get(row2["id"])["status"] == "queued"
     _claim(store2, row2["id"])
     runner2.execute(row2["id"])
@@ -269,17 +276,9 @@ def test_resolve_queues_one_revision_and_v2_cites_recovery():
     facts = report["report"]["observations"][1]["facts"]
     assert facts[0]["value"] == "2026-10-11T10:05:00Z"
     assert facts[1]["value"] == 300
-    third = client_for(store2).post("/webhooks/alertflow", json=body, headers={"Authorization": "Bearer hook"})
-    assert third.json()["action"] == "duplicate"
+    _, third = posted(store2, body)
+    assert third["action"] == "duplicate"
     assert store2.latest_report(row2["id"])["version"] == 2
-
-
-def client_for(store):
-    from fastapi.testclient import TestClient
-
-    from alertflow_agent.api.app import create_app
-
-    return TestClient(create_app(Settings(agent_webhook_token="hook", agent_revise_on_resolve=True), store, runner=None))
 
 
 def test_cancel_and_commit_have_one_winner():

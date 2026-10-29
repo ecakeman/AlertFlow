@@ -49,27 +49,6 @@ def create_app(settings, store, runner) -> FastAPI:
     def healthz():
         return {"ok": True}
 
-    @app.post("/webhooks/alertflow")
-    async def webhook(request: Request):
-        if not settings.agent_webhook_token:
-            return JSONResponse({"error": "webhook token is not configured"}, status_code=503)
-        if not _auth(request.headers.get("authorization", ""), settings.agent_webhook_token):
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
-        raw = await request.body()
-        if len(raw) > settings.webhook_max_bytes:
-            return JSONResponse({"error": "body too large"}, status_code=413)
-        try:
-            payload = json.loads(raw)
-        except Exception:
-            return JSONResponse({"error": "invalid request body"}, status_code=400)
-        if not isinstance(payload, dict):
-            return JSONResponse({"error": "invalid request body"}, status_code=400)
-        # v2 是带默认上下文的信封；v1 是早期不带上下文的默认载荷。两条都在，
-        # 直到确认线上不再有 v1 的发送方。
-        if str(payload.get("schema_version") or "") == "v2":
-            return _ingest_v2(payload, store, settings)
-        return _ingest_v1(payload, store, settings)
-
     @app.get("/api/v1/runs")
     def list_runs(request: Request):
         if not _api(request, settings):

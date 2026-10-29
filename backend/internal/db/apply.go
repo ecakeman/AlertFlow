@@ -313,6 +313,9 @@ type notifySubject struct {
 }
 
 func insertDeliveriesTx(tx *sql.Tx, ev notifySubject, kind string, incidentID, resolvedAt *int64, now int64) error {
+	if !AgentTasksEnabled() {
+		return nil
+	}
 	startedAt := ev.startedAt
 	resolved := resolvedAt
 	if kind == "warning" {

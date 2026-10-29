@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"os"
+	"strings"
 )
 
 // ErrLeaseLost means this worker no longer holds the delivery lease.
@@ -169,6 +171,14 @@ func (db *DB) FailDelivery(id int64, owner string, now int64, status, errMsg str
 		return errors.New("delivery failure status must be retry_wait or dead")
 	}
 	return db.finishDelivery(id, owner, now, status, errMsg, nextAttemptAt, "failed")
+}
+
+// AgentTasksEnabled is true only when delivery has somewhere to send.
+// An empty target means the agent is off: incidents and timeline are still
+// written, and no internal task is created. A set target that later fails to
+// connect is a retry, not this switch.
+func AgentTasksEnabled() bool {
+	return strings.TrimSpace(os.Getenv("ALERTFLOW_AGENT_GRPC_TARGET")) != ""
 }
 
 // InsertInternalAgentTask queues one gRPC investigation or chat task.

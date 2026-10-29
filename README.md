@@ -152,11 +152,11 @@ imported.
 | `ALERTFLOW_DATABASE_URL` | —         | PostgreSQL DSN. Required.                    |
 | `ALERTFLOW_ROLE`         | `server`  | `server`, `monitor`, `publisher`, `consumer`, `delivery`, or `retire-deliveries`. |
 | `ALERTFLOW_KAFKA_BROKERS`| —        | Broker list for publisher and consumer.      |
-| `ALERTFLOW_AGENT_CALLBACK_TOKEN` | — | Bearer token for `POST /webhooks/agent` (the agent pushes its diagnosis back). Empty disables that endpoint. |
+| `ALERTFLOW_AGENT_GRPC_TOKEN` | — | Bearer for the Agent's gRPC calls into AlertFlow. Empty refuses those calls. |
 | `REDIS_URL`              | —         | Optional read cache. Empty serves everything from PostgreSQL. |
 | `ALERTFLOW_K8S_ENABLED`  | off       | `true` or `1` starts the read-only Kubernetes observer on `monitor`. |
 | `ALERTFLOW_KUBECONFIG`   | —         | Kubeconfig path. Empty uses the in-cluster config. |
-| `ALERTFLOW_AGENT_TOKEN`  | —         | Bearer token for `GET /internal/agent/v1/...`. Empty disables those routes. |
+| `ALERTFLOW_AGENT_GRPC_TARGET` | — | Agent address for delivery, for example `agent:9000`. Empty stores incidents and timeline and creates no agent task. |
 | `ALERTFLOW_DB_MAX_OPEN`  | `10`      | Maximum open database connections.           |
 | `ALERTFLOW_DB_MAX_IDLE`  | `5`       | Maximum idle database connections.           |
 | `ALERTFLOW_DB_CONN_MAX_LIFETIME` | `30m` | Maximum lifetime of a connection.       |

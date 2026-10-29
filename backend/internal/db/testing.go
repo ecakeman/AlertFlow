@@ -17,6 +17,11 @@ import (
 // (usually named postgres). The helper never drops the application database.
 func OpenTest(t *testing.T) *DB {
 	t.Helper()
+	// Tests that expect an agent task opt in by default. A test that covers
+	// the agent being off clears this after OpenTest returns.
+	if os.Getenv("ALERTFLOW_AGENT_GRPC_TARGET") == "" {
+		t.Setenv("ALERTFLOW_AGENT_GRPC_TARGET", "agent:9000")
+	}
 	adminURL := os.Getenv("ALERTFLOW_TEST_DATABASE_URL")
 	if adminURL == "" {
 		t.Fatal("ALERTFLOW_TEST_DATABASE_URL is required; point it at the postgres maintenance database (not the app database named alertflow)")

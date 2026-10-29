@@ -84,9 +84,12 @@ func (db *DB) CreateChatRequest(rec ChatRequestRow, payload []byte, now int64) (
 		return nil, false, err
 	}
 
-	deliveryID, err := InsertInternalAgentTask(tx, rec.RequestID, &rec.IncidentID, EventChatRequested, payload, now)
-	if err != nil {
-		return nil, false, err
+	var deliveryID int64
+	if AgentTasksEnabled() {
+		deliveryID, err = InsertInternalAgentTask(tx, rec.RequestID, &rec.IncidentID, EventChatRequested, payload, now)
+		if err != nil {
+			return nil, false, err
+		}
 	}
 	if deliveryID != 0 {
 		if _, err := tx.Exec(

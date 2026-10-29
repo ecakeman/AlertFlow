@@ -63,8 +63,7 @@ admin-gated.
 ## Diagnostic agent
 
 AlertFlow pushes an incident's diagnosis request to the agent, and the agent
-pushes its result back to `POST /webhooks/agent` (its own bearer,
-`ALERTFLOW_AGENT_CALLBACK_TOKEN`). AlertFlow therefore keeps its own copy of
+pushes its result back over gRPC (`SubmitAgentCallback`). AlertFlow therefore keeps its own copy of
 every result, so these endpoints work whether or not the agent is online, and a
 diagnosis is never read by proxying the agent's API.
 
@@ -148,7 +147,7 @@ Notification channels. Fire on incident start and resolve only.
 
 New tasks use the agent envelope, not this body. A historical generic webhook with a blank `bodyTemplate` sent the old fields plus the agent contract. `event`, `service`, `url`, `status` (`down`, `recovered`, or `warning`), and `message` stay as they were. The added fields are `schema_version`, `event_id`, `service_id`, `service_name`, `occurred_at`, and `severity`. `occurred_at` is this event's time. `started_at` is the incident's start and is omitted for a warning. `resolved_at` is present on resolve and matches `occurred_at`. `incident_id` is present when the delivery has an incident. `check_id` is present for a check. `attempts` and `error` are present when the snapshot has them. `event_id` is `<event>:<incident_id>`, or `delivery:<notification_deliveries.id>` when there is no incident id. A custom `bodyTemplate` renders the message, including `.OccurredAt` and `.StartedAt`.
 
-`GET /internal/agent/v1/incidents`, `/incidents/{id}`, `/services/{id}/metrics`, and `/services/{id}/checks` return the same JSON as the matching `/api` reads. Send `Authorization: Bearer <ALERTFLOW_AGENT_TOKEN>`. An empty token makes the whole group return 503. A wrong token returns 401. Other methods return 405, and unknown paths return JSON 404.
+The browser keeps `/api/...`. Agent reads and callbacks are gRPC, not `/internal/agent/v1` or `/webhooks/agent`. Those paths return JSON 404.
 
 The test endpoint reports delivery in the body rather than via a status code, so
 the UI can show the real reason:

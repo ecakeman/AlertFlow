@@ -385,7 +385,8 @@ func upsertKubernetesSource(tx *sql.Tx, serviceID, status, errText string, at in
 // ListKubernetesObjects returns the stored objects for one service.
 func (db *DB) ListKubernetesObjects(serviceID string) ([]KubernetesObject, error) {
 	rows, err := db.Query(
-		`SELECT cluster_id, namespace, resource_kind, resource_name, resource_uid, active, last_seen_at
+		`SELECT cluster_id, namespace, resource_kind, resource_name, resource_uid, active, last_seen_at,
+		        resource_version, fingerprint, snapshot
 		 FROM runtime_object_states WHERE service_id = $1 ORDER BY cluster_id, namespace, resource_name`,
 		serviceID,
 	)
@@ -396,13 +397,56 @@ func (db *DB) ListKubernetesObjects(serviceID string) ([]KubernetesObject, error
 	var out []KubernetesObject
 	for rows.Next() {
 		var obj KubernetesObject
-		if err := rows.Scan(&obj.ClusterID, &obj.Namespace, &obj.Kind, &obj.Name, &obj.UID, &obj.Active, &obj.ObservedAt); err != nil {
+		if err := rows.Scan(
+			&obj.ClusterID, &obj.Namespace, &obj.Kind, &obj.Name, &obj.UID, &obj.Active, &obj.ObservedAt,
+			&obj.ResourceVersion, &obj.Fingerprint, &obj.Snapshot,
+		); err != nil {
 			return nil, err
 		}
 		obj.ServiceID = serviceID
+		obj.Summary = boundedObjectStatus(obj.Snapshot)
+		obj.Snapshot = nil
 		out = append(out, obj)
 	}
 	return out, rows.Err()
+}
+
+func boundedObjectStatus(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "{}" || string(raw) == "null" {
+		return ""
+	}
+	var doc map[string]json.RawMessage
+	if json.Unmarshal(raw, &doc) != nil {
+		return ""
+	}
+	keep := map[string]json.RawMessage{}
+	for _, key := range []string{"phase", "ready", "replicas", "availableReplicas", "readyReplicas", "status", "reason"} {
+		if value, ok := doc[key]; ok {
+			keep[key] = value
+		}
+	}
+	if nested, ok := doc["status"]; ok && len(keep) == 1 {
+		var inner map[string]json.RawMessage
+		if json.Unmarshal(nested, &inner) == nil {
+			keep = map[string]json.RawMessage{}
+			for _, key := range []string{"phase", "readyReplicas", "availableReplicas", "replicas", "reason"} {
+				if value, ok := inner[key]; ok {
+					keep[key] = value
+				}
+			}
+		}
+	}
+	if len(keep) == 0 {
+		return ""
+	}
+	encoded, err := json.Marshal(keep)
+	if err != nil || len(encoded) == 0 {
+		return ""
+	}
+	if len(encoded) > 400 {
+		encoded = encoded[:400]
+	}
+	return string(encoded)
 }
 
 func kindKey(kind string) string {

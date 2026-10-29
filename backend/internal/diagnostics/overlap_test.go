@@ -85,6 +85,22 @@ func TestOverlapDedupAndLateItem(t *testing.T) {
 	}
 }
 
+func TestParseKeepsOptionalContractFields(t *testing.T) {
+	body := []byte(`{"schema_version":"v2","items":[{"kind":"recent_error","name":"db","summary":"timeout","observed_at":"2026-10-28T12:00:00Z","event_id":"evt-9","attributes":{"code":"42"},"detail":{"a":1}}]}`)
+	snap := ParseSnapshot(body, time.Time{})
+	if snap.Coverage != "ok" || len(snap.Items) != 1 {
+		t.Fatalf("snapshot = %+v", snap)
+	}
+	item := snap.Items[0]
+	if item.EventID != "evt-9" || item.Attributes["code"] != "42" || string(item.Detail) != `{"a":1}` {
+		t.Fatalf("item = %+v", item)
+	}
+	legacy := ParseSnapshot(readFixture(t, "ok.json"), time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC))
+	if legacy.Coverage != "ok" || len(legacy.Items) == 0 || legacy.Items[0].EventID != "" {
+		t.Fatalf("legacy = %+v", legacy)
+	}
+}
+
 func TestSharedDiagnosticsFixtures(t *testing.T) {
 	when := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
 	if got := ParseSnapshot(readFixture(t, "ok.json"), when).Coverage; got != "ok" {

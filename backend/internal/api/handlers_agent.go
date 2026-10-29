@@ -27,10 +27,9 @@ type agentReportDTO struct {
 // GET /api/incidents/:id/agent-report → the diagnostic agent's result for this
 // incident.
 //
-// The agent pushes its result to POST /webhooks/agent, so this read works
-// whether or not the agent is online right now. A run that has started but not
-// finished yet is Available=true with no Report — the UI's "still running"
-// state.
+// The agent pushes its result over gRPC, so this read works whether or not the
+// agent is online right now. A run that has started but not finished yet is
+// Available=true with no Report — the UI's "still running" state.
 func (s *Server) handleIncidentAgentReport(c *gin.Context) error {
 	inc, err := s.incidentParam(c)
 	if err != nil {

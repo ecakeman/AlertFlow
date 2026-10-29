@@ -196,6 +196,15 @@ def backoff_seconds(attempt: int) -> int:
     return delay
 
 
+def callbacks_enabled(settings) -> bool:
+    """gRPC 目标和令牌都在才入队。只配新令牌、或只配旧 HTTP 令牌，都不够。"""
+    target = (getattr(settings, "alertflow_grpc_target", "") or "").strip()
+    token = (getattr(settings, "alertflow_agent_grpc_token", "") or "").strip()
+    if not token:
+        token = (getattr(settings, "agent_callback_token", "") or "").strip()
+    return bool(target and token)
+
+
 def _permanent(status_code: int) -> bool:
     if status_code in (408, 429):
         return False
@@ -217,7 +226,7 @@ class CallbackSender:
         self.submit = None
 
     def configured(self) -> bool:
-        return bool(self.target and self.token)
+        return callbacks_enabled(self.settings)
 
     def run(self, stop: threading.Event) -> None:
         warned = False
@@ -268,4 +277,5 @@ class CallbackSender:
             return _clip(type(exc).__name__, MAX_ERROR_CHARS), False
         if isinstance(result, dict) and (result.get("stored") or result.get("duplicate")):
             return None, False
-        return _clip("callback was not stored", MAX_ERROR_CHARS), True
+        # 没有确认就重试。重复的 message_id 在 Go 侧是 duplicate，不会写出第二份报告。
+        return _clip("callback was not stored", MAX_ERROR_CHARS), False

@@ -30,6 +30,9 @@ type Item struct {
 	Summary    string
 	ObservedAt time.Time
 	Stale      bool
+	EventID    string
+	Attributes map[string]string
+	Detail     json.RawMessage
 }
 
 // Snapshot is a validated diagnostics document.
@@ -91,6 +94,7 @@ func parseItem(raw []byte, eventTime time.Time) (Item, bool) {
 		Status     string          `json:"status"`
 		Summary    string          `json:"summary"`
 		ObservedAt string          `json:"observed_at"`
+		EventID    string          `json:"event_id"`
 		Attributes map[string]any  `json:"attributes"`
 		Detail     json.RawMessage `json:"detail"`
 	}
@@ -124,8 +128,25 @@ func parseItem(raw []byte, eventTime time.Time) (Item, bool) {
 	if len(name) > 200 {
 		name = name[:200]
 	}
+	attrs := map[string]string{}
+	for key, value := range in.Attributes {
+		attrs[key] = clipRunes(strings.TrimSpace(toString(value)), 200)
+	}
+	var detail json.RawMessage
+	if len(in.Detail) > 0 && string(in.Detail) != "null" {
+		var decoded any
+		if json.Unmarshal(in.Detail, &decoded) != nil {
+			return Item{}, false
+		}
+		normalized, err := json.Marshal(decoded)
+		if err != nil {
+			return Item{}, false
+		}
+		detail = normalized
+	}
 	item := Item{
 		Kind: in.Kind, Name: name, Status: in.Status, Summary: clipRunes(in.Summary, 1024), ObservedAt: observed.UTC(),
+		EventID: strings.TrimSpace(in.EventID), Attributes: attrs, Detail: detail,
 	}
 	if !eventTime.IsZero() && eventTime.Sub(observed) > 5*time.Minute {
 		item.Stale = true
