@@ -7,7 +7,7 @@ import pytest
 
 from alertflow_agent.analysis.stats import error_stats
 from alertflow_agent.config import Settings
-from alertflow_agent.db import MemoryStore
+from alertflow_agent.db import MemoryStore, apply_schema
 from alertflow_agent.integrations.alertflow import normalize_check
 from alertflow_agent.memory_store import InMemoryMemoryRepo, MemoryRepo
 from alertflow_agent.runtime.graph import Runner
@@ -109,13 +109,21 @@ def test_full_run_remember_step_saves_memory():
                     reason="ALERTFLOW_TEST_DATABASE_URL is not set")
 def test_remember_writes_to_postgres():
     url = os.environ["ALERTFLOW_TEST_DATABASE_URL"]
-    repo = MemoryRepo(url)
-    run_id = "624d23a8-033f-486b-86a4-ad05a13e67f8"
-    # Agent DB 的 episodes.run_id 有外键：测试数据必须先有对应 run 行（CI 里由夹具准备）
     try:
+        repo = MemoryRepo(url)
         repo.conn.execute("select 1")
     except Exception:  # noqa: BLE001
         pytest.skip("database is not reachable")
+    # 本用例不依赖外部夹具：schema.sql 幂等，自己建表；
+    # episodes.run_id 有外键，先补出这次 run 的行（CI 只给空库，不会替我们准备）。
+    apply_schema(url)
+    run_id = "624d23a8-033f-486b-86a4-ad05a13e67f8"
+    repo.conn.execute(
+        """INSERT INTO runs (id, dedupe_key, incident_id, service_id, event_type, mode, status, input_event)
+           VALUES (%s, %s, 4, 'fault-lab', 'incident_start', 'agent', 'running', '{}'::jsonb)
+           ON CONFLICT (id) DO NOTHING""",
+        (run_id, f"test:{run_id}"),
+    )
     out = remember(_p6_state(), _p6_state()["report"], repo, None, Settings(memory_enabled=True))
     assert out["saved"] is True
     # attachment 以唯一键幂等：重跑时 attachment_saved 可能为 False，但数据必须存在
