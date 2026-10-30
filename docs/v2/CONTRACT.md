@@ -138,7 +138,7 @@ Phase 7 才生成代码和切换传输。Phase 0 把地址、认证和切换规�
 
 两组服务嵌入现有进程，不另拆微服务：
 
-- Go `AlertFlowControlService`：`GetRuntimeConfig`、`ListIncidents`、`GetIncident`、`GetMetrics`、`ListChecks`、`QueryTimeline`、`GetSourceCoverage`、`GetKubernetesState`、`SubmitReport`、`SubmitRunEvent`。复用现有 query/DB，不复制业务规则。
+- Go `AlertFlowControlService`（9 个 RPC，以 `proto/alertflow/agent/v1/agent.proto:11-19` 为唯一事实来源）：`GetRuntimeConfig`、`ListIncidents`、`GetIncident`、`GetMetrics`、`ListChecks`、`GetTimeline`、`GetSourceCoverage`、`GetKubernetesState`、`SubmitAgentCallback`。复用现有 query/DB，不复制业务规则。（历史文档曾写作 `QueryTimeline`/`SubmitReport`/`SubmitRunEvent`，均已不存在。）
 - Python `AgentTaskService`：`StartInvestigation`、`StartChat`。任务先落库或被识别为重复，再返回成功。成功不表示调查已经完成。
 
 变量：

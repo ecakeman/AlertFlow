@@ -123,3 +123,25 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build AlertFlow and the agent
         run: docker compose --profile agent build --progress=plain alertflow agent
+
+  compose-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate every compose profile
+        run: |
+          set -euo pipefail
+          docker compose config --quiet
+          for profile in agent demo observability ragflow runbook; do
+            echo "== profile: $profile =="
+            docker compose --profile "$profile" config --quiet
+          done
+
+  loki-mcp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the Loki MCP image
+        run: docker build --progress=plain -t alertflow-loki-mcp:ci deploy/observability/loki-mcp

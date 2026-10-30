@@ -1,3 +1,10 @@
+# ⚠️ 历史文档（已作废）
+
+> 本文档基于 Rev6 及更早的 `AlertFlow_V2_Cursor_Final_Spec.md`，其中「P3 新增三个 Specialist / Supervisor fan-out」与 Rev6.4 §2.6、§13 直接冲突。
+> **当前规划依据是** `docs/v2/REV6_BASELINE.md`。本文只作历史记录保留，不得作为实施或验收依据。
+
+---
+
 # 实施基线
 
 日期：2026-10-30。P0.1 只读补充。不改产品代码。
