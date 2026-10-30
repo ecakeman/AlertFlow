@@ -234,7 +234,6 @@ services:
         condition: service_started
     networks:
       - default
-      - ragflow
     restart: unless-stopped
 
   # ── 演示目标（合部署，profile "demo"）────────────────────────────────────
@@ -426,7 +425,7 @@ services:
     restart: unless-stopped
 
   a2a-adapter:
-    profiles: ["multi-agent"]
+    profiles: ["runbook"]
     image: alertflow-agent:local
     build:
       context: ./agent

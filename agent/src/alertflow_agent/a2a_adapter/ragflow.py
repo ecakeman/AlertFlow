@@ -37,12 +37,10 @@ def parse_completion(payload: dict) -> dict:
 
 def research(base_url: str, api_key: str, agent_id: str, query: str, timeout: float) -> dict:
     url = str(base_url or "").strip().rstrip("/")
-    if not url or not str(agent_id or "").strip():
-        raise RuntimeError("ragflow is not configured")
-    headers = {"Content-Type": "application/json"}
     token = str(api_key or "").strip()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    if not url or not token or not str(agent_id or "").strip():
+        raise RuntimeError("ragflow is not configured")
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
     response = httpx.post(
         f"{url}/api/v1/agents/chat/completions",
         headers=headers,

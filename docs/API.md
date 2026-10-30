@@ -76,11 +76,13 @@ diagnosis is never read by proxying the agent's API.
   "status": "completed",     // running while the run has started but not finished
   "eventType": "incident_start",
   "createdAt": "2026-07-15T10:46:00Z",
-  "usage": { "llm_calls": 5, "tokens": 8123 },
+  "usage": { "llm_calls": 5, "llm_attempts": 5, "llm_successes": 4, "tokens": 8123 },
   "report": { /* the agent's report, verbatim */ },
   "evidence": { /* only the evidence the report cites */ }
 }
 ```
+
+`llm_calls` and `llm_attempts` are the same number: provider attempts, including failures and retries. `llm_successes` counts parses that succeeded. Failed attempts still reserve the prompt's estimated tokens; a provider usage total replaces that estimate for the same attempt.
 
 When there is nothing to show, the response is `200` with
 `{ "available": false, "reason": "…" }` — a missing diagnosis is a normal state,

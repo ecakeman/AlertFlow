@@ -26,6 +26,23 @@ def _draft(catalog, **hyp):
     }
 
 
+def test_runbook_catalog_keeps_content_and_only_real_citations():
+    bare = {"runbook:1": {"source_type": "runbook", "data": {
+        "schema": "runbook-research.v1", "content": "try a restart", "citations_available": False, "citations": [], "source": "ragflow",
+    }}}
+    catalog = build_catalog(bare)
+    assert fact_id(catalog, "runbook:1", "content")
+    assert fact_id(catalog, "runbook:1", "citations_available")
+    assert fact_id(catalog, "runbook:1", "citations") is None
+    cited = {"runbook:1": {"source_type": "runbook", "data": {
+        "schema": "runbook-research.v1", "content": "try a restart", "citations_available": True,
+        "citations": [{"document_id": "doc", "id": "chunk"}], "source": "ragflow",
+    }}}
+    cited_catalog = build_catalog(cited)
+    assert fact_id(cited_catalog, "runbook:1", "citations.0.document_id")
+    assert fact_id(cited_catalog, "runbook:1", "citations.0.id")
+
+
 def test_catalog_facts_pass_and_ignore_model_values():
     evidence = _evidence()
     catalog = build_catalog(evidence)

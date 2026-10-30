@@ -2,6 +2,8 @@ def fresh_guard() -> dict:
     return {
         "lead_rounds": 0,
         "llm_calls": 0,
+        "llm_attempts": 0,
+        "llm_successes": 0,
         "tool_calls": 0,
         "replans": 0,
         "subagent_runs": 0,

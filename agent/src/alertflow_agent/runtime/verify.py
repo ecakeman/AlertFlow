@@ -95,6 +95,16 @@ def _catalog_payload(ident: str, item: dict):
         return data
     if kind in {"http_check", "analysis", "tls", "service_info"}:
         return data
+    if item.get("source_type") == "runbook":
+        payload = {
+            "schema": data.get("schema"),
+            "content": data.get("content"),
+            "citations_available": bool(data.get("citations_available")),
+            "source": data.get("source"),
+        }
+        if data.get("citations_available"):
+            payload["citations"] = data.get("citations") or []
+        return payload
     if item.get("source_type") in {"prometheus", "loki"}:
         payload = {
             "query": data.get("query"),

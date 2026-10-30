@@ -60,7 +60,11 @@ jobs:
           python-version: "3.12"
       - name: Agent client for the cross-language test
         working-directory: agent
-        run: pip install -e ".[dev]"
+        run: |
+          pip install uv
+          uv export --frozen --extra dev --no-emit-project -o /tmp/agent-requirements.txt
+          uv pip install --system --requirement /tmp/agent-requirements.txt
+          uv pip install --system --no-deps -e .
       - name: Go tests
         working-directory: backend
         run: go test ./...
@@ -82,6 +86,22 @@ jobs:
   agent:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: alertflow
+          POSTGRES_PASSWORD: alertflow
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U alertflow -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ALERTFLOW_TEST_DATABASE_URL: postgres://alertflow:alertflow@localhost:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -89,7 +109,12 @@ jobs:
           python-version: "3.12"
       - name: Agent tests
         working-directory: agent
-        run: pip install -e ".[dev]" && python -m pytest -q
+        run: |
+          pip install uv
+          uv export --frozen --extra dev --no-emit-project -o /tmp/agent-requirements.txt
+          uv pip install --system --requirement /tmp/agent-requirements.txt
+          uv pip install --system --no-deps -e .
+          python -m pytest -q
 
   images:
     runs-on: ubuntu-latest

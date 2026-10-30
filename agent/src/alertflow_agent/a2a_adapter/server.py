@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+from datetime import datetime, timezone
 
 import uvicorn
 from google.protobuf.json_format import MessageToDict, ParseDict
@@ -36,7 +38,7 @@ def build_card(public_url: str) -> AgentCard:
         name="AlertFlow Runbook Specialist",
         description="Looks up AlertFlow operations runbooks.",
         version="0.1.0",
-        default_input_modes=["text/plain"],
+        default_input_modes=["application/json"],
         default_output_modes=["application/json"],
     )
     card.supported_interfaces.add(
@@ -54,9 +56,19 @@ def build_card(public_url: str) -> AgentCard:
     return card
 
 
+_TERMINAL = {"completed", "failed", "canceled"}
+_EMPTY_ARTIFACT = {
+    "schema": "runbook-research.v1",
+    "content": "",
+    "citations": [],
+    "citations_available": False,
+}
+
+
 class LedgerTaskStore(TaskStore):
-    def __init__(self, ledger):
+    def __init__(self, ledger, read_task):
         self.ledger = ledger
+        self.read_task = read_task
 
     async def save(self, task: Task, context) -> None:
         body = MessageToDict(task, preserving_proto_field_name=True)
@@ -67,7 +79,7 @@ class LedgerTaskStore(TaskStore):
         self.ledger.save_task(task.id, state, artifact, body, state == "TASK_STATE_CANCELED")
 
     async def get(self, task_id: str, context) -> Task | None:
-        row = self.ledger.get_task(task_id)
+        row = self.read_task(task_id)
         if not row or not row.get("task_json"):
             return None
         task = ParseDict(row["task_json"], Task())
@@ -86,42 +98,69 @@ class RunbookExecutor(AgentExecutor):
     def __init__(self, ledger, settings: dict):
         self.ledger = ledger
         self.settings = settings
+        self._jobs: list[asyncio.Task] = []
+
+    async def join(self) -> None:
+        pending = [job for job in self._jobs if not job.done()]
+        if pending:
+            await asyncio.gather(*pending)
+
+    def read_task(self, task_id: str) -> dict | None:
+        row = self.ledger.get_task(task_id)
+        if not row:
+            return None
+        if row.get("status") in _TERMINAL:
+            return row
+        if _expired(row.get("deadline_at")) or row["message_id"] not in self.ledger.live:
+            self._store(row["task_id"], "failed", {**_EMPTY_ARTIFACT, "error": "runbook lookup failed"})
+            return self.ledger.get_task(task_id)
+        return row
 
     async def execute(self, context, event_queue) -> None:
         message = context.message
         message_id = message.message_id
         task_id = context.task_id or message.task_id
-        timeout = int(self.settings.get("timeout_seconds") or 30)
+        raw_timeout = self.settings.get("timeout_seconds")
+        timeout = 30 if raw_timeout in (None, "") else int(raw_timeout)
         if not self.ledger.claim(message_id, task_id, timeout):
-            prior = self.ledger.get_message(message_id) or {}
             self.ledger.alias(message_id, task_id)
-            artifact = prior.get("artifact") or {
-                "schema": "runbook-research.v1",
-                "content": "",
-                "citations": [],
-                "citations_available": False,
-            }
-            status = prior.get("status") if prior.get("status") in {"completed", "failed", "canceled"} else "completed"
-            await self._finish(event_queue, task_id, context.context_id, status, artifact, persist=False)
+            row = self.read_task(task_id) or {}
+            await self._emit(
+                event_queue, task_id, context.context_id,
+                row.get("status") or "failed",
+                row.get("artifact") or _EMPTY_ARTIFACT,
+                persist=False,
+                artifact_event=False,
+            )
             return
+        self.ledger.live.add(message_id)
+        await self._emit(event_queue, task_id, context.context_id, "working", None, persist=True)
         query = "\n".join(part.text for part in message.parts if part.text)[:8000]
+        self._jobs.append(asyncio.create_task(self._run(message_id, task_id, context.context_id, query, float(timeout))))
+
+    async def _run(self, message_id: str, task_id: str, context_id: str, query: str, timeout: float) -> None:
         try:
-            if self.ledger.get_message(message_id).get("cancelled"):
-                await self._finish(event_queue, task_id, context.context_id, "canceled", {"schema": "runbook-research.v1", "content": "", "citations": [], "citations_available": False})
+            current = self.ledger.get_message(message_id) or {}
+            if current.get("cancelled") or current.get("status") in _TERMINAL:
                 return
-            artifact = research(
+            artifact = await asyncio.to_thread(
+                research,
                 self.settings.get("ragflow_base_url") or "",
                 self.settings.get("ragflow_api_key") or "",
                 self.settings.get("ragflow_agent_id") or "",
                 query,
-                float(timeout),
+                timeout,
             )
-            await self._finish(event_queue, task_id, context.context_id, "completed", artifact)
+            current = self.ledger.get_message(message_id) or {}
+            if current.get("status") in _TERMINAL:
+                return
+            self._store(task_id, "completed", artifact)
         except Exception:
-            await self._finish(
-                event_queue, task_id, context.context_id, "failed",
-                {"schema": "runbook-research.v1", "content": "", "citations": [], "citations_available": False, "error": "runbook lookup failed"},
-            )
+            current = self.ledger.get_message(message_id) or {}
+            if current.get("status") not in _TERMINAL:
+                self._store(task_id, "failed", {**_EMPTY_ARTIFACT, "error": "runbook lookup failed"})
+        finally:
+            self.ledger.live.discard(message_id)
 
     async def cancel(self, context, event_queue) -> None:
         task_id = context.task_id
@@ -132,30 +171,55 @@ class RunbookExecutor(AgentExecutor):
             status=TaskStatus(state=TaskState.TASK_STATE_CANCELED),
         ))
 
-    async def _finish(self, event_queue, task_id: str, context_id: str, status: str, artifact: dict, persist: bool = True) -> None:
-        state = {
-            "completed": TaskState.TASK_STATE_COMPLETED,
-            "failed": TaskState.TASK_STATE_FAILED,
-            "canceled": TaskState.TASK_STATE_CANCELED,
-        }[status]
-        proto_artifact = Artifact(
+    def _store(self, task_id: str, status: str, artifact: dict | None) -> None:
+        task = _task(task_id, "", status, artifact)
+        body = MessageToDict(task, preserving_proto_field_name=True)
+        self.ledger.save_task(task_id, status, artifact, body, status == "canceled")
+
+    async def _emit(self, event_queue, task_id: str, context_id: str, status: str, artifact: dict | None, persist: bool, artifact_event: bool = True) -> None:
+        task = _task(task_id, context_id, status, artifact)
+        if persist:
+            body = MessageToDict(task, preserving_proto_field_name=True)
+            self.ledger.save_task(task_id, status, artifact, body, status == "canceled")
+        if artifact_event and task.artifacts:
+            await event_queue.enqueue_event(TaskArtifactUpdateEvent(
+                task_id=task_id, context_id=context_id or "", artifact=task.artifacts[-1], last_chunk=True,
+            ))
+        await event_queue.enqueue_event(task)
+
+
+def _expired(deadline) -> bool:
+    if not deadline:
+        return False
+    if isinstance(deadline, datetime):
+        exp = deadline if deadline.tzinfo else deadline.replace(tzinfo=timezone.utc)
+    else:
+        exp = datetime.fromisoformat(str(deadline))
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) >= exp
+
+
+def _task(task_id: str, context_id: str, status: str, artifact: dict | None) -> Task:
+    state = {
+        "working": TaskState.TASK_STATE_WORKING,
+        "completed": TaskState.TASK_STATE_COMPLETED,
+        "failed": TaskState.TASK_STATE_FAILED,
+        "canceled": TaskState.TASK_STATE_CANCELED,
+    }[status]
+    artifacts = []
+    if artifact is not None:
+        artifacts.append(Artifact(
             artifact_id="runbook-research.v1",
             name="runbook-research.v1",
             parts=[Part(text=artifact_text(artifact), media_type="application/json")],
-        )
-        task = Task(
-            id=task_id,
-            context_id=context_id or "",
-            status=TaskStatus(state=state),
-            artifacts=[proto_artifact],
-        )
-        body = MessageToDict(task, preserving_proto_field_name=True)
-        if persist:
-            self.ledger.save_task(task_id, status, artifact, body, status == "canceled")
-        await event_queue.enqueue_event(TaskArtifactUpdateEvent(
-            task_id=task_id, context_id=context_id or "", artifact=proto_artifact, last_chunk=True,
         ))
-        await event_queue.enqueue_event(task)
+    return Task(
+        id=task_id,
+        context_id=context_id or "",
+        status=TaskStatus(state=state),
+        artifacts=artifacts,
+    )
 
 
 def build_app(ledger=None, settings: dict | None = None, public_url: str = "http://127.0.0.1:8001") -> Starlette:
@@ -163,7 +227,7 @@ def build_app(ledger=None, settings: dict | None = None, public_url: str = "http
     settings = settings or {}
     card = build_card(public_url)
     executor = RunbookExecutor(ledger, settings)
-    handler = DefaultRequestHandlerV2(executor, LedgerTaskStore(ledger), card)
+    handler = DefaultRequestHandlerV2(executor, LedgerTaskStore(ledger, executor.read_task), card)
     return Starlette(routes=[*create_agent_card_routes(card), *create_rest_routes(handler)])
 
 

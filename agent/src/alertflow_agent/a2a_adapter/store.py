@@ -6,10 +6,14 @@ import json
 from datetime import datetime, timedelta, timezone
 
 
+_TERMINAL = {"completed", "failed", "canceled"}
+
+
 class MemoryLedger:
     def __init__(self):
         self.rows: dict[str, dict] = {}
         self.by_task: dict[str, str] = {}
+        self.live: set[str] = set()
 
     def claim(self, message_id: str, task_id: str, timeout_seconds: int) -> bool:
         if message_id in self.rows:
@@ -42,6 +46,8 @@ class MemoryLedger:
         row = self.rows[message_id]
         if row["task_id"] != task_id:
             return
+        if row["status"] in _TERMINAL and status != row["status"]:
+            return
         row["status"] = status
         row["artifact"] = artifact
         row["task_json"] = task_json
@@ -61,6 +67,7 @@ class MemoryLedger:
 class PostgresLedger:
     def __init__(self, dsn: str):
         self.dsn = dsn
+        self.live: set[str] = set()
 
     def _connect(self):
         import psycopg
@@ -129,6 +136,7 @@ class PostgresLedger:
                 SET status = %s, artifact = %s::jsonb, task_json = %s::jsonb,
                     cancelled = %s, updated_at = now()
                 WHERE task_id = %s
+                  AND status NOT IN ('completed', 'failed', 'canceled')
                 """,
                 (status, json.dumps(artifact) if artifact is not None else None,
                  json.dumps(task_json) if task_json is not None else None, cancelled, task_id),

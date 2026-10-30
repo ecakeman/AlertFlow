@@ -4,6 +4,17 @@
 
 唯一实施规格是 `AlertFlow_V2_Cursor_Final_Spec.md`。
 
+## P1 已改
+
+下面各节是相对产品基线 `169ccab` 的审计，保留作对照。P1 之后这些缺陷已改，验收编号在 `docs/v2/IMPLEMENTATION_ACCEPTANCE.md`。
+
+- A2A：`RunbookExecutor.execute` 先保存 `working` Task，再在当前进程异步调用 RAGFlow。重复请求和 `read_task` 在 deadline 过后或进程内没有活任务时写成失败，不重跑。Card 输入 MIME 是 `application/json`。
+- Runbook evidence 进入 `verify._catalog_payload`。`research` 在 URL、API key、agent id 任一为空时不发 HTTP。
+- 三个启动脚本不再 `export` 默认 URL。Compose profile 名是 `runbook`。`agent` 只在 `default` 网络。
+- `call_model` 在 `model.complete` 之前增加 `llm_attempts`。`llm_calls` 与它相同。`llm_successes` 只计解析成功。
+- `agent/uv.lock` 被 Dockerfile 和 `.github/workflows/test.yml` 的 `uv export --frozen` 使用。直接依赖钉在 P0 记录的版本，包括 `langgraph==1.2.11`。
+- 主图仍然没有三 Specialist。Prometheus 的 `up` 查询会带上 scrape limitation。真实 RAGFlow completion 和真实 Loki 查询这次没有跑，状态是 `SKIPPED`。
+
 ## 提交
 
 两个 SHA 不是同一层：

@@ -18,7 +18,9 @@ docker compose -f docker-compose.yml up -d
 
 `docker/.env` sets `RAGFLOW_IMAGE=infiniflow/ragflow:v0.27.3`. `docker-compose.yml` starts RAGFlow. `docker-compose-base.yml` starts its MySQL, Redis, MinIO, and document engine. Their data stays in that Compose project's volumes. Stop it with `docker compose -f docker-compose.yml down` from `docker/`. Do not add `-v` unless you intend to delete those volumes.
 
-To turn this off, leave `RAGFLOW_BASE_URL` empty and do not pass `--profile ragflow`. Stopping the profile with `docker compose --profile ragflow down` keeps the volumes. The profile sets `API_PROXY_SCHEME=python`, the same value as that tag's `docker/.env`, so the Python API listens on 9380. RAGFlow and its MySQL, Elasticsearch, MinIO, and Valkey sit on the `ragflow` network. That Valkey is the only host named `redis` there. AlertFlow's own Redis stays on the default network, so the two passwords do not get mixed. The `agent` and `a2a-adapter` services join the `ragflow` network when those profiles are enabled. Elasticsearch answers 401 when security is on; its healthcheck is `curl http://localhost:9200`, matching the tag, because `curl -f` treats that 401 as failure and the API never starts. Health is `GET http://127.0.0.1:9380/api/v1/system/healthz`. Create the dataset `AlertFlow Operations Docs` and the native agent `AlertFlow Runbook Specialist` in that UI after a model is configured.
+To turn this off, leave `RAGFLOW_BASE_URL` empty and do not pass `--profile ragflow`. Stopping the profile with `docker compose --profile ragflow down` keeps the volumes. The profile sets `API_PROXY_SCHEME=python`, the same value as that tag's `docker/.env`, so the Python API listens on 9380. RAGFlow and its MySQL, Elasticsearch, MinIO, and Valkey sit on the `ragflow` network. That Valkey is the only host named `redis` there. AlertFlow's own Redis stays on the default network, so the two passwords do not get mixed. `a2a-adapter` joins both the default network and the `ragflow` network. The main `agent` service stays on the default network and reaches RAGFlow only through `A2A_ADAPTER_URL`. Elasticsearch answers 401 when security is on; its healthcheck is `curl http://localhost:9200`, matching the tag, because `curl -f` treats that 401 as failure and the API never starts.
+
+These states are not the same: the container process is up; Elasticsearch answers on 9200; `GET /api/v1/system/healthz` returns ok; a chat model, dataset, and native agent exist; `POST /api/v1/agents/chat/completions` returns `code` 0. Health is `GET http://127.0.0.1:9380/api/v1/system/healthz`. Create the dataset `AlertFlow Operations Docs` and the native agent `AlertFlow Runbook Specialist` in that UI after a model is configured.
 
 ## API
 
@@ -45,4 +47,4 @@ RAGFLOW_API_KEY=<api-key>
 RAGFLOW_AGENT_ID=<agent-id>
 ```
 
-Empty `RAGFLOW_BASE_URL` does not open a connection. This phase does not add an investigation tool or an A2A adapter.
+Empty `RAGFLOW_BASE_URL`, `RAGFLOW_API_KEY`, or `RAGFLOW_AGENT_ID` does not open a connection. The optional Runbook tool is `consult_runbook_agent`. It calls the `runbook` Compose profile, which runs `python -m alertflow_agent.a2a_adapter`. That profile is not the core investigation. The core agent does not need RAGFlow.

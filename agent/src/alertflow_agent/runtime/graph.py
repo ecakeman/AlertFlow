@@ -840,6 +840,8 @@ class Runner:
             "verification": state.get("verification"),
             "usage": {
                 "llm_calls": state["guard"]["llm_calls"],
+                "llm_attempts": state["guard"].get("llm_attempts", state["guard"]["llm_calls"]),
+                "llm_successes": state["guard"].get("llm_successes", 0),
                 "tool_calls": state["guard"]["tool_calls"],
                 "tokens": state["guard"]["tokens"],
                 "estimated": bool(state["guard"].get("tokens_estimated")),

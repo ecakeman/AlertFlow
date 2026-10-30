@@ -3,6 +3,7 @@ import threading
 import time
 
 import httpx
+import pytest
 import uvicorn
 
 from alertflow_agent.a2a_adapter.ragflow import parse_completion
@@ -38,7 +39,20 @@ class Context:
 def test_card_declares_only_runbook_research():
     card = build_card("http://a2a-adapter:8000")
     assert [skill.id for skill in card.skills] == ["runbook_research"]
+    assert list(card.default_input_modes) == ["application/json"]
     assert card.supported_interfaces[0].protocol_binding == "HTTP+JSON"
+
+
+def test_missing_ragflow_api_key_does_not_post(monkeypatch):
+    import httpx
+    from alertflow_agent.a2a_adapter.ragflow import research
+
+    def boom(*args, **kwargs):
+        raise AssertionError("ragflow was called")
+
+    monkeypatch.setattr(httpx, "post", boom)
+    with pytest.raises(RuntimeError, match="not configured"):
+        research("http://ragflow.test", "", "agent-1", "restart", 1)
 
 
 def test_uncited_completion_is_not_a_citation():
@@ -59,11 +73,17 @@ def test_repeat_message_does_not_call_ragflow_again():
     import alertflow_agent.a2a_adapter.server as server
     server.research = research
     ledger = MemoryLedger()
-    executor = RunbookExecutor(ledger, {"ragflow_base_url": "http://ragflow:9380", "ragflow_agent_id": "agent", "timeout_seconds": 5})
+    executor = RunbookExecutor(ledger, {"ragflow_base_url": "http://ragflow:9380", "ragflow_agent_id": "agent", "ragflow_api_key": "token", "timeout_seconds": 5})
     import asyncio
-    asyncio.run(executor.execute(Context(), Queue()))
-    asyncio.run(executor.execute(Context(), Queue()))
+
+    async def twice():
+        await executor.execute(Context(), Queue())
+        await executor.join()
+        await executor.execute(Context(), Queue())
+
+    asyncio.run(twice())
     assert calls == ["how do I restart the API"]
+    assert ledger.get_message("m1")["status"] == "completed"
     assert ledger.get_message("m1")["artifact"]["citations_available"] is True
 
 
@@ -170,6 +190,161 @@ def test_failed_lookup_is_a_coverage_gap():
         }
         result = run_tool("consult_runbook_agent", {"question": "restart"}, state, Settings(a2a_adapter_url=url), {})
         assert result["status"] == "error"
+        assert result["evidence_ids"] == []
         assert state["coverage"]["gaps"] == ["runbook agent did not answer"]
+        assert "runbook:runbook:run-http" not in state["evidence"]
     finally:
         http.should_exit = True
+
+
+def _ok_artifact():
+    return {
+        "schema": "runbook-research.v1",
+        "content": "restart the process",
+        "citations": [{"document_id": "doc", "id": "chunk"}],
+        "citations_available": True,
+    }
+
+
+def test_working_duplicate_stays_working_until_the_lookup_finishes():
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def research(base_url, api_key, agent_id, query, timeout):
+        calls.append(query)
+        started.set()
+        assert release.wait(2)
+        return _ok_artifact()
+
+    import alertflow_agent.a2a_adapter.server as server
+    import asyncio
+    server.research = research
+    ledger = MemoryLedger()
+    executor = RunbookExecutor(ledger, {"ragflow_base_url": "http://ragflow.test", "ragflow_api_key": "k", "ragflow_agent_id": "a", "timeout_seconds": 30})
+
+    async def go():
+        await executor.execute(Context(), Queue())
+        assert await asyncio.to_thread(started.wait, 2)
+        await executor.execute(Context(), Queue())
+        assert ledger.get_message("m1")["status"] == "working"
+        assert ledger.get_message("m1")["task_json"]["status"]["state"] == "TASK_STATE_WORKING"
+        assert len(calls) == 1
+        release.set()
+        await executor.join()
+
+    asyncio.run(go())
+    assert ledger.get_message("m1")["status"] == "completed"
+    assert len(calls) == 1
+
+
+def test_expired_working_task_fails_without_another_lookup():
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def research(base_url, api_key, agent_id, query, timeout):
+        calls.append(query)
+        started.set()
+        assert release.wait(2)
+        return _ok_artifact()
+
+    import alertflow_agent.a2a_adapter.server as server
+    import asyncio
+    server.research = research
+    ledger = MemoryLedger()
+    executor = RunbookExecutor(ledger, {"ragflow_base_url": "http://ragflow.test", "ragflow_api_key": "k", "ragflow_agent_id": "a", "timeout_seconds": 0})
+
+    async def go():
+        await executor.execute(Context(), Queue())
+        assert await asyncio.to_thread(started.wait, 2)
+        await asyncio.sleep(0.02)
+        stored = executor.read_task("task-1")
+        assert stored["status"] == "failed"
+        await executor.execute(Context(), Queue())
+        assert len(calls) == 1
+        release.set()
+        await executor.join()
+
+    asyncio.run(go())
+    assert ledger.get_message("m1")["status"] == "failed"
+    assert ledger.get_message("m1")["task_json"]["status"]["state"] == "TASK_STATE_FAILED"
+    assert len(calls) == 1
+
+
+def test_restart_fails_a_working_task_without_rerunning():
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def research(base_url, api_key, agent_id, query, timeout):
+        calls.append(query)
+        started.set()
+        assert release.wait(2)
+        return _ok_artifact()
+
+    import alertflow_agent.a2a_adapter.server as server
+    import asyncio
+    server.research = research
+    ledger = MemoryLedger()
+    settings = {"ragflow_base_url": "http://ragflow.test", "ragflow_api_key": "k", "ragflow_agent_id": "a", "timeout_seconds": 30}
+    executor = RunbookExecutor(ledger, settings)
+
+    async def go():
+        await executor.execute(Context(), Queue())
+        assert await asyncio.to_thread(started.wait, 2)
+        ledger.live.clear()
+        restarted = RunbookExecutor(ledger, settings)
+        row = restarted.read_task("task-1")
+        assert row["status"] == "failed"
+        assert row["task_json"]["status"]["state"] == "TASK_STATE_FAILED"
+        release.set()
+        await executor.join()
+
+    asyncio.run(go())
+    assert ledger.get_message("m1")["status"] == "failed"
+    assert len(calls) == 1
+
+
+def test_postgres_restart_fails_the_saved_working_task():
+    import os
+    from pathlib import Path
+
+    url = os.environ.get("ALERTFLOW_TEST_DATABASE_URL", "")
+    if not url:
+        import pytest
+        pytest.skip("ALERTFLOW_TEST_DATABASE_URL is not set")
+    import psycopg
+    from alertflow_agent.a2a_adapter.server import RunbookExecutor
+    from alertflow_agent.a2a_adapter.store import PostgresLedger
+
+    name = "alertflow_test_a2a_restart"
+    admin = url
+    if "/postgres" not in admin:
+        raise RuntimeError("maintenance database must be named postgres")
+    with psycopg.connect(admin, autocommit=True) as conn:
+        conn.execute(f'DROP DATABASE IF EXISTS "{name}"')
+        conn.execute(f'CREATE DATABASE "{name}"')
+    target = admin.rsplit("/", 1)[0] + "/" + name
+    try:
+        root = Path(__file__).resolve().parents[2] / "backend" / "internal" / "db" / "migrations"
+        sql = []
+        for filename in ("00018_a2a_adapter_tasks.sql", "00019_a2a_task_aliases.sql"):
+            text = (root / filename).read_text()
+            sql.append(text.split("-- +goose Down", 1)[0].replace("-- +goose Up", ""))
+        with psycopg.connect(target, autocommit=True) as conn:
+            conn.execute("\n".join(sql))
+        first = PostgresLedger(target)
+        executor = RunbookExecutor(first, {"timeout_seconds": 30})
+        assert first.claim("m1", "task-1", 30)
+        first.live.add("m1")
+        executor._store("task-1", "working", None)
+        restarted = RunbookExecutor(PostgresLedger(target), {"timeout_seconds": 30})
+        row = restarted.read_task("task-1")
+        assert row["status"] == "failed"
+        again = PostgresLedger(target).get_task("task-1")
+        assert again["status"] == "failed"
+        assert again["task_json"]["status"]["state"] == "TASK_STATE_FAILED"
+    finally:
+        with psycopg.connect(admin, autocommit=True) as conn:
+            conn.execute(f'DROP DATABASE IF EXISTS "{name}"')

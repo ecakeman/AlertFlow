@@ -155,6 +155,11 @@ def test_configured_query_writes_scoped_evidence_once():
     assert fact_id(catalog, result["evidence_ids"][0], "start") is None
     assert item["data"]["samples"] == 1
     assert item["data"]["value"] == "1"
+    assert "up is Prometheus scrape success, not API health" in item["limitations"]
+    probe = _state()
+    probe_result = run_tool("query", {"query": "probe_success"}, probe, _settings(), {"mcp": Recorder(text='[{"value": "1"}]')})
+    probe_item = probe["evidence"][probe_result["evidence_ids"][0]]
+    assert "up is Prometheus scrape success, not API health" not in probe_item["limitations"]
     assert "prom-secret" not in json.dumps(item)
     assert run_tool("series", {}, state, _settings(), {"mcp": client})["note"] == "unknown tool"
     assert [name for name, _ in client.calls] == ["query"]
@@ -183,7 +188,10 @@ def test_window_row_and_request_caps():
     assert item["data"]["samples"] == 2
     assert item["data"]["value"] == "alpha"
     assert "gamma" not in json.dumps(item)
-    assert item["limitations"] == ["truncated to the configured row cap"]
+    assert item["limitations"] == [
+        "truncated to the configured row cap",
+        "up is Prometheus scrape success, not API health",
+    ]
 
     huge = Recorder()
     blocked = _state()
@@ -467,7 +475,9 @@ def test_default_compose_keeps_optional_urls_empty():
     assert services["prometheus-mcp"]["profiles"] == ["observability"]
     assert services["loki-mcp"]["profiles"] == ["observability"]
     assert services["ragflow"]["profiles"] == ["ragflow"]
-    assert services["a2a-adapter"]["profiles"] == ["multi-agent"]
+    assert services["a2a-adapter"]["profiles"] == ["runbook"]
+    assert services["agent"]["networks"] == ["default"]
+    assert services["a2a-adapter"]["networks"] == ["default", "ragflow"]
     env = services["agent"]["environment"]
     assert env["PROMETHEUS_MCP_URL"] == "${PROMETHEUS_MCP_URL:-}"
     assert env["PROMETHEUS_MCP_TOKEN"] == "${PROMETHEUS_MCP_TOKEN:-}"

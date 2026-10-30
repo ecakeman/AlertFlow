@@ -38,7 +38,9 @@ either side hot-reload.
 
 ## Optional Compose profiles
 
-`docker compose up` starts the core services only. The scripts set an in-network URL only when that profile is part of the command and the variable is unset. A value already exported, including an empty string, is left as it is.
+`docker compose up` starts the core services only. Optional URLs come from the shell, then the root `.env`, then the empty Compose default. The scripts do not export those URLs. `--profile agent` starts the Python agent. `--profile runbook` starts only the external A2A adapter. `--profile ragflow` starts RAGFlow. The three core specialists are not separate profiles.
+
+Agent dependencies are locked with `uv`. From `agent/`: `uv sync --frozen --extra dev`, then `uv run pytest`. The image and CI use the same `agent/uv.lock`.
 
 ```bash
 scripts/up-core.sh

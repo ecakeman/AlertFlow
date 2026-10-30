@@ -401,6 +401,8 @@ def _mcp(name, args, state, settings, clients) -> dict:
         if recorded.get(key) is not None:
             data[key] = recorded[key]
     limitations = ["truncated to the configured row cap"] if truncated else []
+    if source == "prometheus" and _prom_metric(str(recorded.get("query") or "")) == "up":
+        limitations.append("up is Prometheus scrape success, not API health")
     digest = hashlib.sha256(json.dumps(sent, sort_keys=True, default=str).encode()).hexdigest()[:8]
     ident = f"{source}:{name}:{digest}"
     value = data.get("value") or ""
@@ -495,6 +497,10 @@ def _mcp_request(name, args, state, settings, source):
         "step": _prom_step(start, end, cap),
         "truncation_limit": cap,
     }, {**recorded, "start": start_text, "end": end_text}
+
+
+def _prom_metric(query: str) -> str:
+    return (query or "").strip().split("{", 1)[0].strip()
 
 
 def _rfc3339(epoch: int) -> str:
@@ -628,10 +634,18 @@ def _consult_runbook(args, state, settings, clients) -> dict:
         _gap(state, "runbook agent did not answer")
         return {"status": "error", "note": "runbook lookup failed", "evidence_ids": []}
     ident = f"runbook:{message_id}"
-    _add(state, ident, "runbook", message_id, "runbook", str(artifact.get("content") or "")[:400], {
+    content = str(artifact.get("content") or "")[:8000]
+    citations = [
+        item for item in (artifact.get("citations") or [])
+        if isinstance(item, dict) and item.get("document_id") and item.get("id")
+    ]
+    cited = bool(artifact.get("citations_available")) and bool(citations)
+    _add(state, ident, "runbook", message_id, "runbook", content[:400], {
         "schema": artifact.get("schema"),
-        "citations_available": bool(artifact.get("citations_available")),
-        "citations": artifact.get("citations") or [],
+        "content": content,
+        "citations_available": cited,
+        "citations": citations if cited else [],
+        "source": "ragflow",
     })
     return {"status": "success", "data": {"citations_available": bool(artifact.get("citations_available"))}, "evidence_ids": [ident]}
 
