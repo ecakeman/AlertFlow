@@ -53,6 +53,9 @@ _ALLOWED_SKILLS = {"service-unavailable", "intermittent-failure", "latency-degra
 def run_tool(name: str, args: dict, state: dict, settings, clients: dict) -> dict:
     args = args or {}
     if name == "finish_investigation":
+        # 数据源可用、故障又属于 HTTP/运行时类时，没查过的源必须显式记为 empty，
+        # 不能让模型“静默跳过”后报告看起来像查过。这里不强制调用次数，只记事实。
+        _note_unqueried_sources(state, settings)
         state["finished"] = True
         return {"status": "success", "data": {"note": args.get("note", "")}, "evidence_ids": []}
     if name == "request_replan":
@@ -486,18 +489,22 @@ def _mcp(name, args, state, settings, clients) -> dict:
         sent, recorded = _mcp_request(name, args, state, settings, source)
     except MCPError as exc:
         _mcp_gap(state, source, exc.kind)
+        _note_mcp_activity(state, source, "unavailable", error=f"{source} {exc.kind}")
         return {"status": "error", "note": _mcp_note(source, exc.kind), "evidence_ids": []}
     if sent is None:
         return {"status": "invalid_request", "note": "unknown tool", "evidence_ids": []}
     if int(state.get("mcp_calls") or 0) >= int(settings.mcp_max_calls):
         _mcp_gap(state, source, "budget")
+        _note_mcp_activity(state, source, "unavailable", error=f"{source} budget")
         return {"status": "error", "note": _mcp_note(source, "budget"), "evidence_ids": []}
     encoded = json.dumps(sent, sort_keys=True, default=str).encode()
     if len(encoded) > int(settings.mcp_max_response_bytes):
         _mcp_gap(state, source, "too_large")
+        _note_mcp_activity(state, source, "unavailable", error=f"{source} too_large")
         return {"status": "error", "note": _mcp_note(source, "too_large"), "evidence_ids": []}
     # 调用前记账：超时/失败同样消耗额度（§7.7.12）
     state["mcp_calls"] = int(state.get("mcp_calls") or 0) + 1
+    _note_mcp_activity(state, source, counted=True)
     # instant query 的 recorded 只有 timestamp，没有起止；用 1 秒窗口近似，仍派生自父级窗口
     end_dt = parse_time(recorded.get("end") or recorded.get("timestamp"))
     start_dt = parse_time(recorded.get("start")) or (
@@ -505,6 +512,7 @@ def _mcp(name, args, state, settings, clients) -> dict:
     )
     if start_dt is None or end_dt is None:
         _mcp_gap(state, source, "malformed")
+        _note_mcp_activity(state, source, "unavailable", error=f"{source} malformed")
         return {"status": "error", "note": _mcp_note(source, "malformed"), "evidence_ids": []}
     start, end = int(start_dt.timestamp()), int(end_dt.timestamp())
     scope = _scope_for(state, settings, start, end)
@@ -528,14 +536,19 @@ def _mcp(name, args, state, settings, clients) -> dict:
     result = _first(_retrieve(state, settings, clients, scope, [request],
                               purpose="historical_recall" if source == "loki" else "targeted_followup"), source)
     if result is None:
+        _note_mcp_activity(state, source, "unavailable")
         return {"status": "error", "note": "retrieval failed", "evidence_ids": []}
     if result.status in _FAILED_STATUSES:
         meta = result.query_metadata or {}
         kind = str(meta.get("mcp_kind") or (result.error.category if result.error else "") or "malformed")
+        # error 只进 coverage 细节，不改变既有的 gap code 列表（便于真机排查）
+        detail = str((result.error.message if result.error else "") or "")[:200]
         _mcp_gap(state, source, kind)
+        _note_mcp_activity(state, source, "unavailable", error=detail or f"{source} {kind}")
         return {"status": "error", "note": _mcp_note(source, kind), "evidence_ids": []}
     text = _scrub(str((result.query_metadata or {}).get("text") or ""), settings)
     if name not in EVIDENCE_TOOLS:
+        _note_mcp_activity(state, source, "ok")
         return {
             "status": "success",
             "evidence_ids": [],
@@ -545,12 +558,25 @@ def _mcp(name, args, state, settings, clients) -> dict:
     try:
         summary = summarize_result(text, source, limit)
     except MCPError as exc:
+        # empty 与 unavailable 必须区分：空结果是“该来源没数据”，不是“来源不可用”；
+        # 上游 API 返回 error 时把错误文本带进 coverage，便于真机排查。
         _mcp_gap(state, source, exc.kind)
+        detail = str(getattr(exc, "message", "") or "")
+        _note_mcp_activity(
+            state, source, "empty" if exc.kind == "empty" else "unavailable",
+            error=None if exc.kind == "empty" else (detail or f"{source} {exc.kind}"),
+        )
         return {"status": "error", "note": _mcp_note(source, exc.kind), "evidence_ids": []}
     truncated = summary.pop("truncated", False)
+    _note_mcp_activity(state, source, "truncated" if truncated else "ok")
+    # 实际发给上游的 selector/query：登记层用它证明候选带精确 selector（§7.7.6）
+    selector_text = str(sent.get("query") or "")
+    if not selector_text and isinstance(sent.get("matches"), list) and sent["matches"]:
+        selector_text = str(sent["matches"][0])
     data = {
         "source": source,
         "query": _scrub(str(recorded.get("query") or ""), settings),
+        "selector": _scrub(selector_text, settings),
         "limit": recorded.get("limit") or limit,
         **summary,
     }
@@ -718,6 +744,7 @@ _MCP_NOTES = {
     "unmapped": "{source} has no service selector; this source has no evidence",
     "unscoped": "{source} query could not be scoped; this source has no evidence",
     "budget": "{source} call budget is exhausted; this source has no evidence",
+    "upstream": "{source} returned an error; this source has no evidence",
 }
 
 
@@ -865,6 +892,89 @@ def _consult_runbook(args, state, settings, clients) -> dict:
         "data": {"citations_available": cited, "citations": len(citations)},
         "evidence_ids": [ident],
     }
+
+_RUNTIME_MARKERS = (
+    "timeout", "timed out", "latency", "connection", "reset", "refused",
+    "tls", "5xx", "500", "502", "503", "504",
+)
+
+
+def _http_runtime_fault(state) -> bool:
+    """本 run 是否持有该服务的 HTTP 检查样本。
+
+    判据优先用“有没有检查数据”，而不是 monitor 事件的形状：只要本 run 拿到过
+    任何检查行（窗口内 status_code 非 0 的 HTTP 检查），就按 HTTP/运行时类故障处理，
+    必须要求指标/日志来源各查一次。事件状态与错误文本仍作为补充判据（无检查数据时
+    由它们兜底）。不向模型提问，也不以工具调用次数作判据。
+    """
+    if state.get("raw_checks"):
+        return True
+    event = state.get("event") or {}
+    try:
+        code = int(event.get("status"))
+    except (TypeError, ValueError):
+        code = 0
+    if 500 <= code < 600:
+        return True
+    text = " ".join(str(event.get(key) or "") for key in ("error", "message", "title")).lower()
+    if any(marker in text for marker in _RUNTIME_MARKERS):
+        return True
+    for row in state.get("raw_checks") or []:
+        try:
+            code = int(row.get("status_code") or 0)
+        except (TypeError, ValueError):
+            code = 0
+        if 500 <= code < 600:
+            return True
+        if any(marker in str(row.get("error") or "").lower() for marker in _RUNTIME_MARKERS):
+            return True
+    return False
+
+
+def _mcp_activity(state, source: str) -> dict:
+    return state.setdefault("mcp_activity", {}).setdefault(
+        source, {"calls": 0, "status": "empty"})
+
+
+def _note_mcp_activity(state, source: str, status: str | None = None,
+                       counted: bool = False, error: str | None = None) -> None:
+    entry = _mcp_activity(state, source)
+    if counted:
+        entry["calls"] = int(entry.get("calls") or 0) + 1
+    if status:
+        entry["status"] = status
+        if status == "ok":
+            entry.pop("error", None)
+    if error:
+        entry["error"] = str(error)[:200]
+
+
+def _note_unqueried_sources(state, settings) -> None:
+    """把“源可用但本次一次没查”记成 coverage 里的 empty + gap。
+
+    只在本 run 有 HTTP 检查样本（或事件本身呈现 HTTP/运行时故障）时记；
+    确实没有任何检查数据时跳过历史/时间线查询是合理行为。
+    """
+    if not _http_runtime_fault(state):
+        return
+    tools = state.get("mcp_tools") or []
+    for source, enabled in (
+        ("prometheus", bool(str(settings.prometheus_mcp_url or "").strip())
+         and any(name in PROMETHEUS_TOOLS for name in tools)),
+        ("loki", bool(str(settings.loki_mcp_url or "").strip())
+         and any(name in LOKI_TOOLS for name in tools)),
+    ):
+        if not enabled:
+            continue
+        entry = _mcp_activity(state, source)
+        if int(entry.get("calls") or 0) > 0:
+            continue
+        entry["status"] = "empty"
+        code = f"{source.upper()}_NOT_QUERIED"
+        gaps = state.setdefault("coverage", {}).setdefault("gaps", [])
+        if code not in gaps:
+            gaps.append(code)
+
 
 def _gap(state, text: str) -> None:
     state.setdefault("coverage", {}).setdefault("gaps", []).append(text)

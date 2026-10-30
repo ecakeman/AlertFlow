@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     alertflow_grpc_target: str = ""
     alertflow_agent_grpc_token: str = ""
     # This process's task server. Delivery dials it with AGENT_TASK_GRPC_TOKEN.
-    agent_grpc_addr: str = ":9000"
+    agent_grpc_addr: str = "0.0.0.0:9000"
     agent_task_grpc_token: str = ""
     # timeline reads runtime events from Go. legacy polls the service diagnostics URL.
     agent_diagnostics_mode: str = "timeline"

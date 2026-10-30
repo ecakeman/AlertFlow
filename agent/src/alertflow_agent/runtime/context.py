@@ -217,7 +217,13 @@ def build_blocks(node: str, state: dict) -> list[Block]:
         *([Block("mcp_tools", PIN, [
             "Optional evidence tools, only these: " + ", ".join(state["mcp_tools"])
             + ". " + (state.get("mcp_scope") or "")
-            + " A failure means that source has no evidence. Do not send credentials.",
+            + " These sources are configured. Whenever this run has HTTP check data for the service"
+            + " (any check sample exists, whatever its status code), query metrics at least once AND logs"
+            + " at least once before finish_investigation, even if the checks or the timeline already look"
+            + " conclusive; one targeted query per source is enough. Never repeat an identical query. An"
+            + " empty or failed answer only proves absence for that source: report it as empty in coverage"
+            + " instead of ignoring it."
+            + " Do not send credentials.",
         ], protect=True)] if node == "lead" and state.get("mcp_tools") else []),
         *([Block("runbook_tool", PIN, [
             "consult_runbook_agent is available once this run. Call it only when evidence is "

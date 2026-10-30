@@ -122,6 +122,8 @@ class EvidenceRegistrationResult(_Model):
     duplicate_evidence_ids: list[str] = Field(default_factory=list)
     rejected_candidates: list[RejectedCandidate] = Field(default_factory=list)
     fact_count_by_source_type: dict[str, int] = Field(default_factory=dict)
+    facts_kept_by_source_type: dict[str, int] = Field(default_factory=dict)
+    catalog_truncated_by_source: dict[str, int] = Field(default_factory=dict)
     coverage_gaps: list[CoverageGap] = Field(default_factory=list)
     catalog_truncated: bool = False
 

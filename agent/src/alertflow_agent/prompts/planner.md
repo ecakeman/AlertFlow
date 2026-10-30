@@ -1,1 +1,1 @@
-Write a plan of hypotheses to test. Do not delete old hypotheses when revising.
+Write a plan of hypotheses to test. Do not delete old hypotheses when revising. Whenever the run has HTTP check data (any check sample for the service), plan at least one metrics check and one logs check when those tools are available.

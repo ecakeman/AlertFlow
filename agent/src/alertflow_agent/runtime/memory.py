@@ -76,8 +76,12 @@ def build_card(state: dict, report: dict) -> EpisodeCard:
     error_classes: list[str] = []
     if isinstance(errors, dict):
         for code, n in (errors.get("status_codes") or {}).items():
-            if n:
-                status_codes.append(int(code))
+            if not n:
+                continue
+            try:
+                status_codes.append(int(float(code)))
+            except (TypeError, ValueError):
+                continue
         error_classes = [k for k, v in (errors.get("classes") or {}).items() if v]
 
     abnormal: list[SignatureItem] = []

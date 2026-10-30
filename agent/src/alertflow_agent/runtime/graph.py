@@ -9,7 +9,13 @@ from alertflow_agent.analysis.errors import classify_error
 from alertflow_agent.analysis.stats import error_stats, latency_stats
 from alertflow_agent.analysis.timeline import coverage, key_checks, segments, status_counts
 from alertflow_agent.integrations.alertflow import collect_checks, iso_now, normalize_check
-from alertflow_agent.integrations.mcp import enabled_mcp_tools, scope_hint, sources_from_settings
+from alertflow_agent.integrations.mcp import (
+    LOKI_TOOLS,
+    PROMETHEUS_TOOLS,
+    enabled_mcp_tools,
+    scope_hint,
+    sources_from_settings,
+)
 from alertflow_agent.integrations.project_diagnostics import fetch, load_config
 from alertflow_agent.runtime.guards import before_lead, fresh_guard, note_tool
 from alertflow_agent.runtime.context_manager import ContextManager
@@ -76,6 +82,7 @@ class GraphState(TypedDict, total=False):
     # 只用于建 Evidence Registry；后续深挖仍走查询工具。
     provided_context: dict
     mcp_tools: list
+    mcp_activity: dict
 
 
 def _epoch(value: str) -> int:
@@ -835,8 +842,15 @@ class Runner:
             "rejected": len(result.rejected_candidates),
             "rejected_candidates": [item.model_dump(mode="json") for item in result.rejected_candidates],
             "fact_count_by_source_type": result.fact_count_by_source_type,
+            "facts_kept_by_source_type": result.facts_kept_by_source_type,
             "catalog_truncated": result.catalog_truncated,
+            "catalog_truncated_by_source": result.catalog_truncated_by_source,
         }
+        if result.catalog_truncated:
+            # 截断本身也是 coverage 事实：报告不能看起来“所有来源都完整”
+            gaps = state["coverage"].setdefault("gaps", [])
+            if "CATALOG_TRUNCATED" not in gaps:
+                gaps.append("CATALOG_TRUNCATED")
         state["evidence_registry"] = manager.registry()
         return manager, manager.catalog()
 
@@ -893,6 +907,48 @@ class Runner:
             return "revise"
         return "persist"
 
+    def _coverage_sources(self, state) -> dict:
+        """按来源汇报本次运行的真实可用性与采集结果（§7.7 报告 coverage）。
+
+        状态只陈述事实：ok / empty / truncated / unavailable / disabled。
+        不改变报告其他字段，也不据此放宽或收紧验证。
+        """
+        tools = state.get("mcp_tools") or []
+        activity = state.get("mcp_activity") or {}
+        sources: dict = {}
+        for name, value in (state.get("source_status") or {}).items():
+            sources[str(name)] = {"enabled": True, "status": str(value)}
+        sources.setdefault("alertflow", {
+            "enabled": True,
+            "status": "ok" if state.get("evidence") else "empty",
+        })
+        for source, names in (("prometheus", PROMETHEUS_TOOLS), ("loki", LOKI_TOOLS)):
+            enabled = any(name in tools for name in names)
+            entry = activity.get(source) or {}
+            sources[source] = {
+                "enabled": enabled,
+                "calls": int(entry.get("calls") or 0),
+                "status": "disabled" if not enabled else str(entry.get("status") or "empty"),
+            }
+            if entry.get("error"):
+                sources[source]["error"] = str(entry["error"])[:200]
+        runbook_enabled = bool(str(self.settings.a2a_adapter_url or "").strip())
+        runbook_used = any(
+            (item or {}).get("source_type") == "runbook"
+            for item in (state.get("evidence") or {}).values()
+        )
+        sources["runbook"] = {
+            "enabled": runbook_enabled,
+            "status": "disabled" if not runbook_enabled else ("ok" if runbook_used else "empty"),
+        }
+        memory_enabled = bool(getattr(self, "memory", None)) and bool(self.settings.memory_enabled)
+        memory_saved = bool((state.get("memory") or {}).get("saved"))
+        sources["memory"] = {
+            "enabled": memory_enabled,
+            "status": "disabled" if not memory_enabled else ("ok" if memory_saved else "empty"),
+        }
+        return sources
+
     def persist(self, state):
         run_id = state["run_id"]
         if state.get("cancelled") or self._stop_if_cancelled(state):
@@ -919,6 +975,7 @@ class Runner:
                 "check_samples": len(state.get("raw_checks") or []),
                 "diagnostic_source": state.get("diagnostic_source") or "not_configured",
                 "gaps": state["coverage"].get("gaps") or [],
+                "sources": self._coverage_sources(state),
             },
             "verification": state.get("verification"),
             "evidence_registration": state.get("evidence_registration"),
@@ -1000,8 +1057,12 @@ class Runner:
             state["memory"] = _remember(state, state.get("report") or {}, self.memory, self.embed, self.settings)
             self.store.append_event(state["run_id"], "memory.written", state["memory"])
         except Exception as exc:  # noqa: BLE001 - 记忆失败不得影响诊断
-            log.warning("remember failed: %s", type(exc).__name__)
-            self.store.append_event(state["run_id"], "memory.failed", {"error": type(exc).__name__})
+            # 保留完整 traceback：只记类型名会让真实运行里的 ValueError 无法定位。
+            log.exception("remember failed: %s", type(exc).__name__)
+            self.store.append_event(state["run_id"], "memory.failed", {
+                "error": type(exc).__name__,
+                "message": str(exc)[:500],
+            })
         return state
 
     def _prior_report(self, row: dict):

@@ -179,13 +179,100 @@
 cd agent && export PATH="$HOME/.local/bin:$PATH"
 uv sync --frozen --extra dev        # exit 0
 uv run --frozen --extra dev pytest -q
-# 202 passed, 3 skipped, 1 warning in 6.54s   (exit 0)
+# 231 passed, 4 skipped, 1 warning in 9.12s   (exit 0)
 ```
 
 - 基线（改动前）：126 passed / 3 skipped（`uv run` 需 `--extra dev`，默认 frozen sync 不含 pytest）。
 - 新增测试：`test_cognition_window.py`(16)、`test_evidence_manager.py`(14)、`test_memory_timeline.py`(6)、
   `test_context_manager.py`(9)、`test_runbook_contract.py`(20)、`test_unified_retrieval.py`(3)、
-  `test_report_facts.py`(4)、`test_budget_ledger.py`(4)。
-- 3 skipped 为 Postgres ledger 两例 + 一处依赖 `ALERTFLOW_TEST_DATABASE_URL` 的用例（既有，未改）。
+  `test_report_facts.py`(4)、`test_budget_ledger.py`(4)、`test_mcp_guidance.py`(7)、
+  `test_memory_remember.py`(6)、`test_catalog_quota.py`(3)；C7.4 追加 5 例 MCP selector/状态语义测试。
+- 4 skipped：Postgres ledger 两例（`tests/test_runbook.py:386/429`）、`test_memory_remember.py:108`
+  （均依赖 `ALERTFLOW_TEST_DATABASE_URL`）、`test_events.py:38`（本地角色无法 CREATE DATABASE，既有）。
 - 真机/外部依赖：RAGFlow 真调用、Go gRPC 集群链路、Prometheus/Loki 真 MCP 均 **SKIPPED/UNVERIFIED**，
   Mock/fixture 结果不得标记为真实集成通过（§7.7.14-14）。
+
+
+---
+
+## 8. P6 真实 run 驱动的修复（2026-10-30）
+
+真实 run：`624d23a8-033f-486b-86a4-ad05a13e67f8`（service `fault-lab`，incident 4，503 注入态）。
+报告证据从集群只读取回后解析（`/tmp/p6_run.json`、`/tmp/p6_report.json`、`/tmp/p6_evidence.json`）。
+
+### 8.1 Lead 未查询指标/日志（已修）
+
+- 现象：`fact_count_by_source_type` = {checks 11, timeline 5, go_metric 1, diagnostic 6, kubernetes 12}，
+  prometheus/loki 为 0；`tool_calls=3`，但两个 MCP endpoint 在 Pod 内 initialize 均 200。
+- 根因：`prompts/lead.md` 未提指标/日志工具；`runtime/context.py` 的 mcp_tools 块只是
+  “Optional evidence tools”，没有使用判据。
+- 修复：lead/planner 提示词 + mcp_tools 块给出“本 run 只要持有 HTTP 检查样本（任何检查行）
+  且源已配置，就必须各查一次指标/日志”的判据；`finish_investigation` 对未查询的已启用来源记
+  `*_NOT_QUERIED` gap 并在 `report.coverage.sources` 标记为 `empty`；不硬编码调用次数断言。
+- 判据修正（incident 6 真机 run 复测暴露）：原 `_http_runtime_fault` 只认 monitor 事件的
+  5xx/错误文本，事件形状不同（非 5xx 的 monitor 告警）时兜底静默失效。现改为优先判断
+  `state["raw_checks"]` 是否非空（有 HTTP 检查样本即触发），事件 5xx 仅作无检查数据时的补充
+  判据；完全没有 HTTP 检查数据才允许跳过。
+- 验证：`tests/test_mcp_guidance.py`（9）覆盖 503 故障必查、有检查但事件非 5xx 仍必查、
+  无检查数据不记、事件 5xx 无检查数据仍必查、未配置源不记、run 报告 coverage.sources 形状。
+  真实 run 复测由 lead 触发（本 Agent 未新增真实 LLM 调用）。
+
+### 8.2 remember 失败（已修）
+
+- 现象：agent Pod 日志 `remember failed: ValueError`；agent DB `episodes`/`timeline_attachments` 均为 0。
+- 根因（用真实 state 复现）：P6 证据里的检查行来自 Go JSON，数字是 float
+  （`statusCode 503.0`、`id 2.0`、`attempts 3.0`）；`error_stats` 以 `str(status_code)` 生成键 `"503.0"`，
+  `memory.build_card` 再 `int("503.0")` → `ValueError: invalid literal for int() with base 10: '503.0'`。
+- 修复：`normalize_check` 用 `_int_or_none` 归一数字；`error_stats` 用 `_code_key` 规范化状态码键；
+  `build_card` 用 `int(float(code))` 防御解析；`graph.remember` 改 `log.exception` 并附异常文本，
+  不再只记录类型名。
+- 验证：
+  - 真实 P6 state + `InMemoryMemoryRepo`：`saved=True`、`attachment_saved=True`（anchor incident 4，
+    trust `validated_agent_report`）。
+  - 本地 pgvector（`alertflow-p1-pg`，127.0.0.1:55432）新建 `alertflow_agent_repro` 并应用
+    `agent/schema.sql`（含 `timeline_attachments`）：真跑 `MemoryRepo` 写入 episodes=1、
+    timeline_attachments=1；重跑 version=2、attachment_saved=False（幂等）；旧 `get_profile`/
+    `list_recent` 可读。
+  - `tests/test_memory_remember.py`（6，其中 1 例依赖 `ALERTFLOW_TEST_DATABASE_URL`）。
+
+### 8.3 数据质量三项（已修）
+
+1. `tl:coverage` 曾被 `INVALID_SOURCE` 拒绝：`timeline` 是合法来源，`SOURCE_MAP` 已映射；
+   用真实 P6 证据重跑登记：accepted 36 / rejected 0（修前 35/1）。
+2. `catalog_truncated` 原先全局截断（后出现的来源会被整类挤掉）：改为按来源配额
+   （`_select_with_quota`），`catalog_truncated_by_source`/`facts_kept_by_source_type` 进
+   `evidence_registration`，并追加 `RESULT_TRUNCATED` gap；`graph._register_evidence` 另把
+   `CATALOG_TRUNCATED` 写进 `coverage.gaps`，报告 coverage 可见。
+   真实 P6 重跑：kept={diagnostic 37, checks 20, go_metric 3, kubernetes 20, timeline 20}，
+   dropped={diagnostic 34, checks 41, kubernetes 12, timeline 35}（prometheus/loki 本 run 无数据）。
+3. `report.coverage` 已补 `sources`（按来源 `{enabled,calls,status}`），见 8.1。
+
+### 8.4 MCP 候选缺 selector 与 empty/unavailable 混淆（已修，2026-10-30 第二次真机 run）
+
+- 现象：run `9defce67-947c-4b26-a3b4-2c950019e3c3` 中 loki 调用 status `ok`，但候选以
+  `SELECTOR_MISSING` 被拒；prometheus 调用 status `unavailable` 且伴随 `PROMETHEUS_EMPTY`，
+  无法区分“工具执行失败”与“空结果”。
+- 根因：MCP 证据 `data` 未保存实际发出的 selector（只有 summary 文本），登记层按
+  `source_locator/query_metadata` 找不到 selector；`summarize_result` 对上游 error payload
+  （`{"status":"error","error":...}`）走“无 rows/value”分支，被当成 empty。
+- 修复：
+  - `runtime/tools.py::_mcp` 把整形后实际发出的 `query`（label_values 取 `matches[0]`）写入
+    evidence `data["selector"]`；`runtime/evidence.py::candidates_from_evidence` 将其放入
+    `source_locator["selector"]`，旧证据缺该字段时回退 `payload["query"]`。
+  - `integrations/mcp.py`：`MCPError(kind, message)` 保留错误文本；`summarize_result` 先识别
+    上游 error payload → `MCPError("upstream", 文本)`；`_text` 的 malformed/auth 也带文本。
+  - `runtime/tools.py`：empty → `mcp_activity.status="empty"`（不记 error）；其它失败 →
+    `"unavailable"` + `mcp_activity[source]["error"]`（错误文本前 200 字）；`graph._coverage_sources`
+    仅在存在 error 时输出 `error` 字段。
+- 验证：`tests/test_mcp.py::test_mcp_evidence_candidate_is_registered_with_selector`、
+  `test_empty_mcp_result_is_empty_not_unavailable`、
+  `test_mcp_transport_error_is_unavailable_with_detail`、
+  `test_upstream_mcp_error_is_not_reported_as_empty`、
+  `test_upstream_mcp_error_detail_reaches_report_coverage`（5 例）。
+  真实 run 复测由 lead 触发；预期 `fact_count_by_source_type` 中 loki 出现在修好
+  selector 后 >0，prometheus 仅在有真实数据时 >0（若上游仍返回错误则 coverage 记
+  `unavailable` + 错误文本，而不是静默 empty）。
+
+
+> 说明：Mock/fixture 结果不标记为真实集成通过；P6 真机复测（指标/日志实际被调用、
+> remember 实际写库）仍以 lead 侧新 run 为准，本文件只记录代码修复与本地/真实数据复现证据。

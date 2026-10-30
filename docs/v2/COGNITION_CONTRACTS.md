@@ -112,7 +112,15 @@ candidates_from_evidence(state, scope, window)   # 旧 evidence dict → 规范�
 `occurred_at?`、`observed_at?`、`recorded_at?`、`service_id`、`trust_level`。
 来源映射：`SOURCE_MAP`（旧 source_type → 规范 source_type/source_system）；8 个提取器：
 checks / diagnostic / timeline / kubernetes / go_metric / prometheus / loki / runbook。
-上限 `max_facts=100`，截断时 `catalog_truncated=True` 并追加 `RESULT_TRUNCATED` gap。
+`timeline` 是合法来源：`tl:coverage` 这类“时间线来源覆盖状态”事件必须登记为 `timeline`，
+不得作为未知来源拒绝。
+上限 `max_facts=100`；**截断按来源配额**（`_select_with_quota`）：行数超限时先给每个出现来源
+`max(1, max_facts // 来源数)` 保底名额，剩余名额按 `_FACT_PRIORITY` 顺序补足，再按
+`(来源优先级, evidence_id, path)` 排序，保证同一输入稳定且没有来源被“先到先得”整类挤掉。
+截断时 `catalog_truncated=True`、`catalog_truncated_by_source` 给出每来源丢弃数、
+`facts_kept_by_source_type` 给出每来源保留数，并追加 `RESULT_TRUNCATED` gap；
+`graph._register_evidence` 另外把 `CATALOG_TRUNCATED` 写进 `state["coverage"]["gaps"]`，
+报告 coverage 因此能看到“本 run 事实被截断”。
 
 ### C2.5 verify_report
 
@@ -258,7 +266,7 @@ embedding 只做候选召回，不参与时间排序；不复制 Go 原始行/�
 | 旧 Episode 兼容 + 附件幂等（7.7.7/14-9） | `tests/test_memory_timeline.py`（6） |
 | retrieve 状态/不互相取消/六区块（7.7.5/14-5,11） | `tests/test_context_manager.py`（9） |
 | Runbook 契约 + Mock A2A E2E（7.7.4D/7.1/7.2/7.3） | `tests/test_runbook_contract.py`（20）+ 既有 `tests/test_runbook.py` |
-| 全量回归 | `uv run --frozen --extra dev pytest -q` → 191 passed / 3 skipped |
+| 全量回归 | `uv run --frozen --extra dev pytest -q` → 224 passed / 4 skipped |
 
 未纳入本批（见 BASELINE 遗留）：tools/graph 全量改走 `ContextManager.retrieve`、chat 六区块复用、
 预算预留记账、checkpoint 幂等标记、Go 原始行 → TimelineNode 实时投影。
@@ -285,3 +293,51 @@ embedding 只做候选召回，不参与时间排序；不复制 Go 原始行/�
 - `refund`：仅当预留后请求未真正投递 provider 时退款；已投递的失败一律不退。
 - `begin_call`/`end_call` 记录 `llm_inflight`；`resume_run` 在恢复时把悬空 attempt 标
   `indeterminate_attempts += 1`，不新增 attempt/token（`tests/test_budget_ledger.py`）。
+
+
+## C7 — P6 真实 run 驱动的收敛（批次 5 之后）
+
+### C7.1 Lead 必须使用已启用的指标/日志来源
+
+- 触发条件（代码判定，不按工具调用次数）：优先看“本 run 是否有 HTTP 检查样本”——
+  `state["raw_checks"]` 非空即按 HTTP 类故障处理（窗口内任何 status_code 非 0 的检查行）；
+  没有检查样本时再用事件 5xx/错误文本兜底；完全没有任何 HTTP 检查数据才允许跳过。
+  这样 monitor 事件形状不同也不会让兜底静默失效（`tools._http_runtime_fault`）。
+- 提示词层：`prompts/lead.md` 与 `runtime/context.py` 的 `mcp_tools` 块明确“本 run 只要有
+  HTTP 检查数据（任何检查样本）就要各查一次指标/日志”，`planner.md` 要求计划包含 metrics/logs 查询。
+- 代码兜底：`finish_investigation` 时若某已启用来源调用数为 0，`_note_unqueried_sources`
+  记 `mcp_activity[source]={"calls":0,"status":"empty"}` 并追加
+  `PROMETHEUS_NOT_QUERIED`/`LOKI_NOT_QUERIED` gap（源未配置时不记）。
+- 报告 coverage：`report.coverage.sources` 按来源给 `{enabled, calls, status}`，
+  status ∈ `ok|empty|unavailable|truncated|disabled`；未查询的启用来源显示为 `empty`，
+  不得静默省略。
+
+### C7.2 Go 浮点数值归一化（remember 失败根因）
+
+Go 侧下推的 JSON 数字可能被反序列化为 float（如 `statusCode 503.0`、`id 2.0`、`attempts 3.0`）。
+规范：`integrations.alertflow.normalize_check` 统一用 `_int_or_none` 归一 id/latency_ms/status_code/attempts；
+`analysis.stats.error_stats` 用 `_code_key`（`str(int(float(value)))`）生成状态码键；
+`runtime.memory.build_card` 对状态码做 `int(float(code))` 防御解析。
+这样同一检查行的 int/float 两种表示进入记忆时结果一致，且不改变既有 int 输入行为。
+
+### C7.3 失败可观测性
+
+`graph.remember` 捕获异常时使用 `log.exception` 打完整 traceback，`memory.failed` 事件附
+`message`（异常文本前 500 字符），不再只记录异常类型名。
+
+### C7.4 MCP 候选定位与来源状态语义
+
+- **selector 传递**：`runtime.tools._mcp` 把实际发出的 MCP 参数里的 `query`（label_values 为
+  `matches[0]`）写入 evidence `data["selector"]`；`candidates_from_evidence` 仅对
+  `prometheus`/`loki` 写 `source_locator["selector"]`（非空时），旧证据回退 `payload["query"]`。
+  登记层 `SELECTOR_MISSING` 因此对真实 MCP 候选可通过。
+- **状态语义（不折叠）**：
+  - `empty`：来源可达、查询成功但无匹配数据；`mcp_activity[source]={"calls":1,"status":"empty"}`，
+    无 `error`；报告 coverage 记 `empty`，对应 `*_EMPTY` gap。
+  - `unavailable`：MCP/传输失败、工具缺失、超限、上游 API 返回 error 等；记
+    `mcp_activity[source]["error"]`（错误文本前 200 字），报告 coverage 带 `error` 字段，
+    对应 `*_<KIND>` gap（如 `PROMETHEUS_TIMEOUT`、`PROMETHEUS_UPSTREAM`）。
+  - 上游 error payload（`{"status":"error","error":...}`）一律 `MCPError("upstream")`，
+    不得被解析成 empty。
+- **验收**：`tests/test_mcp.py` 的 selector 登记、empty 不误标 unavailable、传输失败带 detail、
+  upstream error 带文本 4 组测试。

@@ -28,8 +28,10 @@ _PROMQL_KEYWORDS = {
 
 
 class MCPError(Exception):
-    def __init__(self, kind: str):
+    def __init__(self, kind: str, message: str = ""):
         self.kind = kind
+        self.message = str(message or "")
+        super().__init__(self.message or kind)
 
 
 class _CappedStream(httpx.AsyncByteStream):
@@ -352,6 +354,9 @@ def summarize_result(text: str, source: str, max_rows: int) -> dict:
     if stripped.lower() in {"", "[]", "{}", "null", "none", "no data"}:
         raise MCPError("empty")
     parsed = _json_or_none(stripped)
+    # 上游 API 明确返回 error 时不能当空结果：保留错误文本进 coverage 排查。
+    if isinstance(parsed, dict) and (parsed.get("status") == "error" or parsed.get("error")):
+        raise MCPError("upstream", str(parsed.get("error") or parsed.get("status"))[:200])
     rows, value = _rows_and_value(parsed, stripped)
     if not rows and value is None:
         raise MCPError("empty")
@@ -399,8 +404,8 @@ def _text(result, max_bytes: int) -> str:
         if any(mark in message for mark in ("429", "rate limit", "too many requests")):
             raise MCPError("rate_limit")
         if any(mark in message for mark in ("unauthorized", "forbidden")):
-            raise MCPError("auth")
-        raise MCPError("malformed")
+            raise MCPError("auth", message[:200])
+        raise MCPError("malformed", message[:200])
     text = _collect(result, max_bytes)
     if _is_empty_payload(text):
         raise MCPError("empty")

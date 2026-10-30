@@ -499,3 +499,116 @@ def test_default_compose_keeps_optional_urls_empty():
     assert env["RAGFLOW_API_KEY"] == "${RAGFLOW_API_KEY:-}"
     assert env["RAGFLOW_AGENT_ID"] == "${RAGFLOW_AGENT_ID:-}"
     assert env["A2A_ADAPTER_URL"] == "${A2A_ADAPTER_URL:-}"
+
+
+def test_coverage_sources_reflect_a_successful_metrics_query():
+    """已查询的指标来源在 report.coverage.sources 中必须是 ok 且 calls>0，不能显示为 empty。"""
+    store = MemoryStore()
+    row = event_row("mcp")
+    row["input_event"]["script"] = ["query", "finish"]
+    row["input_event"]["script_args"] = {"query": "up"}
+    store.insert_run(row)
+    client = Recorder(text='[{"value": "1"}]')
+    runner = Runner(_settings(), store, FakeAlertFlow(), ScriptedModel(), mcp=client)
+    runner.execute(row["id"])
+    report = store.latest_report(row["id"])["report"]
+    sources = report["coverage"]["sources"]
+    assert sources["prometheus"] == {"enabled": True, "calls": 1, "status": "ok"}
+    assert sources["loki"]["calls"] == 0
+    assert sources["loki"]["status"] == "empty"
+    assert sources["alertflow"]["status"] in {"ok", "empty"}
+    # 指标查过、日志没查：只提示缺失的那一个来源，不能连已查的也报缺失
+    gaps = report["coverage"]["gaps"]
+    assert "LOKI_NOT_QUERIED" in gaps
+    assert "PROMETHEUS_NOT_QUERIED" not in gaps
+
+
+def test_mcp_evidence_candidate_is_registered_with_selector():
+    """MCP 证据必须把实际发出的查询写成 selector，否则登记层会以 SELECTOR_MISSING 拒绝。"""
+    from alertflow_agent.runtime.evidence import EvidenceManager, candidates_from_evidence
+    from alertflow_agent.runtime.window import build_investigation_window, scope_from_event
+
+    state = _state()
+    prom = run_tool("query", {"query": "up"}, state,
+                    _settings(), {"mcp": Recorder(text='[{"value": "1"}]')})
+    loki = run_tool("loki_query", {"query": '{job="api"}'}, state,
+                    _settings(), {"mcp": Recorder(text='[{"line": "checkout failed"}]')})
+    assert prom["status"] == "success" and loki["status"] == "success"
+
+    window = build_investigation_window(state["event"])
+    scope = scope_from_event(state["event"], "run-mcp-selector", window=window)
+    candidates, rejected = candidates_from_evidence(state, scope, window)
+    assert rejected == []
+    manager = EvidenceManager(scope.run_id, scope)
+    result = manager.register_batch(candidates)
+    assert result.rejected_candidates == []
+    assert len(result.accepted_evidence_ids) == 2
+    assert result.fact_count_by_source_type == {"prometheus": 1, "loki": 1}
+    selectors = {
+        record.source_type: record.source_locator.get("selector")
+        for record in manager.records.values()
+    }
+    assert selectors["prometheus"].startswith("up")
+    assert 'service="api"' in selectors["prometheus"]
+    assert selectors["loki"] == '{service="api"} job="api"' or "job=\"api\"" in selectors["loki"]
+
+
+def test_empty_mcp_result_is_empty_not_unavailable():
+    """MCP 返回空结果只证明该来源本次没数据：coverage 必须是 empty，且不写 error。"""
+    store = MemoryStore()
+    row = event_row("mcp")
+    row["input_event"]["script"] = ["query", "finish"]
+    row["input_event"]["script_args"] = {"query": "up"}
+    store.insert_run(row)
+    runner = Runner(_settings(), store, FakeAlertFlow(), ScriptedModel(), mcp=Recorder(text="[]"))
+    runner.execute(row["id"])
+    report = store.latest_report(row["id"])["report"]
+    sources = report["coverage"]["sources"]
+    assert sources["prometheus"]["calls"] == 1
+    assert sources["prometheus"]["status"] == "empty"
+    assert "error" not in sources["prometheus"]
+    assert "PROMETHEUS_EMPTY" in report["coverage"]["gaps"]
+
+
+def test_mcp_transport_error_is_unavailable_with_detail():
+    """MCP 调用失败（timeout）是 unavailable，并把错误文本写进 coverage，便于真机排查。"""
+    store = MemoryStore()
+    row = event_row("mcp")
+    row["input_event"]["script"] = ["query", "finish"]
+    row["input_event"]["script_args"] = {"query": "up"}
+    store.insert_run(row)
+    runner = Runner(_settings(), store, FakeAlertFlow(), ScriptedModel(),
+                    mcp=Recorder(error=MCPError("timeout")))
+    runner.execute(row["id"])
+    report = store.latest_report(row["id"])["report"]
+    sources = report["coverage"]["sources"]
+    assert sources["prometheus"]["calls"] == 1
+    assert sources["prometheus"]["status"] == "unavailable"
+    assert "timeout" in sources["prometheus"]["error"]
+    assert "PROMETHEUS_TIMEOUT" in report["coverage"]["gaps"]
+
+
+def test_upstream_mcp_error_is_not_reported_as_empty():
+    """Prometheus/Loki 自己返回 error 时不能当 empty：要进 unavailable + 保留错误文本。"""
+    with pytest.raises(MCPError) as caught:
+        summarize_result('{"status":"error","error":"bad_data: unsupported function"}',
+                         "prometheus", 10)
+    assert caught.value.kind == "upstream"
+    assert "bad_data" in str(caught.value)
+
+
+def test_upstream_mcp_error_detail_reaches_report_coverage():
+    store = MemoryStore()
+    row = event_row("mcp")
+    row["input_event"]["script"] = ["query", "finish"]
+    row["input_event"]["script_args"] = {"query": "up"}
+    store.insert_run(row)
+    client = Recorder(text='{"status":"error","error":"bad_data: unsupported function"}')
+    runner = Runner(_settings(), store, FakeAlertFlow(), ScriptedModel(), mcp=client)
+    runner.execute(row["id"])
+    report = store.latest_report(row["id"])["report"]
+    sources = report["coverage"]["sources"]
+    assert sources["prometheus"]["calls"] == 1
+    assert sources["prometheus"]["status"] == "unavailable"
+    assert "bad_data" in sources["prometheus"]["error"]
+    assert "PROMETHEUS_UPSTREAM" in report["coverage"]["gaps"]

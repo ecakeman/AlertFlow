@@ -18,6 +18,7 @@ from typing import Iterable, Optional
 
 from alertflow_agent.runtime.verify import _scalars, build_catalog, verify as _verify_report
 from alertflow_agent.schemas.context import (
+    CoverageGap,
     InvestigationScope,
     InvestigationWindow,
     SourceSystem,
@@ -46,6 +47,8 @@ SOURCE_MAP: dict[str, tuple[SourceType, SourceSystem]] = {
     "alertflow_tls": ("diagnostic", "alertflow_grpc"),
     "analysis": ("diagnostic", "alertflow_grpc"),
     "application_diagnostics": ("timeline", "alertflow_grpc"),
+    # tl:coverage 这类“来源覆盖状态”事件本身就是时间线事件，不应被当成未知来源拒绝
+    "timeline": ("timeline", "alertflow_grpc"),
     "incident": ("timeline", "alertflow_grpc"),
     "agent": ("timeline", "alertflow_grpc"),
     "kubernetes": ("kubernetes", "alertflow_grpc"),
@@ -175,15 +178,19 @@ class EvidenceManager:
         rows.sort(key=lambda row: (
             _FACT_PRIORITY.get(row["source_type"], 9), row["evidence_id"], row["path"],
         ))
-        truncated = len(rows) > self.max_facts
-        self.facts = [
-            _entry(f"f{index}", row) for index, row in enumerate(rows[: self.max_facts], start=1)
-        ]
+        # 截断按来源配额：先保证每个来源都有保底名额，剩余名额再按来源优先级补，
+        # 避免“先到先得”把后出现的来源整类挤掉（例如 loki/prometheus 永远是 0）。
+        kept_rows, kept_by_source, dropped_by_source = _select_with_quota(rows, self.max_facts)
+        self.facts = [_entry(f"f{index}", row) for index, row in enumerate(kept_rows, start=1)]
+        truncated = bool(dropped_by_source)
         result.fact_count_by_source_type = counts
+        result.facts_kept_by_source_type = kept_by_source
+        result.catalog_truncated_by_source = dropped_by_source
         result.catalog_truncated = truncated
         if truncated:
             result.coverage_gaps.append(
-                {"code": "RESULT_TRUNCATED", "detail": f"facts>{self.max_facts}"}
+                CoverageGap(code="RESULT_TRUNCATED",
+                            detail="facts>" + str(self.max_facts) + " by source " + json.dumps(dropped_by_source))
             )
         self.last_result = result
         return result
@@ -377,6 +384,56 @@ def _fact_payload(record: EvidenceRecord) -> dict:
     return data
 
 
+def _select_with_quota(rows: list[dict], max_facts: int) -> tuple[list[dict], dict[str, int], dict[str, int]]:
+    """按来源配额挑选进入 Fact Catalog 的行。
+
+    返回 (选中行, 按来源保留数, 按来源丢弃数)。配额规则：
+    1) 每个出现的来源先拿 max_facts // 来源数 的保底名额（至少 1）；
+    2) 剩余名额按来源优先级顺序补足；
+    3) 选中行再按 (来源优先级, evidence_id, path) 排序，保证同一输入结果稳定。
+    """
+    if len(rows) <= max_facts:
+        kept = {source: 0 for source in {row["source_type"] for row in rows}}
+        for row in rows:
+            kept[row["source_type"]] = kept.get(row["source_type"], 0) + 1
+        return rows, kept, {}
+
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        groups.setdefault(row["source_type"], []).append(row)
+    order = sorted(groups, key=lambda source: _FACT_PRIORITY.get(source, 9))
+    quota = max(1, max_facts // max(1, len(order)))
+    chosen = {source: min(quota, len(groups[source])) for source in order}
+    if sum(chosen.values()) > max_facts:
+        # 来源数多于名额时，按优先级只保留前 max_facts 个来源各 1 条，绝不超上限
+        remaining = max_facts
+        for source in order:
+            keep = 1 if remaining > 0 else 0
+            chosen[source] = keep
+            remaining -= keep
+    remaining = max_facts - sum(chosen.values())
+    for source in order:
+        if remaining <= 0:
+            break
+        extra = min(remaining, len(groups[source]) - chosen[source])
+        chosen[source] += extra
+        remaining -= extra
+
+    picked: list[dict] = []
+    kept_by_source: dict[str, int] = {}
+    dropped_by_source: dict[str, int] = {}
+    for source in order:
+        picked.extend(groups[source][: chosen[source]])
+        kept_by_source[source] = chosen[source]
+        dropped = len(groups[source]) - chosen[source]
+        if dropped > 0:
+            dropped_by_source[source] = dropped
+    picked.sort(key=lambda row: (
+        _FACT_PRIORITY.get(row["source_type"], 9), row["evidence_id"], row["path"],
+    ))
+    return picked, kept_by_source, dropped_by_source
+
+
 def _fact_rows(record: EvidenceRecord) -> list[tuple[str, object]]:
     try:
         payload = _fact_payload(record)
@@ -419,8 +476,14 @@ def candidates_from_evidence(
             incident_id=scope.incident_id,
             source_type=source_type,
             source_system=source_system,
-            source_locator={"ledger_key": str(ledger_key),
-                            "source_ref": str(item.get("source_ref") or "")},
+            source_locator={
+                "ledger_key": str(ledger_key),
+                "source_ref": str(item.get("source_ref") or ""),
+                # MCP 证据把实际发出的 PromQL/LogQL 记录为 selector，供 SELECTOR_MISSING 校验
+                **({"selector": str(payload.get("selector") or payload.get("query"))}
+                   if (payload.get("selector") or payload.get("query"))
+                   and source_type in ("prometheus", "loki") else {}),
+            },
             query_metadata={"kind": str(item.get("kind") or "")},
             window=window,
             payload=payload,

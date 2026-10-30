@@ -86,12 +86,25 @@ def _accept(response, context, request_id: str = "") -> agent_pb2.TaskAccept:
     )
 
 
+def bind_addr(value: str) -> str:
+    """grpc-python 不接受 ":9000"（缺 host 会被判 unparseable host:port）。
+
+    兼容旧的省略 host 写法：补成 0.0.0.0，容器里才真正可绑定。
+    """
+    addr = (value or "").strip()
+    if not addr:
+        return "0.0.0.0:9000"
+    if addr.startswith(":"):
+        return f"0.0.0.0{addr}"
+    return addr
+
+
 def serve_tasks(settings, store) -> grpc.Server:
     server = grpc.server(
         ThreadPoolExecutor(max_workers=4),
         options=(("grpc.max_receive_message_length", 1024 * 1024),),
     )
     agent_pb2_grpc.add_AgentTaskServiceServicer_to_server(TaskServicer(settings, store), server)
-    server.add_insecure_port(settings.agent_grpc_addr or ":9000")
+    server.add_insecure_port(bind_addr(settings.agent_grpc_addr))
     server.start()
     return server

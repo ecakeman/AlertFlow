@@ -55,6 +55,14 @@ def latency_stats(rows: list[dict], series: list[dict], lookback_from: int) -> d
     }
 
 
+def _code_key(value) -> str:
+    """状态码键统一成十进制整数串：503.0 与 503 视为同一个码。"""
+    try:
+        return str(int(float(value)))
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def error_stats(rows: list[dict], classify) -> dict:
     classes = {k: 0 for k in ("timeout", "connection_refused", "connection_reset", "dns", "tls", "http_status", "unknown")}
     texts: dict[str, int] = {}
@@ -69,7 +77,7 @@ def error_stats(rows: list[dict], classify) -> dict:
         if text:
             texts[text] = texts.get(text, 0) + 1
         if row.get("status_code") is not None:
-            key = str(row["status_code"])
+            key = _code_key(row["status_code"])
             codes[key] = codes.get(key, 0) + 1
         attempts[str(row.get("attempts") or 1)] = attempts.get(str(row.get("attempts") or 1), 0) + 1
     top = [{"text": k, "count": v} for k, v in sorted(texts.items(), key=lambda kv: (-kv[1], kv[0]))[:5]]

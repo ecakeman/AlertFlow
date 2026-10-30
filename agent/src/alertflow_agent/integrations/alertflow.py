@@ -262,15 +262,31 @@ def _timeline_event(row) -> dict:
     }
 
 
+def _int_or_none(value):
+    """把 503 / 503.0 / "503.0" 统一成 int；None/非法值保留 None。
+
+    Go 侧 JSON 反序列化到泛型 map 时数字会变成 float64，下推上下文里的
+    check.id / statusCode / attempts 因此可能是 2.0、503.0。下游（错误统计、
+    记忆卡片）按整数用，必须在入口收敛，不能让 str(float) 变成 "503.0"。
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def normalize_check(row: dict) -> dict:
+    latency = row.get("latencyMs", row.get("latency_ms"))
     return {
-        "id": row.get("id"),
+        "id": _int_or_none(row.get("id")),
         "ts": _epoch(row["ts"]) if not isinstance(row.get("ts"), (int, float)) else int(row["ts"]),
         "status": row.get("status"),
-        "latency_ms": row.get("latencyMs", row.get("latency_ms")),
-        "status_code": row.get("statusCode", row.get("status_code")),
+        "latency_ms": _int_or_none(latency) if latency is not None else None,
+        "status_code": _int_or_none(row.get("statusCode", row.get("status_code"))),
         "error": row.get("error") or "",
-        "attempts": row.get("attempts") or 1,
+        "attempts": _int_or_none(row.get("attempts")) or 1,
     }
 
 

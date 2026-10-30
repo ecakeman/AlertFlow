@@ -11,5 +11,8 @@ RUN pip install --no-cache-dir uv \
  && uv export --frozen --no-dev --no-emit-project -o /tmp/requirements.txt \
  && uv pip install --system --no-cache -r /tmp/requirements.txt \
  && uv pip install --system --no-cache --no-deps -e .
+# 构建上下文的文件权限可能是 600（常见于以 root/编辑器创建的源码）；editable 安装后
+# 非 root 用户仍从 /app/src 读取，必须放开读权限，否则容器只能以 root 运行。
+RUN chmod -R a+rX /app/src
 EXPOSE 8000
 CMD ["alertflow-agent"]
