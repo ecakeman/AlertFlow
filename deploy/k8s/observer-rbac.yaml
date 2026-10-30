@@ -1,14 +1,80 @@
+# P2：Monitor 的 Kubernetes 只读权限（规格 §8.4）。
+#
+# 设计约束：
+#   - 只在需要的 namespace 建最小 Role + RoleBinding，**不建 ClusterRole /
+#     ClusterRoleBinding**，避免 monitor 看到集群里其它 namespace 的 workload。
+#   - 只有 get/list/watch；没有 secrets、没有写权限、没有 pods/log。
+#   - Monitor 使用独立的 ServiceAccount `alertflow-observer`（不使用 default），
+#     agent/publisher/consumer 等其它角色 automountServiceAccountToken=false。
+#
+# 应用方式：base/kustomization.yaml 已包含同名 SA；本文件由 scripts/deploy-core.sh
+# 在 `kubectl apply -k overlays/local-kind` 之后单独 apply（kustomize 不允许
+# resources 引用 kustomization 根目录之外的文件）。fault-lab 部署前由
+# scripts/deploy-fault-lab.sh 再应用一次（幂等）。
+#
+# 正向/反向验证见 README「RBAC 验证」：
+#   kubectl auth can-i list pods -n alertflow --as=system:serviceaccount:alertflow:alertflow-observer
+#   kubectl auth can-i get secrets -n alertflow --as=system:serviceaccount:alertflow:alertflow-observer
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: alertflow-observer
   namespace: alertflow
+  labels:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: monitor
+    app.kubernetes.io/part-of: alertflow
+automountServiceAccountToken: true
 ---
+# ---- namespace alertflow --------------------------------------------------
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: alertflow-observer
   namespace: alertflow
+  labels:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: monitor
+    app.kubernetes.io/part-of: alertflow
+rules:
+  # Pod 指标与事件：owner 追溯从 Pod 出发，事件用于状态变化注解。
+  - apiGroups: [""]
+    resources: ["pods", "events"]
+    verbs: ["get", "list", "watch"]
+  # Deployment/ReplicaSet：Pod -> ReplicaSet -> Deployment 的 owner UID 追溯。
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "deployments", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alertflow-observer
+  namespace: alertflow
+  labels:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/part-of: alertflow
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: alertflow-observer
+subjects:
+  - kind: ServiceAccount
+    name: alertflow-observer
+    namespace: alertflow
+---
+# ---- namespace fault-lab --------------------------------------------------
+# 同一 SA 在 fault-lab 也只需要只读：Fault Lab 的 Deployment 是被监控的演示服务。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: alertflow-observer
+  namespace: fault-lab
+  labels:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: monitor
+    app.kubernetes.io/part-of: alertflow
 rules:
   - apiGroups: [""]
     resources: ["pods", "events"]
@@ -21,7 +87,10 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: alertflow-observer
-  namespace: alertflow
+  namespace: fault-lab
+  labels:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/part-of: alertflow
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role

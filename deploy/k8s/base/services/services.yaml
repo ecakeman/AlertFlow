@@ -1,0 +1,111 @@
+# 只有真正提供入站端口的 workload 才有 Service。
+# monitor/publisher/consumer 没有入站 Service；publisher/consumer 只连 Kafka。
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertflow-api
+  labels:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: alertflow
+    alertflow.io/service-id: alertflow
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+    - name: grpc
+      port: 9090
+      targetPort: 9090
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertflow-agent
+  labels:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/part-of: alertflow
+    alertflow.io/service-id: alertflow
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: agent
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+    - name: grpc
+      port: 9000
+      targetPort: 9000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertflow-postgres
+  labels:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: postgres
+    app.kubernetes.io/part-of: alertflow
+    alertflow.io/service-id: alertflow
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertflow-kafka
+  labels:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: kafka
+    app.kubernetes.io/part-of: alertflow
+    alertflow.io/service-id: alertflow
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: kafka
+  # 单节点 KRaft 引导死锁：broker 未 Ready 前必须能通过 Service DNS 连到自己
+  # 的 controller(9093)，而默认 Endpoints 只含 Ready Pod → 永远连不上。
+  publishNotReadyAddresses: true
+  ports:
+    - name: broker
+      port: 9092
+      targetPort: 9092
+    # controller 端口必须也在 Service 上：KRaft 单 broker 模式下 broker 通过
+    # KAFKA_CONTROLLER_QUORUM_VOTERS=1@alertflow-kafka.alertflow.svc:9093 注册自己，
+    # Service 没映射 9093 时 TCP 连接会被丢包（日志表现为 socket connection setup timeout）。
+    - name: controller
+      port: 9093
+      targetPort: 9093
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertflow-redis
+  labels:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: redis
+    app.kubernetes.io/part-of: alertflow
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379

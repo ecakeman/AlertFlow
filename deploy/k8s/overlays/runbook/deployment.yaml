@@ -1,0 +1,104 @@
+# A2A adapter：把 Runbook 检索能力以 A2A 协议暴露给外部调用方。
+#
+# 说明：
+#   - 复用 alertflow-agent:local 镜像（同仓库的 python 包），command 改成
+#     `python -m alertflow_agent.a2a_adapter`。
+#   - 该进程没有 /healthz 端点（只有 /.well-known/agent-card.json 与 A2A rest
+#     路由），因此按规格 §9.8 **不添加任何伪造 TCP 探针**。
+#   - A2A_DATABASE_URL 为空时退化为 MemoryLedger（进程内、重启丢失），这里
+#     指向同一 PostgreSQL 的独立连接串（a2a_adapter_tasks 表由该进程自建）。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: a2a-adapter
+  labels:
+    app.kubernetes.io/name: a2a-adapter
+    app.kubernetes.io/component: runbook
+    app.kubernetes.io/part-of: alertflow
+    alertflow.io/service-id: runbook-a2a
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: a2a-adapter
+      app.kubernetes.io/component: runbook
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: a2a-adapter
+        app.kubernetes.io/component: runbook
+        app.kubernetes.io/part-of: alertflow
+        alertflow.io/service-id: runbook-a2a
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10000
+        runAsGroup: 10000
+        fsGroup: 10000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: a2a-adapter
+          image: alertflow-agent:local
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -m
+            - alertflow_agent.a2a_adapter
+          env:
+            - name: A2A_PORT
+              value: "8000"
+            - name: A2A_PUBLIC_URL
+              value: http://a2a-adapter.runbook.svc.cluster.local:8000
+            - name: A2A_TASK_TIMEOUT_SECONDS
+              value: "30"
+            - name: HOME
+              value: /tmp
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: A2A_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: alertflow-secrets
+                  key: agent-database-url
+                  optional: true
+            - name: RAGFLOW_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: alertflow-env
+                  key: RAGFLOW_BASE_URL
+                  optional: true
+            - name: RAGFLOW_AGENT_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: alertflow-env
+                  key: RAGFLOW_AGENT_ID
+                  optional: true
+            - name: RAGFLOW_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: alertflow-secrets
+                  key: ragflow-api-key
+                  optional: true
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: 30m
+              memory: 96Mi
+            limits:
+              cpu: 300m
+              memory: 384Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

@@ -1,0 +1,15 @@
+# 本地 Kind 单 Node overlay。
+#
+# 与 base 的差异：
+#   1. config.yaml 的 PVC 保持 ReadWriteOnce —— kind 默认 StorageClass `standard`
+#      是本地路径卷（local-path-provisioner），RWO 只保证“单节点可多 Pod 挂载”。
+#      本 overlay 只有 1 个节点，所以 API(读写) / Monitor(只读) / Delivery(只读)
+#      同时挂载是合法的；**多 Node 时必须换成支持 ReadWriteMany 的存储或在每个
+#      Node 上各留一份配置**，否则 Pod 会被调度到没有数据的节点。见 README。
+#   2. 镜像全部来自 `kind load docker-image`，imagePullPolicy: IfNotPresent，
+#      不访问任何 registry。
+#   3. 不固定 nodeName / nodeSelector，也不做副本数放大（规格 §9.3）。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base

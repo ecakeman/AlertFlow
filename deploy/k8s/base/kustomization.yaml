@@ -1,0 +1,26 @@
+# base：与具体集群无关的稳定对象。
+#
+# 注意：observability namespace 里的 Prometheus/Loki/Alloy/MCP 由
+# overlays/observability（observability-agent 维护）负责，本 base 不包含。
+# 注意：namespace 变换器会把 namespaces/namespaces.yaml 里的四个 Namespace
+# 对象名全部改写成 alertflow 导致 ID conflict，所以 Namespace 对象不进 kustomize
+# （由 scripts/create-cluster.sh / deploy-core.sh 显式 apply），其余对象用下面的
+# namespace 统一注入 metadata.namespace。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: alertflow
+resources:
+  - rbac/monitor-serviceaccount.yaml
+  - config/app-config.yaml
+  - config/config-seed.yaml
+  - storage/config-pvc.yaml
+  - services/services.yaml
+  - workloads/postgres-statefulset.yaml
+  - workloads/kafka-statefulset.yaml
+  - workloads/redis-deployment.yaml
+  - workloads/api-deployment.yaml
+  - workloads/monitor-deployment.yaml
+  - workloads/publisher-deployment.yaml
+  - workloads/consumer-deployment.yaml
+  - workloads/delivery-deployment.yaml
+  - workloads/agent-deployment.yaml

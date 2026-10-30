@@ -1,0 +1,64 @@
+# Redis 只承担可降级的读缓存（指标聚合、检查分页、Dashboard 统计）：
+# 不落盘、无 PVC，重启即空。没有它 API 仍可从 PostgreSQL 提供读。
+# maxmemory 限制是资源预算的一部分（缓存没有回收上限会吃掉 Node 内存）。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertflow-redis
+  labels:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: redis
+    app.kubernetes.io/part-of: alertflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alertflow
+      app.kubernetes.io/component: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alertflow
+        app.kubernetes.io/component: redis
+        app.kubernetes.io/part-of: alertflow
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - redis-server
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+            - --maxmemory
+            - 128mb
+            - --maxmemory-policy
+            - allkeys-lru
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 192Mi

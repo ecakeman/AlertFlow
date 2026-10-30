@@ -1,0 +1,96 @@
+# Delivery：从 PostgreSQL 取待投递任务，通过 gRPC 调 Agent 的 task server
+# (alertflow-agent:9000)。没有入站端口；config.yaml 只读挂载（组装诊断上下文
+# 要用当前服务定义）。
+#
+# AGENT_TASK_GRPC_TOKEN 必须与 Agent 的 AGENT_TASK_GRPC_TOKEN 相同，否则
+# Agent 不会启动 9000 端口的 task server（见 agent/src/alertflow_agent/main.py）。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertflow-delivery
+  labels:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: delivery
+    app.kubernetes.io/part-of: alertflow
+    alertflow.io/service-id: alertflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alertflow
+      app.kubernetes.io/component: delivery
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alertflow
+        app.kubernetes.io/component: delivery
+        app.kubernetes.io/part-of: alertflow
+        alertflow.io/service-id: alertflow
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: wait-for-deps
+          image: alpine:3.19
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              i=0
+              until nc -z alertflow-postgres 5432; do
+                i=$((i+1)); [ "$i" -ge 60 ] && { echo "postgres not reachable"; exit 1; }
+                sleep 2
+              done
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+      containers:
+        - name: delivery
+          image: alertflow:local
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: alertflow-env
+          env:
+            - name: ALERTFLOW_ROLE
+              value: delivery
+            - name: ALERTFLOW_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: alertflow-secrets, key: database-url}
+            - name: AGENT_TASK_GRPC_TOKEN
+              valueFrom:
+                secretKeyRef: {name: alertflow-secrets, key: agent-task-grpc-token}
+          resources:
+            requests:
+              cpu: 30m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          persistentVolumeClaim:
+            claimName: alertflow-config
+            readOnly: true
+        - name: tmp
+          emptyDir: {}

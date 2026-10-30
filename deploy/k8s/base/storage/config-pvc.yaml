@@ -1,0 +1,26 @@
+# config.yaml 的持久卷。
+#
+# 为什么必须持久：config.yaml 是权威配置，UI 会写它；不能每个容器各自复制
+# 一份，否则 API 保存后 Monitor/Delivery 读到的是旧快照。
+#
+# 访问模式是 ReadWriteOnce：local-kind 是单 Node，多个 Pod 可以同时挂同一个
+# RWO 卷。这不是“共享写”方案：真正写入的只有 API，Monitor/Delivery 只读挂载。
+# 未来多 Node 时 RWO 无法跨节点挂载，需要换成支持 ReadWriteMany 的存储
+# （或把 config 改为只读 ConfigMap + 独立的 write-ahead 方案），见 README。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: alertflow-config
+  labels:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: config
+    app.kubernetes.io/part-of: alertflow
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # kind 默认 StorageClass 是 rancher local-path-provisioner（名为 standard），
+  # 底层是节点上的 hostPath，删除集群即丢数据。
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 1Gi

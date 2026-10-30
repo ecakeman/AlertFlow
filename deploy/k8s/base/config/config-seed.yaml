@@ -1,0 +1,78 @@
+# config.yaml 的首次启动种子。
+#
+# 真正的权威文件在 PVC 上（/config/config.yaml），API 保存时用临时文件 +
+# rename 原子替换。这个 ConfigMap 只在 PVC 上还没有 config.yaml 时被
+# initContainer 复制一次，**永不覆盖**已存在的文件（见 api-deployment.yaml）。
+#
+# 内容要点：
+#   - services 是监控目标；kubernetes.targets 把同一集群的 workload 映射到
+#     对应的 service_id（Monitor 只读采集，不写 K8s API）。
+#   - (cluster_id, namespace, kind, name) 唯一；kind 只允许 Deployment 或
+#     StatefulSet；namespace 缺省时回退 settings.kubernetes.namespace。
+#   - 旧字段 services[].kubernetes 只表达一个 Deployment，这里不使用。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertflow-config-seed
+  labels:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: config
+    app.kubernetes.io/part-of: alertflow
+data:
+  config.yaml: |
+    version: 1
+
+    settings:
+      default_widget_mode: name
+      theme: dark
+      check:
+        default_interval: 30
+        timeout: 10
+        retention_days: 30
+        retry_attempts: 3
+        retry_delays: [1, 5, 10]
+      dashboard:
+        warning_period_hours: 24
+        uptime_excluded_services: []
+      kubernetes:
+        cluster_id: kind-alertflow-lab
+        namespace: alertflow
+        targets:
+          - {service_id: alertflow, kind: Deployment, name: alertflow-api}
+          - {service_id: alertflow, kind: Deployment, name: alertflow-monitor}
+          - {service_id: alertflow, kind: Deployment, name: alertflow-publisher}
+          - {service_id: alertflow, kind: Deployment, name: alertflow-consumer}
+          - {service_id: alertflow, kind: Deployment, name: alertflow-delivery}
+          - {service_id: alertflow, kind: Deployment, name: alertflow-agent}
+          - {service_id: alertflow, kind: StatefulSet, name: alertflow-postgres}
+          - {service_id: alertflow, kind: StatefulSet, name: alertflow-kafka}
+          # fault-lab 在独立 namespace，单独覆盖 namespace。
+          - {service_id: fault-lab, namespace: fault-lab, kind: Deployment, name: fault-lab}
+
+    services:
+      - id: alertflow
+        name: AlertFlow API
+        url: http://alertflow-api.alertflow.svc:8080/api/setup/status
+        check:
+          interval: 30
+          method: GET
+          timeout: 10
+          expected_status: [200]
+        widget:
+          mode: name
+        chart:
+          type: line
+        layout: {x: 0, y: 0, w: 3, h: 4}
+      - id: fault-lab
+        name: Fault Lab
+        url: http://fault-lab.fault-lab.svc:8090/health
+        check:
+          interval: 30
+          method: GET
+          timeout: 10
+          expected_status: [200]
+        widget:
+          mode: name
+        chart:
+          type: line
+        layout: {x: 3, y: 0, w: 3, h: 4}

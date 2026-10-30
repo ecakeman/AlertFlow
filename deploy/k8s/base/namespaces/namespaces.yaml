@@ -1,0 +1,33 @@
+# 固定命名空间。观测栈（observability）与可选 runbook 适配器各自独立，
+# 不与 alertflow 业务负载混在同一 namespace。
+# 注意：observability overlay 由 observability-agent 维护；本文件先创建该
+# namespace 只是为了让 base 能独立 apply。若对方 overlay 也声明同一
+# namespace，后 apply 的一方覆盖 label，不影响对象存在性。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: alertflow
+  labels:
+    app.kubernetes.io/part-of: alertflow
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    app.kubernetes.io/part-of: alertflow
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fault-lab
+  labels:
+    app.kubernetes.io/part-of: alertflow
+---
+# 可选：runbook（RAGFlow A2A 适配器）用到时才部署，见 overlays/runbook。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: runbook
+  labels:
+    app.kubernetes.io/part-of: alertflow

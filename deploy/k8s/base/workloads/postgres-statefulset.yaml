@@ -1,0 +1,88 @@
+# PostgreSQL：Go 控制面（database alertflow）与 Agent（database
+# alertflow_agent）共用同一个实例，Agent 启动时自己 CREATE DATABASE +
+# 应用 schema.sql（需要 pgvector 扩展，所以镜像必须是 pgvector/pgvector）。
+#
+# 单副本是明确取舍：这是本地 Kind 实验环境，不是 HA 部署。
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: alertflow-postgres
+  labels:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: postgres
+    app.kubernetes.io/part-of: alertflow
+    alertflow.io/service-id: alertflow
+spec:
+  serviceName: alertflow-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alertflow
+      app.kubernetes.io/component: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alertflow
+        app.kubernetes.io/component: postgres
+        app.kubernetes.io/part-of: alertflow
+        alertflow.io/service-id: alertflow
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:pg16
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_USER
+              value: alertflow
+            - name: POSTGRES_DB
+              value: alertflow
+            # 数据放在子目录：官方镜像要求挂载点本身可以是 foreign fs。
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: alertflow-secrets
+                  key: postgres-password
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "alertflow", "-d", "alertflow"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "alertflow", "-d", "alertflow"]
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: alertflow
+          app.kubernetes.io/component: postgres
+          app.kubernetes.io/part-of: alertflow
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: standard
+        resources:
+          requests:
+            storage: 5Gi

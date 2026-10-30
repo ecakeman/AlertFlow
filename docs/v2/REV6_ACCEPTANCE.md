@@ -17,9 +17,9 @@
 |---|---|---|
 | P0 | 三份基线文档齐全且可追溯到文件/行号 | PASS（见 §P0） |
 | P1 | B0–B4 + C0–C5 完成；pytest / go test / go vet / go build 全绿；Mock A2A 契约测试通过 | PASS（见 §P1） |
-| P2 | Observer 审计结论 + fault-lab 授权清单；`go test ./internal/observe/kubernetes` 通过 | 未开始 |
-| P3 | `kubectl get deploy,sts,ds,pods -A` 显示独立工作负载；smoke-test 通过 | 未开始 |
-| P4 | `alertflow` 与 `fault-lab` 双 service_id 进 Timeline；`kubectl auth can-i` 正反验证 | 未开始 |
+| P2 | Observer 审计结论 + fault-lab 授权清单；`go test ./internal/observe/kubernetes` 通过 | PASS |
+| P3 | `kubectl get deploy,sts,ds,pods -A` 显示独立工作负载；smoke-test 通过 | PASS |
+| P4 | `alertflow` 与 `fault-lab` 双 service_id 进 Timeline；`kubectl auth can-i` 正反验证 | PASS |
 | P5 | 原生 PromQL/LogQL 与经 MCP 查询同值；Alloy Pod 日志可查 | 未开始 |
 | P6 | fault-lab `http_503` 注入 → 三源证据 → 报告 → 恢复核验 | 未开始 |
 
@@ -71,19 +71,51 @@
 
 ## P2
 
-（阶段完成后填写）
+执行时间 2026-10-30，Kind 集群 `alertflow-lab`（kind v0.33.0，node image `kindest/node:v1.33.0`，K8s v1.33.0）。
+
+| 编号 | 条目 | 命令/证据 | 判定 |
+|---|---|---|---|
+| P2-A1 | Observer 代码审计结论可追溯到文件/函数 | `docs/v2/REV6_BASELINE.md` §7；`backend/internal/observe/kubernetes/{observer.go,objects.go}` | PASS |
+| P2-A2 | 单元测试 | `go test -count=1 -p 1 ./internal/observe/kubernetes` → ok（全量运行中 12.473s，13 个测试） | PASS |
+| P2-A3 | fault-lab 授权清单只读、无 ClusterRole、无 secrets | `deploy/k8s/observer-rbac.yaml`：`alertflow` 与 `fault-lab` 各一个 Role+RoleBinding；verbs 仅 get/list/watch；无 `secrets` 资源 | PASS |
+| P2-A4 | 渲染静态检查 | `kustomize build` 输出中 `:latest`=0、`hostPath`=0、内嵌 `kind: Secret`=0 | PASS |
+| P2-A5 | 集群内 RBAC 正反验证 | 见 §P4 的 `kubectl auth can-i` 结果 | PASS |
 
 ---
 
 ## P3
 
-（阶段完成后填写：集群创建、Pod 清单、资源实际占用、smoke-test）
+| 编号 | 条目 | 命令/证据 | 判定 |
+|---|---|---|---|
+| P3-A1 | 独立工作负载 | `kubectl get deploy,sts,ds -A`：alertflow 7 Deployment + 2 StatefulSet；fault-lab 1 Deployment；observability 3 Deployment + 2 StatefulSet + 1 DaemonSet；全部 1/1 | PASS |
+| P3-A2 | 集群创建脚本可重复 | `deploy/k8s/scripts/create-cluster.sh`（幂等建 4 个 namespace）；节点 `alertflow-lab-control-plane` Ready | PASS |
+| P3-A3 | 镜像导入与校验 | `build-and-load-images.sh --load-only` exit 0；`ctr` 逐个校验命中；节点内共 13 个业务/基础镜像 | PASS |
+| P3-A4 | 部署核心 | `deploy-core.sh` exit 0；18 对象 apply、9 workload rollout condition met、3 PVC Bound | PASS |
+| P3-A5 | 真实 HTTP 冒烟 | `port-forward svc/alertflow-api 18080:8080` + `curl /api/setup/status` → HTTP 200，body `{"needsSetup":true}`（全新库，无管理员属预期） | PASS |
+| P3-A6 | 综合 smoke | `deploy/k8s/scripts/smoke-test.sh` exit 0（9 个分组全部 PASS：HTTP/gRPC/DB/Kafka/Redis/config PVC/RBAC/Service endpoints） | PASS |
+| P3-A7 | Kustomize 全部可渲染 | `kustomize build` 5 个 target exit 0（base 18 / local-kind 18 / fault-lab 3 / runbook 2 / observability 28 对象） | PASS |
+| P3-A8 | fault-lab 部署 | `deploy-fault-lab.sh` exit 0；Deployment/Service/PVC 1Gi 全部就绪；`inject-fault.sh` → `/health` 503、`restore-fault.sh` → 200 | PASS |
+| P3-A9 | 资源预算与实测 | 核心 requests 1696Mi；加 fault-lab 后 limits 6862Mi（节点 allocatable 6.62GiB，101% overcommit，10 分钟稳定运行）；节点 `free -m` available ≈3.1GiB | PASS（overcommit 已知，见 README §3.6） |
+| P3-A10 | config.yaml 持久化 | PVC `alertflow-config` Bound，`config.yaml` 存在且 cluster_id 与 seed 一致（未被覆盖） | PASS |
+
+环境事实：Kafka 单节点 KRaft 首次启动重启 3 次后稳定（README §7 记录）；Service 增加 `publishNotReadyAddresses: true` 与 `controller:9093`，这是 broker 注册超时的真实修复。Agent 容器暂以 root 运行（镜像内源码权限 600），已列遗留项。
 
 ---
 
 ## P4
 
-（阶段完成后填写）
+| 编号 | 条目 | 命令/证据 | 判定 |
+|---|---|---|---|
+| P4-A1 | 双 service_id 进 Timeline | `select service_id, source, status from runtime_source_state` → `alertflow\|kubernetes\|ok`、`fault-lab\|kubernetes\|ok` | PASS |
+| P4-A2 | 对象归属正确 | `select service_id, resource_kind, count(*) from runtime_object_states` → alertflow: Deployment 6 / Pod 14 / StatefulSet 2；fault-lab: Deployment 1 / Pod 1（无跨 service 串写） | PASS |
+| P4-A3 | 事件写入 | `runtime_events` 中 `kubernetes.pod.first_seen` 15、`kubernetes.deployment.first_seen` 7、`kubernetes.statefulset.first_seen` 2、`kubernetes.event` 107、changed/inactive 若干 | PASS |
+| P4-A4 | `kubectl auth can-i` 正向 | list pods/ deployments/ statefulsets ns=alertflow → yes；list pods ns=fault-lab → yes | PASS |
+| P4-A5 | `kubectl auth can-i` 反向 | get secrets ns=alertflow → no；create pods → no；list pods ns=kube-system → no；list namespaces → no；create clusterroles → no | PASS |
+| P4-A6 | Monitor Pod 重建不重复写 first_seen | 删除 monitor Pod 后 `first_seen` 总数 24→25，新增一条只属于**新 monitor Pod**（UID 变化＝新对象），其余 14 个既有 Pod 未重复写 | PASS |
+| P4-A7 | 受控 rollout 只进 Timeline，不误开 Incident | `kubectl rollout restart deploy/alertflow-consumer` → `runtime_events` 287→300（pod.inactive/deployment.changed/pod.changed），`incidents` 2→2 不变 | PASS |
+| P4-A8 | 采集失败不静默（代码级） | `observer.go` 中 DB 写失败走 `failSource("gap")` 而非 `ok`；对应用例 `TestObjectWriteFailureMarksAGap` | PASS（代码级，真实 DB 故障注入 NOT RUN） |
+
+环境说明：`cluster_id` 实际为 `kind-alertflow-lab`（kind 生成的上下文名），与规格示例 `alertflow-lab` 不同，属环境命名差异，不影响归属语义，已在 README 记录。
 
 ---
 

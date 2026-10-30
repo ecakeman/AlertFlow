@@ -1,0 +1,15 @@
+# kind 集群定义（不是 kustomize 资源，kustomize build 会忽略本文件）。
+# 由 scripts/create-cluster.sh 读取。
+#
+# 单 control-plane 节点：这是资源受限的本地实验环境，不代表“单 Pod 架构”——
+# 业务进程按角色拆成 api/monitor/publisher/consumer/delivery/agent 6 个
+# Deployment + postgres/kafka 2 个 StatefulSet + redis，Fault Lab 另在 fault-lab
+# namespace。多 Node 的差异见 README「已知限制」。
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: alertflow-lab
+nodes:
+  - role: control-plane
+    # 节点镜像从 docker.m.daocloud.io 拉取后 retag 为 kindest/node:v1.33.0；
+    # create-cluster.sh 在镜像缺失时会自动做这一步。
+    image: kindest/node:v1.33.0

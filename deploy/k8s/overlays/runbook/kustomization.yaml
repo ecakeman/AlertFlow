@@ -1,0 +1,8 @@
+# runbook：可选组件（A2A adapter），规格 §9.2 标注为可选项。
+# 复用 agent 镜像，仅换启动命令；A2A_PUBLIC_URL 必须是集群内可达的 Service DNS。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: runbook
+resources:
+  - deployment.yaml
+  - service.yaml

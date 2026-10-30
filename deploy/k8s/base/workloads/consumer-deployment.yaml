@@ -1,0 +1,85 @@
+# Consumer：从 Kafka 读事件落 PostgreSQL，并按需生成 Agent 任务。
+# 没有入站端口；ALERTFLOW_AGENT_GRPC_TARGET 为空时不会入队任务（语义在
+# backend/internal/db/delivery.go）。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertflow-consumer
+  labels:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: consumer
+    app.kubernetes.io/part-of: alertflow
+    alertflow.io/service-id: alertflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alertflow
+      app.kubernetes.io/component: consumer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alertflow
+        app.kubernetes.io/component: consumer
+        app.kubernetes.io/part-of: alertflow
+        alertflow.io/service-id: alertflow
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: wait-for-deps
+          image: alpine:3.19
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              for target in "alertflow-postgres 5432" "alertflow-kafka 9092"; do
+                set -- $target
+                i=0
+                until nc -z "$1" "$2"; do
+                  i=$((i+1)); [ "$i" -ge 60 ] && { echo "$1:$2 not reachable"; exit 1; }
+                  sleep 2
+                done
+              done
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+      containers:
+        - name: consumer
+          image: alertflow:local
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: alertflow-env
+          env:
+            - name: ALERTFLOW_ROLE
+              value: consumer
+            - name: ALERTFLOW_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: alertflow-secrets, key: database-url}
+          resources:
+            requests:
+              cpu: 30m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 192Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

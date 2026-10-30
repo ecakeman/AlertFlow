@@ -1,0 +1,100 @@
+# Fault Lab：被 AlertFlow 监控的演示服务，也是主故障场景 http_503 的注入点。
+#
+# 它是独立 Deployment/Service（不是 AlertFlow 的 Pod），因此 §8.1 的 target
+# 用 namespace=fault-lab 跨 namespace 采集；monitor 的 SA 在 fault-lab 也有
+# 只读 RoleBinding（见 deploy/k8s/observer-rbac.yaml）。
+#
+# 镜像 fault-lab:local 无 USER（root 运行），状态写 /data/simulator.json；
+# 这里用空目录 /tmp + 只读根文件系统把“可写面”收敛到 /data。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fault-lab
+  labels:
+    app.kubernetes.io/name: fault-lab
+    app.kubernetes.io/component: simulator
+    app.kubernetes.io/part-of: alertflow
+    alertflow.io/service-id: fault-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fault-lab
+      app.kubernetes.io/component: simulator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fault-lab
+        app.kubernetes.io/component: simulator
+        app.kubernetes.io/part-of: alertflow
+        alertflow.io/service-id: fault-lab
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 15
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: fault-lab
+          image: fault-lab:local
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SIMULATOR_ADDR
+              value: ":8090"
+            - name: SIMULATOR_CONFIG_PATH
+              value: /data/simulator.json
+            - name: SIMULATOR_LOG_LEVEL
+              value: info
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            # 只有操作者能拿到的控制 token：不进 Agent、不进 AlertFlow 的 Secret。
+            - name: SIMULATOR_CONTROL_TOKEN
+              valueFrom:
+                secretKeyRef: {name: fault-lab-secrets, key: control-token}
+            - name: SIMULATOR_DIAGNOSTICS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: fault-lab-secrets
+                  key: diagnostics-token
+                  optional: true
+          ports:
+            - name: http
+              containerPort: 8090
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 384Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: fault-lab-data
+        - name: tmp
+          emptyDir: {}

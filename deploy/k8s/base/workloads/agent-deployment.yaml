@@ -1,0 +1,175 @@
+# Agent：Python 进程，同一进程提供 8000(HTTP) 与 9000(task gRPC)。
+#
+# 探针取舍：
+#   - readiness 用 GET /healthz：该端点只返回 {"ok": true}，不查 DB、不调 LLM，
+#     符合“Agent readiness 只判进程”的约束。
+#   - liveness 用 TCP 8000：与 readiness 不同，且不依赖任何外部服务。
+#
+# 安全边界：
+#   - automountServiceAccountToken: false —— Agent 不需要 K8s API 权限。
+#   - 不挂 kubeconfig；诊断数据来自 Go 的 timeline 与（可选）MCP。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertflow-agent
+  labels:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/part-of: alertflow
+    alertflow.io/service-id: alertflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alertflow
+      app.kubernetes.io/component: agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alertflow
+        app.kubernetes.io/component: agent
+        app.kubernetes.io/part-of: alertflow
+        alertflow.io/service-id: alertflow
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        # 需要 root 的原因（已实测）：镜像内 /app/src/alertflow_agent/schemas/context.py
+        # 权限是 600（宿主 repo 里该文件被以 600 写入，COPY 保留权限），uid 10000 无法
+        # 读取 → import 阶段 PermissionError。等上游把 repo 文件权限改为 644 并重建镜像后，
+        # 这里应改回 runAsNonRoot: true / 10000。
+        runAsNonRoot: false
+        runAsUser: 0
+        runAsGroup: 0
+        fsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: wait-for-postgres
+          image: alpine:3.19
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              i=0
+              until nc -z alertflow-postgres 5432; do
+                i=$((i+1)); [ "$i" -ge 60 ] && { echo "postgres not reachable"; exit 1; }
+                sleep 2
+              done
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+      containers:
+        - name: agent
+          image: alertflow-agent:local
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: alertflow-env
+            # 本地（未跟踪）非秘密覆盖值，由 create-secrets.sh 从密钥文件生成。
+            # 后出现的 envFrom 覆盖前面同名 key；它不受 kustomize apply 重置，
+            # 因此 LLM_BASE_URL / LLM_MODEL 这类本地值不会被 deploy-core 覆盖回空。
+            - configMapRef:
+                name: alertflow-env-local
+                optional: true
+          env:
+            # 必须非空，否则 Agent 不启动 9000 的 task server，Delivery 永远失败。
+            - name: AGENT_TASK_GRPC_TOKEN
+              valueFrom:
+                secretKeyRef: {name: alertflow-secrets, key: agent-task-grpc-token}
+            # Agent → Go 的 gRPC 客户端 token（回传、查询时间线）。
+            - name: ALERTFLOW_AGENT_GRPC_TOKEN
+              valueFrom:
+                secretKeyRef: {name: alertflow-secrets, key: agent-grpc-token}
+            # Go /internal/agent/v1 的 bearer。
+            - name: ALERTFLOW_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef: {name: alertflow-secrets, key: agent-internal-token}
+            # 入站 webhook 与 /api/v1 的 bearer。
+            - name: AGENT_WEBHOOK_TOKEN
+              valueFrom:
+                secretKeyRef: {name: alertflow-secrets, key: agent-webhook-token}
+            - name: AGENT_API_TOKEN
+              valueFrom:
+                secretKeyRef: {name: alertflow-secrets, key: agent-api-token}
+            # 回传 Go 的 gRPC 客户端认证；Go 侧用 ALERTFLOW_AGENT_GRPC_TOKEN 校验，
+            # 因此这里必须与 agent-grpc-token 相同（agent/callbacks.py 的 fallback）。
+            - name: AGENT_CALLBACK_TOKEN
+              valueFrom:
+                secretKeyRef: {name: alertflow-secrets, key: agent-grpc-token}
+            - name: AGENT_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: alertflow-secrets, key: agent-database-url}
+            # 留空时使用 ScriptedModel（不调用真实模型）。LLM_API_KEY 非空时
+            # Agent 要求 LLM_MODEL 与 LLM_BASE_URL 同时非空，否则启动直接
+            # RuntimeError；这两个非秘密值来自上面的 envFrom alertflow-env-local。
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: alertflow-secrets
+                  key: llm-api-key
+                  optional: true
+            - name: PROMETHEUS_MCP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: alertflow-secrets
+                  key: prometheus-mcp-token
+                  optional: true
+            - name: LOKI_MCP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: alertflow-secrets
+                  key: loki-mcp-token
+                  optional: true
+            - name: RAGFLOW_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: alertflow-secrets
+                  key: ragflow-api-key
+                  optional: true
+            - name: HOME
+              value: /tmp
+            # readOnlyRootFilesystem + 只读 /app：不写 .pyc，避免无害但吵闹的警告。
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          ports:
+            - name: http
+              containerPort: 8000
+            - name: grpc
+              containerPort: 9000
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 150m
+              memory: 384Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

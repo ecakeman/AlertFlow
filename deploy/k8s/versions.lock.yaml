@@ -1,0 +1,67 @@
+# AlertFlow 本地 Kubernetes 部署的版本锁（single source of truth）。
+#
+# 规则：
+#   - 禁止 `latest`。唯一例外是上游 distroless 无版本 tag，这里按 **digest** 固定。
+#   - 应用镜像用 `:local` 表示“由本机 Dockerfile 构建 + kind load”，不来自 registry。
+#   - scripts/lib.sh 的 lock_value() 按 `key: value` 单行解析，请不要在此文件里
+#     使用嵌套结构或多行字符串。
+#
+# 修改本文件后：scripts/create-cluster.sh / build-and-load-images.sh 会自动使用新值；
+# 已在节点上的镜像需要重新导入（docker save | ctr import）。
+
+# --- 工具链（由开发者在宿主/WSL 安装，不入 kind 节点）---
+kind_version: "v0.33.0"
+kubectl_version: "v1.33.0"
+kustomize_version: "v5.7.1"
+
+# --- kind 集群 ---
+cluster_name: "alertflow-lab"
+# 节点镜像：Docker Hub 直连不通，先从 daocloud 拉取再 retag 为 kind 官方名。
+kind_node_source_image: "docker.m.daocloud.io/kindest/node:v1.33.0"
+kind_node_image: "kindest/node:v1.33.0"
+
+# --- 构建期基础镜像（app/agent 的 Dockerfile 默认值；build 脚本按此覆盖）---
+build_node_image: "node:22-alpine"
+build_go_image: "golang:1.25"
+build_python_image: "python:3.12-slim"
+build_fault_lab_node_image: "node:20-alpine"
+# distroless 上游没有版本 tag；用 digest 固定本地已缓存的镜像（RepoDigest）。
+app_runtime_image: "swr.cn-north-4.myhuaweicloud.com/ddn-k8s/gcr.io/distroless/static@sha256:41bc3d4b919ad273a8c23fb8a8c8f2d9a3264cdf9cce6f805de516d099eab590"
+
+# --- 应用镜像（本地构建，kind load）---
+app_image: "alertflow:local"
+agent_image: "alertflow-agent:local"
+fault_lab_image: "fault-lab:local"
+
+# --- Init/种子容器 ---
+# 本机没有 busybox；用已缓存的 alpine 提供 sh/chown/nc。
+init_image: "alpine:3.19"
+
+# --- 运行期基础镜像（清单里按短名引用；节点不能联网拉取，必须随构建一起导入）---
+runtime_postgres_image: "pgvector/pgvector:pg16"
+runtime_kafka_image: "apache/kafka:3.9.1"
+runtime_redis_image: "redis:7-alpine"
+# PVC 供应必需：kind 自带 local-path-provisioner 的 helperPod 会拉起这个镜像，
+# 节点不能联网拉取，缺失时 PVC 会卡在 ProvisioningFailed（create process timeout）。
+runtime_local_path_helper_image: "kindest/local-path-helper:v20241212-8ac705d0"
+runtime_local_path_helper_source_image: "docker.m.daocloud.io/kindest/local-path-helper:v20241212-8ac705d0"
+
+# --- 有状态中间件 ---
+# runtime_* 是“清单引用 + 节点导入”同源的键（build-and-load-images.sh 会导入）；
+# 下面的短名是清单里实际写的值，两者必须一致。
+postgres_image: "pgvector/pgvector:pg16"
+kafka_image: "apache/kafka:3.9.1"
+kafka_cluster_id: "4L6g3nShT-eMCtK--X86sw"
+redis_image: "redis:7-alpine"
+
+# --- 观测栈（清单由 overlays/observability 维护，这里只锁镜像版本）---
+prometheus_image: "prom/prometheus:v3.15.1"
+blackbox_image: "prom/blackbox-exporter:v0.29.1"
+loki_image: "grafana/loki:3.5.12"
+alloy_image: "grafana/alloy:v1.21.3"
+prometheus_mcp_image: "ghcr.io/tjhop/prometheus-mcp-server:v0.18.0"
+loki_mcp_image: "alertflow-loki-mcp:v0.6.0"
+
+# --- 可选组件 ---
+a2a_sdk_version: "1.3.0"
+ragflow_image: "infiniflow/ragflow:v0.27.3"

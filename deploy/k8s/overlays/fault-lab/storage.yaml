@@ -1,0 +1,17 @@
+# Fault Lab 的状态持久化：SIMULATOR_CONFIG_PATH=/data/simulator.json。
+# 只保存注入模式/状态，不是业务数据；删集群会一起丢，README 已说明。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fault-lab-data
+  labels:
+    app.kubernetes.io/name: fault-lab
+    app.kubernetes.io/component: simulator
+    app.kubernetes.io/part-of: alertflow
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 1Gi

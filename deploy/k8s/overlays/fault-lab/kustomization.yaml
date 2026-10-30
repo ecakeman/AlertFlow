@@ -1,0 +1,15 @@
+# Fault Lab（独立 sibling repo：/home/sancho/projects/fault-lab）的部署 overlay。
+#
+# 镜像来源：sibling repo 自己构建 → `docker build -t fault-lab:local .` →
+# `kind load docker-image fault-lab:local --name alertflow-lab`。
+# 它**不在**本项目 Dockerfile 里构建；如果 sibling repo 不在本地，可用
+# scripts/deploy-fault-lab.sh --skip-build 并在任意可访问的镜像里改写 image。
+# 覆盖镜像（例如推到实验 registry）：
+#   kustomize edit set image fault-lab:local=registry.example.com/fault-lab:vX
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: fault-lab
+resources:
+  - deployment.yaml
+  - service.yaml
+  - storage.yaml

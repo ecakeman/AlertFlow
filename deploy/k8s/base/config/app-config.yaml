@@ -1,0 +1,47 @@
+# 非秘密部署参数。所有 Pod 通过 envFrom 注入；敏感值一律走 Secret
+# （见 deploy/k8s/secrets.env.example / scripts/create-secrets.sh）。
+#
+# 这里只放跨角色共享的地址与开关。ALERTFLOW_ROLE、DATABASE_URL 等
+# 角色专属变量由各 Deployment 显式声明。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertflow-env
+  labels:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/component: config
+    app.kubernetes.io/part-of: alertflow
+data:
+  # --- Go 控制面 ---
+  ALERTFLOW_ADDR: ":8080"
+  ALERTFLOW_GRPC_ADDR: ":9090"
+  ALERTFLOW_CONFIG_DIR: "/config"
+  # Monitor 的 K8s 采集开关；targets 在 config.yaml（seed）里。
+  ALERTFLOW_K8S_ENABLED: "true"
+  ALERTFLOW_KAFKA_BROKERS: "alertflow-kafka.alertflow.svc:9092"
+  REDIS_URL: "redis://alertflow-redis.alertflow.svc:6379/0"
+  # Go → Agent 的 gRPC 任务通道（delivery 使用）。
+  ALERTFLOW_AGENT_GRPC_TARGET: "alertflow-agent.alertflow.svc:9000"
+  # Go → Agent 的 HTTP API（chat 转发）。
+  AGENT_BASE_URL: "http://alertflow-agent.alertflow.svc:8000"
+
+  # --- Python Agent ---
+  ALERTFLOW_BASE_URL: "http://alertflow-api.alertflow.svc:8080"
+  # 必须是 host:port。grpc-python 1.67 不接受裸 ":9000"（unparseable host:port，
+  # 实测 agent 容器 CrashLoopBackOff）；Go 侧 ALERTFLOW_ADDR/ALERTFLOW_GRPC_ADDR
+  # 用 ":port" 没有问题。
+  AGENT_GRPC_ADDR: "0.0.0.0:9000"
+  AGENT_DIAGNOSTICS_MODE: "timeline"
+  DIAGNOSTICS_FILE: "/diagnostics/diagnostics.yaml"
+  # LLM 端点不是秘密，但属于部署参数；LLM_API_KEY 在 Secret 里。
+  # 留空时 Agent 使用 ScriptedModel（不会真正调用模型）。
+  LLM_BASE_URL: ""
+  LLM_MODEL: ""
+  # 观测侧 MCP 地址。观测栈未部署时留空，Agent 会跳过这两项能力。
+  # observability overlay 部署后按实际 Service 名填写。
+  PROMETHEUS_MCP_URL: ""
+  LOKI_MCP_URL: ""
+  # 可选 RAGFlow A2A 适配器；overlays/runbook 部署后填 http://a2a-adapter.runbook.svc:8000。
+  A2A_ADAPTER_URL: ""
+  RAGFLOW_BASE_URL: ""
+  RAGFLOW_AGENT_ID: ""
