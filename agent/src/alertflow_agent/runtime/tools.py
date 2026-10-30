@@ -505,6 +505,10 @@ def _mcp(name, args, state, settings, clients) -> dict:
     # 调用前记账：超时/失败同样消耗额度（§7.7.12）
     state["mcp_calls"] = int(state.get("mcp_calls") or 0) + 1
     _note_mcp_activity(state, source, counted=True)
+    _sent_query = str(sent.get("query") or "")
+    if not _sent_query and isinstance(sent.get("matches"), list) and sent["matches"]:
+        _sent_query = str(sent["matches"][0])
+    _note_mcp_activity(state, source, query=_scrub(_sent_query, settings) if _sent_query else None)
     # instant query 的 recorded 只有 timestamp，没有起止；用 1 秒窗口近似，仍派生自父级窗口
     end_dt = parse_time(recorded.get("end") or recorded.get("timestamp"))
     start_dt = parse_time(recorded.get("start")) or (
@@ -937,16 +941,58 @@ def _mcp_activity(state, source: str) -> dict:
 
 
 def _note_mcp_activity(state, source: str, status: str | None = None,
-                       counted: bool = False, error: str | None = None) -> None:
+                       counted: bool = False, error: str | None = None,
+                       query: str | None = None) -> None:
     entry = _mcp_activity(state, source)
     if counted:
         entry["calls"] = int(entry.get("calls") or 0) + 1
+    # 记录实际发出的表达式：空结果无法从 evidence 反推，只能靠这里留证（§7.7.6）
+    if query:
+        text = str(query)[:300]
+        seen = entry.setdefault("queries", [])
+        if text not in seen:
+            seen.append(text)
+            del seen[:-5]
     if status:
         entry["status"] = status
         if status == "ok":
             entry.pop("error", None)
     if error:
         entry["error"] = str(error)[:200]
+
+
+def prefetch_baseline(state, settings, clients) -> list[str]:
+    """父级基线取证：源可用时先各取一条确定性证据，再交给 Lead 判断。
+
+    小模型在真机上会忽略工具引导（实测 4 次 run 里 2 次一次 MCP 都没查），
+    因此这里不依赖模型：HTTP/运行时类故障下，用配置好的服务选择器各查一次
+    指标与日志，只把原始事实放进 evidence，不写结论、不替代模型推理。
+    失败只影响该来源的 coverage，不抛出。
+    """
+    if not _http_runtime_fault(state):
+        return []
+    available = list(state.get("mcp_tools") or [])
+    if not available:
+        return []
+    fetched: list[str] = []
+    attempts = (("query", {"query": "probe_success"}), ("loki_query", {"query": ""}))
+    service_id = (state.get("event") or {}).get("service_id") or ""
+    for name, args in attempts:
+        if name not in available:
+            continue
+        raw = (settings.prometheus_service_selectors if name == "query"
+               else settings.loki_service_selectors)
+        if not selector_for(raw, service_id):
+            # 没有该服务的 selector 时不做基线取证：否则只会得到 unmapped 噪声
+            continue
+        before = len(state.get("evidence") or {})
+        try:
+            run_tool(name, args, state, settings, clients)
+        except Exception:  # 取证失败不阻断调查
+            continue
+        if len(state.get("evidence") or {}) > before:
+            fetched.append(name)
+    return fetched
 
 
 def _note_unqueried_sources(state, settings) -> None:

@@ -341,3 +341,39 @@ Go 侧下推的 JSON 数字可能被反序列化为 float（如 `statusCode 503.
     不得被解析成 empty。
 - **验收**：`tests/test_mcp.py` 的 selector 登记、empty 不误标 unavailable、传输失败带 detail、
   upstream error 带文本 4 组测试。
+
+## C8 — 确定性基线取证（P6-4 修复，第 4/5 次真实 run 驱动）
+
+### C8.1 为什么不让模型独占证据采集
+
+实测 5 次真实 run：2 次一次 MCP 都没查（模型忽略工具引导），1 次查了但表达式与数据形状
+不匹配（空结果）。提示词只能降低概率，不能保证"源可用就有基线证据"，因此把"各查一次"
+从模型责任降级为**父级确定性动作**，模型的职责回到解释与结论。
+
+### C8.2 prefetch_baseline
+
+- 位置：`runtime/tools.py::prefetch_baseline(state, settings, clients)`；
+  调用点 `runtime/graph.py::initial_plan` 在 `call_model(initial_plan)` **之前**。
+- 前置条件：`_http_runtime_fault(state)` 为真（有 HTTP 检查样本即成立），且该来源工具已启用。
+- 每源一次，参数固定：
+  - Prometheus：`query`，promql `probe_success`（由 `scope_promql` 合并服务 matcher）。
+  - Loki：`loki_query`，logql 空串 → `scope_logql` 直接产出服务 selector `{service_id="..."}`。
+- 跳过条件：该服务在该来源没有配置 selector（避免只得到 `unmapped` 噪声）。
+- 副作用边界：只走既有 `run_tool` 路径（因此同样受 `MCP_MAX_CALLS`、窗口、脱敏约束），
+  只写 evidence 与 `mcp_activity`，不写结论、不动 report、不替代 `finish_investigation` 判据。
+- 返回：成功的工具名列表（用于测试与日志），失败静默（该来源的 coverage 照常记 gap）。
+
+### C8.3 查询留痕（空结果可诊断）
+
+- `_note_mcp_activity(..., query=...)`：把实际发出的 promql/logql 记入
+  `mcp_activity[source]["queries"]`，去重、只保留最近 5 条、每条截断 300 字符。
+- `_coverage_sources` 把 `queries` 透出为 `report.coverage.sources[source]["queries"]`。
+- 目的：空结果无法从 evidence 反推查询内容，留痕后可直接判断"是查询写错还是确实无数据"。
+
+### C8.4 验证
+
+- run `11ab4ca3-3d10-4a98-89b4-04e71f260947`：`fact_count_by_source_type` 含
+  `prometheus:1`、`loki:1`；`coverage.sources.prometheus/loki` 均 `{calls:1,status:"ok",
+  queries:["probe_success{service_id=\"fault-lab\"}"]}` / `["{service_id=\"fault-lab\"}"]`。
+- 单测：`tests/test_mcp.py` 覆盖基线取证与模型查询的调用序列、queries 留痕、
+  `NOT_QUERIED` 在基线取证后不再出现。

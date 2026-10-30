@@ -22,7 +22,7 @@ from alertflow_agent.runtime.context_manager import ContextManager
 from alertflow_agent.runtime.model import call_model
 from alertflow_agent.runtime.planner import validate_plan_diff
 from alertflow_agent.runtime.evidence import EvidenceManager, candidates_from_evidence
-from alertflow_agent.runtime.tools import _add, clip, run_tool
+from alertflow_agent.runtime.tools import _add, clip, prefetch_baseline, run_tool
 from alertflow_agent.runtime.verify import build_catalog, cited
 from alertflow_agent.runtime.window import (
     build_investigation_window,
@@ -690,6 +690,15 @@ class Runner:
     def initial_plan(self, state):
         if self._stop_if_cancelled(state):
             return state
+        # 先做一次确定性基线取证（指标 + 日志各一条），再让模型规划；
+        # 证据只是事实，是否采用仍由 Lead 决定。
+        state["mcp_tools"] = enabled_mcp_tools(self.settings)
+        state["mcp_scope"] = scope_hint(self.settings, (state.get("event") or {}).get("service_id"))
+        clients = {"alertflow": self.alertflow, "model": self.model, "store": self.store,
+                   "memory": getattr(self, "memory", None), "context": self.context_manager}
+        if self.mcp is not None:
+            clients["mcp"] = self.mcp
+        prefetch_baseline(state, self.settings, clients)
         plan = call_model(self.model, "initial_plan", state, self.settings, self.store)
         if not plan:
             return state
@@ -932,6 +941,8 @@ class Runner:
             }
             if entry.get("error"):
                 sources[source]["error"] = str(entry["error"])[:200]
+            if entry.get("queries"):
+                sources[source]["queries"] = [str(item)[:300] for item in entry["queries"]][:5]
         runbook_enabled = bool(str(self.settings.a2a_adapter_url or "").strip())
         runbook_used = any(
             (item or {}).get("source_type") == "runbook"

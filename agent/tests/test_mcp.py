@@ -172,6 +172,7 @@ def test_configured_query_writes_scoped_evidence_once():
     assert "prom-secret" not in json.dumps(item)
     assert run_tool("series", {}, state, _settings(), {"mcp": client})["note"] == "unknown tool"
     assert [name for name, _ in client.calls] == ["query"]
+    assert [name for name, _ in client.calls] == ["query"]
 
 
 def test_window_row_and_request_caps():
@@ -301,6 +302,7 @@ def test_call_budget_stops_before_another_connection():
     assert second["status"] == "error"
     assert "PROMETHEUS_BUDGET" in _gaps(state)
     assert [name for name, _ in client.calls] == ["query"]
+    assert [name for name, _ in client.calls] == ["query"]
 
 
 def test_each_failure_kind_is_a_gap_and_not_evidence():
@@ -370,7 +372,8 @@ def test_failed_prometheus_read_still_finishes_the_run():
     assert report["usage"]["tool_calls"] == 2
     assert "PROMETHEUS_TIMEOUT" in report["coverage"]["gaps"]
     assert any(item["text"] == "Prometheus has no evidence." for item in report["unknowns"])
-    assert [name for name, _ in client.calls] == ["query"]
+    # 父级基线取证会先打一次 query + 一次 loki_query，随后才是模型的 query
+    assert [name for name, _ in client.calls] == ["query", "loki_query", "query"]
     assert "prometheus" not in {item["source_type"] for item in store.get_evidence(row["id"]).values()}
 
 
@@ -513,13 +516,19 @@ def test_coverage_sources_reflect_a_successful_metrics_query():
     runner.execute(row["id"])
     report = store.latest_report(row["id"])["report"]
     sources = report["coverage"]["sources"]
-    assert sources["prometheus"] == {"enabled": True, "calls": 1, "status": "ok"}
-    assert sources["loki"]["calls"] == 0
-    assert sources["loki"]["status"] == "empty"
+    prom = sources["prometheus"]
+    # 1 次父级基线取证 + 1 次模型查询
+    assert prom["enabled"] is True and prom["calls"] == 2 and prom["status"] == "ok"
+    # 实际发出的 promql 必须留痕，空结果时才能从报告反推模型查了什么
+    assert prom["queries"] == ['probe_success{service="api"}', 'up{service="api"}']
+    # 基线取证也会打一次 Loki（空结果），模型本身没有查日志
+    # 基线取证会打一次 Loki；此用例里它成功返回，故状态是 ok
+    assert sources["loki"]["calls"] == 1
+    assert sources["loki"]["status"] in {"ok", "empty"}
     assert sources["alertflow"]["status"] in {"ok", "empty"}
-    # 指标查过、日志没查：只提示缺失的那一个来源，不能连已查的也报缺失
+    # 基线取证保证了两个来源各被查询一次，因此 NOT_QUERIED 不应再出现
     gaps = report["coverage"]["gaps"]
-    assert "LOKI_NOT_QUERIED" in gaps
+    assert "LOKI_NOT_QUERIED" not in gaps
     assert "PROMETHEUS_NOT_QUERIED" not in gaps
 
 
@@ -564,7 +573,7 @@ def test_empty_mcp_result_is_empty_not_unavailable():
     runner.execute(row["id"])
     report = store.latest_report(row["id"])["report"]
     sources = report["coverage"]["sources"]
-    assert sources["prometheus"]["calls"] == 1
+    assert sources["prometheus"]["calls"] == 2  # 基线取证 + 模型查询
     assert sources["prometheus"]["status"] == "empty"
     assert "error" not in sources["prometheus"]
     assert "PROMETHEUS_EMPTY" in report["coverage"]["gaps"]
@@ -582,7 +591,7 @@ def test_mcp_transport_error_is_unavailable_with_detail():
     runner.execute(row["id"])
     report = store.latest_report(row["id"])["report"]
     sources = report["coverage"]["sources"]
-    assert sources["prometheus"]["calls"] == 1
+    assert sources["prometheus"]["calls"] == 2  # 基线取证 + 模型查询
     assert sources["prometheus"]["status"] == "unavailable"
     assert "timeout" in sources["prometheus"]["error"]
     assert "PROMETHEUS_TIMEOUT" in report["coverage"]["gaps"]
@@ -608,7 +617,7 @@ def test_upstream_mcp_error_detail_reaches_report_coverage():
     runner.execute(row["id"])
     report = store.latest_report(row["id"])["report"]
     sources = report["coverage"]["sources"]
-    assert sources["prometheus"]["calls"] == 1
+    assert sources["prometheus"]["calls"] == 2  # 基线取证 + 模型查询
     assert sources["prometheus"]["status"] == "unavailable"
     assert "bad_data" in sources["prometheus"]["error"]
     assert "PROMETHEUS_UPSTREAM" in report["coverage"]["gaps"]

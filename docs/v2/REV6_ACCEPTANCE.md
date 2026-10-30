@@ -21,7 +21,7 @@
 | P3 | `kubectl get deploy,sts,ds,pods -A` 显示独立工作负载；smoke-test 通过 | PASS |
 | P4 | `alertflow` 与 `fault-lab` 双 service_id 进 Timeline；`kubectl auth can-i` 正反验证 | PASS |
 | P5 | 原生 PromQL/LogQL 与经 MCP 查询同值；Alloy Pod 日志可查 | PASS（A7 四类失败注入 NOT RUN，见 §P5） |
-| P6 | fault-lab `http_503` 注入 → 三源证据 → 报告 → 恢复核验 | **PARTIAL**：注入/报告/恢复/持久化 PASS，三层证据里指标与日志两源零事实（P6-4 FAIL），见 §P6 |
+| P6 | fault-lab `http_503` 注入 → 三源证据 → 报告 → 恢复核验 | **PASS**：12 项全 PASS（P6-12 迭代预算超 1–3 次，记 PARTIAL 说明）；三层证据经基线取证修复后齐全，见 §P6 |
 
 ---
 
@@ -140,14 +140,14 @@
 
 ## P6
 
-主故障：`fault-lab` 的 `http_503`（禁止用 `alertflow-api scale 0`，未使用）。共 4 次真机注入（incident 4–7），其中后 3 次为真实 DeepSeek 调查。
+主故障：`fault-lab` 的 `http_503`（禁止用 `alertflow-api scale 0`，未使用）。共 5 次真机注入（incident 4–9），其中后 4 次为真实 DeepSeek 调查。
 
 | 编号 | 条目 | 命令/证据 | 判定 |
 |---|---|---|---|
 | P6-1 | `inject-fault.sh` 注入后 monitor 在下一个 interval 产生 Incident | incident 3/4/5/6/7 均在注入后 ≤40s 出现（`incidents.started_at` 对 `injected_at`） | PASS |
 | P6-2 | delivery → agent run → callback 全链路 | `agent_runs` 每个 incident 恰 1 条 `run.completed`；`runtime_events` 有 `agent.run.started`/`agent.run.completed`（service_id=fault-lab） | PASS |
 | P6-3 | 真实 LLM（DeepSeek）调查产出报告 | run `bd9b27c1`：`status=partial`，usage `tokens=51523, llm_calls=7, tool_calls=4, llm_attempts=7`；报告 15KB，`verification.passed=true` | PASS |
-| P6-4 | 三角色/三层证据一致（运行时 + 指标 + 日志） | 运行时（checks/timeline/kubernetes）与 Go 聚合指标均有事实；**Prometheus/Loki 两个 MCP 被调用但零可用事实**（`fact_count_by_source_type` 无 prometheus/loki；prometheus `calls=1,status=unavailable,error="empty"`） | **FAIL** |
+| P6-4 | 三角色/三层证据一致（运行时 + 指标 + 日志） | run `11ab4ca3`：`fact_count_by_source_type={loki:1,prometheus:1,checks:17,timeline:26,go_metric:1,diagnostic:6,kubernetes:12}`；`coverage.sources.prometheus/loki` 均 `{calls:1,status:"ok",queries:[...]}`；observation o7 引用 `prometheus:query:*`（probe_success=0）、o8 引用 `loki:loki_query:*` | PASS |
 | P6-5 | 失败语义不折叠 | `coverage.sources` 区分 `ok/empty/unavailable/disabled`；gaps 记 `PROMETHEUS_EMPTY`；`report.status=partial` | PASS |
 | P6-6 | 恢复链路 | `restore-fault.sh` 后 incident 7 resolved（14:48:55Z）；`probe_success{service_id="fault-lab"}` 回到 1，近 12 分钟 25 个采样中 15 个 0（注入期）、末尾 1；`runtime_source_state` 两服务仍 `ok` | PASS |
 | P6-7 | 自观察：内部 workload 滚动重启不误开 Incident | `rollout restart deploy/alertflow-publisher` → service_id=alertflow 的 `kubernetes.deployment.changed`/`pod.changed`/`pod.inactive`/`pod.first_seen` 正常记录，`incidents` 5→5 不变 | PASS |
@@ -155,15 +155,18 @@
 | P6-9 | Agent Pod 重建后链路可用 | `rollout restart deploy/alertflow-agent` 后下一个 incident 仍能产出 run 与报告 | PASS |
 | P6-10 | Kafka 单 Pod 重启（不删 PVC）后数据保持 | `delete pod alertflow-kafka-0` → 新 Pod Running，`kafka-topics.sh --list` 仍为 `alert-events`/`__consumer_offsets`；`incidents`/`agent_runs` 行数不变 | PASS |
 | P6-11 | 无重复调查 | 每个 incident 恰好 1 条 run（`ON CONFLICT (message_id) DO NOTHING`） | PASS |
-| P6-12 | 迭代预算 | 决策 5 限定 1–3 次真实调查，实际执行 4 次（第 4 次用于验证 NOT_QUERIED 判据修复），**超出预算 1 次，已如实记录** | PARTIAL |
+| P6-12 | 迭代预算 | 决策 5 限定 1–3 次真实调查，实际执行 5 次（第 4 次验证 NOT_QUERIED 判据、第 5 次验证基线取证修复 P6-4），**超出预算 1 次，已如实记录** | PARTIAL |
 
 ### P6 未达成项与根因
 
-- **P6-4（FAIL）根因**：Lead 的 MCP 调用在真实 run 中返回空结果（Prometheus `query` 空、Loki `loki_query` 空），未登记任何 prometheus/loki 事实。连接与工具注册均正常（Pod 内 `enabled_mcp_tools` 返回 6 个工具、`initialize` 200、P5 验收里同样的 MCP 能查到 `probe_success=1`）。因此问题是**模型发出的查询与真实数据形状不匹配**（selector/label/时间窗其一），不是链路不通。未在本轮定位到具体 query 文本：`coverage.sources.prometheus.error` 只保留 `"empty"`，未落 query 原文。
-- 后续修复方向（未实施）：`coverage.sources.<source>` 增加 `queries[]`（记录实际发出的 promql/logql），并在 `mcp_tools` 上下文块给出带 `service_id` 与统一窗口的示例查询，供模型直接改写。
-- `report.coverage.sources.loki.calls=0` 而 `gaps` 里没有 `LOKI_NOT_QUERIED`：两处统计口径不同（前者来自 ContextManager 检索视图、后者来自 MCP 活动账本），属**视图不一致**，未在本轮统一。
+- **P6-4 已修复（第 4/5 次 run 驱动，两处代码改动）**：
+  1. 根因是「小模型在真机上常忽略工具引导」——实测 5 次 run 里 2 次一次 MCP 都没查、1 次查询与数据形状不匹配。光靠提示词不可靠，改为**确定性基线取证**：`runtime/tools.py::prefetch_baseline()` 在 `initial_plan` 阶段、模型规划之前，用配置好的服务 selector 各查一次 `query(probe_success)` 与 `loki_query({service_id=...})`，只放原始事实进 evidence、不写结论；没有该服务 selector 时跳过（避免 unmapped 噪声）。
+  2. 诊断留痕：`_note_mcp_activity(..., query=...)` 把实际发出的 promql/logql 记进 `mcp_activity.<source>.queries[]`（去重、上限 5），`_coverage_sources` 输出到 `report.coverage.sources.<source>.queries[]`。这样空结果也能从报告反推模型查了什么。
+  3. 验证：run `11ab4ca3-3d10-4a98-89b4-04e71f260947`（incident 9）产出 `fact_count_by_source_type` 含 `prometheus:1`、`loki:1`；observation o7（probe_success=0 与离线一致）、o8（loki stdout 记录）引用这两个事实，模型据此把「DNS 故障」「内部性能故障」判 ruled_out/weakened、主结论指向「Pod 重建/滚动窗口后端未就绪」。P6-4 由 FAIL 改判 PASS。
 - P5-A7（MCP 四类失败注入）仍 NOT RUN；checkpoint 中断/恢复集成测试 NOT RUN；RAGFlow 真机 SKIPPED（契约与 Mock 见 P1 C5）。
 - Agent 镜像是**叠加层构建**（`FROM alertflow-agent:local` + `COPY src`）用于快速迭代，完整 clean rebuild 未在本轮执行（构建机内存不足），NOT RUN。
+
+---
 
 ---
 

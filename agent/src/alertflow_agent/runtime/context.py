@@ -223,6 +223,12 @@ def build_blocks(node: str, state: dict) -> list[Block]:
             + " conclusive; one targeted query per source is enough. Never repeat an identical query. An"
             + " empty or failed answer only proves absence for that source: report it as empty in coverage"
             + " instead of ignoring it."
+            + " Start from the configured matcher, for example query"
+            + " promql=probe_success{service_id=\"<sid>\"} as an instant query and"
+            + " loki_query logql={service_id=\"<sid>\"} for the logs; replace <sid> with the"
+            + " service id of this run. If that returns nothing, call metric_metadata or"
+            + " label_values(name=\"__name__\") (Prometheus) or label_names (Loki) before giving up,"
+            + " and widen the window to the full investigation window."
             + " Do not send credentials.",
         ], protect=True)] if node == "lead" and state.get("mcp_tools") else []),
         *([Block("runbook_tool", PIN, [
