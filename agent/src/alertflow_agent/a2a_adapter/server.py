@@ -91,7 +91,9 @@ class LedgerTaskStore(TaskStore):
         return ListTasksResponse(tasks=[], next_page_token="", page_size=0, total_size=0)
 
     async def delete(self, task_id: str, context) -> None:
-        self.ledger.cancel(task_id)
+        cancel = getattr(self, "persist_cancel", None)
+        if cancel:
+            cancel(task_id, "")
 
 
 class RunbookExecutor(AgentExecutor):
@@ -112,7 +114,7 @@ class RunbookExecutor(AgentExecutor):
         if row.get("status") in _TERMINAL:
             return row
         if _expired(row.get("deadline_at")) or row["message_id"] not in self.ledger.live:
-            self._store(row["task_id"], "failed", {**_EMPTY_ARTIFACT, "error": "runbook lookup failed"})
+            self._store(row["task_id"], "failed", {**_EMPTY_ARTIFACT, "error": "runbook lookup failed"}, "")
             return self.ledger.get_task(task_id)
         return row
 
@@ -154,27 +156,38 @@ class RunbookExecutor(AgentExecutor):
             current = self.ledger.get_message(message_id) or {}
             if current.get("status") in _TERMINAL:
                 return
-            self._store(task_id, "completed", artifact)
+            self._store(task_id, "completed", artifact, context_id)
         except Exception:
             current = self.ledger.get_message(message_id) or {}
             if current.get("status") not in _TERMINAL:
-                self._store(task_id, "failed", {**_EMPTY_ARTIFACT, "error": "runbook lookup failed"})
+                self._store(task_id, "failed", {**_EMPTY_ARTIFACT, "error": "runbook lookup failed"}, context_id)
         finally:
             self.ledger.live.discard(message_id)
 
     async def cancel(self, context, event_queue) -> None:
         task_id = context.task_id
-        self.ledger.cancel(task_id)
+        self.persist_cancel(task_id, context.context_id or "")
         await event_queue.enqueue_event(TaskStatusUpdateEvent(
             task_id=task_id,
             context_id=context.context_id or "",
             status=TaskStatus(state=TaskState.TASK_STATE_CANCELED),
         ))
 
-    def _store(self, task_id: str, status: str, artifact: dict | None) -> None:
-        task = _task(task_id, "", status, artifact)
+    def persist_cancel(self, task_id: str, context_id: str = "") -> None:
+        row = self.ledger.get_task(task_id)
+        if not row or row.get("status") in _TERMINAL:
+            return
+        self._store(row["task_id"], "canceled", row.get("artifact") or dict(_EMPTY_ARTIFACT), context_id)
+
+    def _store(self, task_id: str, status: str, artifact: dict | None, context_id: str = "") -> None:
+        row = self.ledger.get_task(task_id) or {}
+        if row.get("status") in _TERMINAL and status != row.get("status"):
+            return
+        canonical = row.get("task_id") or task_id
+        kept = _context_id(row, context_id)
+        task = _task(canonical, kept, status, artifact)
         body = MessageToDict(task, preserving_proto_field_name=True)
-        self.ledger.save_task(task_id, status, artifact, body, status == "canceled")
+        self.ledger.save_task(canonical, status, artifact, body, status == "canceled")
 
     async def _emit(self, event_queue, task_id: str, context_id: str, status: str, artifact: dict | None, persist: bool, artifact_event: bool = True) -> None:
         task = _task(task_id, context_id, status, artifact)
@@ -186,6 +199,11 @@ class RunbookExecutor(AgentExecutor):
                 task_id=task_id, context_id=context_id or "", artifact=task.artifacts[-1], last_chunk=True,
             ))
         await event_queue.enqueue_event(task)
+
+
+def _context_id(row: dict, fallback: str = "") -> str:
+    body = (row or {}).get("task_json") or {}
+    return str(body.get("context_id") or fallback or "")
 
 
 def _expired(deadline) -> bool:
@@ -227,7 +245,9 @@ def build_app(ledger=None, settings: dict | None = None, public_url: str = "http
     settings = settings or {}
     card = build_card(public_url)
     executor = RunbookExecutor(ledger, settings)
-    handler = DefaultRequestHandlerV2(executor, LedgerTaskStore(ledger, executor.read_task), card)
+    store = LedgerTaskStore(ledger, executor.read_task)
+    store.persist_cancel = executor.persist_cancel
+    handler = DefaultRequestHandlerV2(executor, store, card)
     return Starlette(routes=[*create_agent_card_routes(card), *create_rest_routes(handler)])
 
 

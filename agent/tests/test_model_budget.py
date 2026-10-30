@@ -99,3 +99,93 @@ def test_two_workers_share_one_attempt_budget():
     assert state["guard"]["llm_attempts"] == 2
     assert state["guard"]["llm_successes"] == 2
     assert state["guard"]["llm_calls"] == 2
+
+
+def _report(usage=None):
+    return ({
+        "summary": "ok",
+        "observations": [{"id": "o1", "text": "seen"}],
+        "hypotheses": [{"id": "h1", "text": "maybe", "layer": "unknown", "status": "undetermined"}],
+    }, usage or {"source": "estimated"})
+
+
+def _split(**overrides):
+    values = {"max_llm_calls": 8, "max_revisions": 0, "max_total_tokens": 150000, "context_budget_tokens": 24000}
+    values.update(overrides)
+    return Settings(**values)
+
+
+def test_investigation_cannot_spend_the_report_reserve():
+    state = _state()
+    settings = _split(max_llm_calls=6, max_revisions=1)
+    for _ in range(2):
+        assert call_model(ScriptModel([_ok()]), "lead", state, settings, Store())["tool"] == "finish_investigation"
+    blocked = call_model(ScriptModel([_ok()]), "lead", state, settings, Store())
+    assert blocked is None
+    assert state["guard"]["llm_attempts"] == 2
+    parsed = call_model(ScriptModel([_report()]), "write_report", state, settings, Store())
+    assert parsed["summary"] == "ok"
+    assert state["guard"]["llm_attempts"] == 3
+    assert state["guard"]["report_attempts"] == 1
+    assert state["guard"]["llm_calls"] == 3
+    assert state["guard"]["llm_successes"] == 3
+
+
+def test_report_attempts_stop_at_the_reserve():
+    state = _state()
+    settings = _split()
+    assert call_model(ScriptModel([_report()]), "write_report", state, settings, Store())["summary"] == "ok"
+    assert call_model(ScriptModel([_report()]), "write_report", state, settings, Store())["summary"] == "ok"
+    blocked = call_model(ScriptModel([_report()]), "write_report", state, settings, Store())
+    assert blocked is None
+    assert state["stop_reason"] == "budget_llm_calls"
+    assert state["failure_reason"] == "budget_llm_calls"
+    assert state["guard"]["report_attempts"] == 2
+    assert state["guard"]["llm_attempts"] == 2
+    assert state["guard"]["llm_successes"] == 2
+
+
+def test_report_tokens_stop_at_the_reserve_and_the_global_cap(monkeypatch):
+    monkeypatch.setattr("alertflow_agent.runtime.model.estimate_tokens", lambda _text: 100)
+    reserved = _state()
+    settings = _split(context_budget_tokens=100, max_total_tokens=10000)
+    assert call_model(ScriptModel([_report()]), "write_report", reserved, settings, Store())["summary"] == "ok"
+    blocked = call_model(ScriptModel([_report()]), "write_report", reserved, settings, Store())
+    assert blocked is None
+    assert reserved["failure_reason"] == "budget_tokens"
+    assert reserved["guard"]["report_attempts"] == 1
+    global_cap = _state()
+    tight = _split(context_budget_tokens=1000, max_total_tokens=150)
+    assert call_model(ScriptModel([_report()]), "write_report", global_cap, tight, Store())["summary"] == "ok"
+    blocked = call_model(ScriptModel([_report()]), "write_report", global_cap, tight, Store())
+    assert blocked is None
+    assert global_cap["failure_reason"] == "budget_tokens"
+    assert global_cap["guard"]["llm_attempts"] == 1
+
+
+def test_report_retries_count_and_two_callers_share_the_reserve():
+    state = _state()
+    settings = _split()
+    parsed = call_model(
+        ScriptModel([RuntimeError("down"), _report()]),
+        "write_report", state, settings, Store(),
+    )
+    assert parsed["summary"] == "ok"
+    assert state["guard"]["report_attempts"] == 2
+    assert state["guard"]["llm_successes"] == 1
+    assert state["guard"]["llm_calls"] == 2
+    blocked = call_model(ScriptModel([_report()]), "write_report", state, settings, Store())
+    assert blocked is None
+    shared = _state()
+
+    def worker():
+        call_model(ScriptModel([_report()]), "write_report", shared, settings, Store())
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert shared["guard"]["report_attempts"] == 2
+    assert shared["guard"]["llm_attempts"] == 2
+    assert shared["guard"]["llm_successes"] == 2

@@ -14,6 +14,8 @@ from alertflow_agent.integrations.mcp import (
     PROMETHEUS_TOOLS,
     SCOPED_TOOLS,
     clamp_window,
+    _IDENT,
+    _mask_promql,
     fit_promql_window,
     scope_logql,
     scope_promql,
@@ -500,7 +502,19 @@ def _mcp_request(name, args, state, settings, source):
 
 
 def _prom_metric(query: str) -> str:
-    return (query or "").strip().split("{", 1)[0].strip()
+    """指标名 up 才返回 up。引号残缺时无法判断，同样返回 up。"""
+    text = query or ""
+    if text.count('"') % 2:
+        return "up"
+    masked = _mask_promql(text)
+    for match in _IDENT.finditer(masked):
+        if match.group(0) != "up":
+            continue
+        rest = masked[match.end():].lstrip()
+        if rest.startswith("=~") or rest.startswith("="):
+            continue
+        return "up"
+    return ""
 
 
 def _rfc3339(epoch: int) -> str:

@@ -160,6 +160,15 @@ def test_configured_query_writes_scoped_evidence_once():
     probe_result = run_tool("query", {"query": "probe_success"}, probe, _settings(), {"mcp": Recorder(text='[{"value": "1"}]')})
     probe_item = probe["evidence"][probe_result["evidence_ids"][0]]
     assert "up is Prometheus scrape success, not API health" not in probe_item["limitations"]
+    for expression in ("sum(up)", "sum(up) by (job)", 'up{service="api"}', "up"):
+        marked = _state()
+        marked_result = run_tool("query", {"query": expression}, marked, _settings(), {"mcp": Recorder(text='[{"value": "1"}]')})
+        marked_item = marked["evidence"][marked_result["evidence_ids"][0]]
+        assert "up is Prometheus scrape success, not API health" in marked_item["limitations"]
+    from alertflow_agent.runtime.tools import _prom_metric
+    assert _prom_metric('http_requests_total{path="/up"}') == ""
+    assert _prom_metric('metric{up="1"}') == ""
+    assert _prom_metric('up or "') == "up"
     assert "prom-secret" not in json.dumps(item)
     assert run_tool("series", {}, state, _settings(), {"mcp": client})["note"] == "unknown tool"
     assert [name for name, _ in client.calls] == ["query"]

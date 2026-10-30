@@ -306,6 +306,76 @@ def test_restart_fails_a_working_task_without_rerunning():
     assert len(calls) == 1
 
 
+def test_cancel_matches_task_json_and_keeps_context():
+    import alertflow_agent.a2a_adapter.server as server
+    import asyncio
+    server.research = lambda *args: _ok_artifact()
+    ledger = MemoryLedger()
+    executor = RunbookExecutor(ledger, {"ragflow_base_url": "http://ragflow.test", "ragflow_api_key": "k", "ragflow_agent_id": "a", "timeout_seconds": 30})
+
+    async def go():
+        await executor.execute(Context(), Queue())
+        await executor.join()
+
+    asyncio.run(go())
+    row = ledger.get_message("m1")
+    assert row["status"] == "completed"
+    assert row["task_json"]["context_id"] == "ctx-1"
+    assert row["task_json"]["status"]["state"] == "TASK_STATE_COMPLETED"
+
+
+def test_cancel_is_idempotent_and_a_late_result_cannot_complete_it():
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def research(base_url, api_key, agent_id, query, timeout):
+        calls.append(query)
+        started.set()
+        assert release.wait(2)
+        return _ok_artifact()
+
+    import alertflow_agent.a2a_adapter.server as server
+    import asyncio
+    server.research = research
+    ledger = MemoryLedger()
+    executor = RunbookExecutor(ledger, {"ragflow_base_url": "http://ragflow.test", "ragflow_api_key": "k", "ragflow_agent_id": "a", "timeout_seconds": 30})
+
+    async def go():
+        await executor.execute(Context(), Queue())
+        assert await asyncio.to_thread(started.wait, 2)
+        ledger.alias("m1", "alias-1")
+        await executor.cancel(type("Ctx", (), {"task_id": "alias-1", "context_id": "ctx-1"})(), Queue())
+        row = ledger.get_task("alias-1")
+        assert row["status"] == "canceled"
+        assert row["cancelled"] is True
+        assert row["task_json"]["status"]["state"] == "TASK_STATE_CANCELED"
+        assert row["task_json"]["context_id"] == "ctx-1"
+        before = dict(row["task_json"])
+        executor.persist_cancel("alias-1", "ctx-1")
+        assert ledger.get_message("m1")["task_json"] == before
+        release.set()
+        await executor.join()
+
+    asyncio.run(go())
+    assert ledger.get_message("m1")["status"] == "canceled"
+    assert ledger.get_message("m1")["task_json"]["status"]["state"] == "TASK_STATE_CANCELED"
+    assert len(calls) == 1
+
+
+def test_cancel_does_not_replace_a_completed_task():
+    ledger = MemoryLedger()
+    executor = RunbookExecutor(ledger, {"timeout_seconds": 30})
+    assert ledger.claim("m1", "task-1", 30)
+    executor._store("task-1", "completed", _ok_artifact(), "ctx-9")
+    executor.persist_cancel("task-1", "ctx-9")
+    row = ledger.get_message("m1")
+    assert row["status"] == "completed"
+    assert row["artifact"]["citations_available"] is True
+    assert row["task_json"]["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert row["task_json"]["context_id"] == "ctx-9"
+
+
 def test_postgres_restart_fails_the_saved_working_task():
     import os
     from pathlib import Path
@@ -347,4 +417,47 @@ def test_postgres_restart_fails_the_saved_working_task():
         assert again["task_json"]["status"]["state"] == "TASK_STATE_FAILED"
     finally:
         with psycopg.connect(admin, autocommit=True) as conn:
+            conn.execute(f'DROP DATABASE IF EXISTS "{name}"')
+
+
+def test_postgres_cancel_matches_task_json_for_an_alias():
+    import os
+    from pathlib import Path
+
+    url = os.environ.get("ALERTFLOW_TEST_DATABASE_URL", "")
+    if not url:
+        pytest.skip("ALERTFLOW_TEST_DATABASE_URL is not set")
+    import psycopg
+    from alertflow_agent.a2a_adapter.store import PostgresLedger
+
+    name = "alertflow_test_a2a_cancel"
+    with psycopg.connect(url, autocommit=True) as conn:
+        conn.execute(f'DROP DATABASE IF EXISTS "{name}"')
+        conn.execute(f'CREATE DATABASE "{name}"')
+    target = url.rsplit("/", 1)[0] + "/" + name
+    try:
+        root = Path(__file__).resolve().parents[2] / "backend" / "internal" / "db" / "migrations"
+        sql = []
+        for filename in ("00018_a2a_adapter_tasks.sql", "00019_a2a_task_aliases.sql"):
+            text = (root / filename).read_text()
+            sql.append(text.split("-- +goose Down", 1)[0].replace("-- +goose Up", ""))
+        with psycopg.connect(target, autocommit=True) as conn:
+            conn.execute("\n".join(sql))
+        ledger = PostgresLedger(target)
+        executor = RunbookExecutor(ledger, {"timeout_seconds": 30})
+        assert ledger.claim("m1", "task-1", 30)
+        executor._store("task-1", "working", None, "ctx-pg")
+        ledger.alias("m1", "alias-1")
+        executor.persist_cancel("alias-1", "ctx-pg")
+        row = PostgresLedger(target).get_task("alias-1")
+        assert row["status"] == "canceled"
+        assert row["cancelled"] is True
+        assert row["task_json"]["status"]["state"] == "TASK_STATE_CANCELED"
+        assert row["task_json"]["context_id"] == "ctx-pg"
+        executor.persist_cancel("alias-1", "ctx-pg")
+        again = PostgresLedger(target).get_task("task-1")
+        assert again["status"] == "canceled"
+        assert again["task_json"]["context_id"] == "ctx-pg"
+    finally:
+        with psycopg.connect(url, autocommit=True) as conn:
             conn.execute(f'DROP DATABASE IF EXISTS "{name}"')

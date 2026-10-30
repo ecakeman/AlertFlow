@@ -238,7 +238,7 @@ P1 入口：把已解析版本钉住，同一 lock 给本地、`.github/workflow
 - `routes_control.py` 的 `reset` 是 `POST /control/v1/reset`，调用 `store.reset()`，而 `StateStore.reset` 调用 `update(default_state())`。
 - 场景在 `scenarios.py`，多个 profile 的 inject 使用 `mode=http_503`。
 
-日志：`main.py` 的 `_configure_logging` 使用 `logging.basicConfig`，格式是 `%(asctime)s %(levelname)s %(name)s: %(message)s`。这不是 JSON 行。`state_store.py` 的 `_persist` 把状态写成 `simulator.json`，不是 stdout。`profiles.py` 的诊断条目是 API 快照字段（`http_status`、`message`、`route` 等），不是容器日志行。没有进程输出可以交给 Loki。Loki 取证：`NOT RUN`。
+日志：`main.py` 的 `_configure_logging` 使用 `logging.basicConfig`，格式是 `%(asctime)s %(levelname)s %(name)s: %(message)s`，写到 stderr。这不是 JSON。容器的 stderr 可以被采集，文本格式本身不表示没有日志。源码里没有 `fault_id`、`service_id` 或故障模式这类关联字段，这一点只是源码结论。`state_store.py` 的 `_persist` 写的是 `simulator.json`，`profiles.py` 的条目是 API 快照字段（`http_status`、`message`、`route` 等）。这两处都不是容器日志。构建、运行和 Loki 取证：`NOT RUN`。
 
 ## P2–P7 入口
 

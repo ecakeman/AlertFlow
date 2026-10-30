@@ -58,10 +58,8 @@ class MemoryLedger:
             self.by_task[task_id] = message_id
 
     def cancel(self, task_id: str) -> None:
-        row = self.get_task(task_id)
-        if row:
-            self.rows[row["message_id"]]["cancelled"] = True
-            self.rows[row["message_id"]]["status"] = "canceled"
+        """状态由 RunbookExecutor.persist_cancel 写入，避免只改 status。"""
+        return None
 
 
 class PostgresLedger:
@@ -144,16 +142,8 @@ class PostgresLedger:
             conn.commit()
 
     def cancel(self, task_id: str) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE a2a_adapter_tasks
-                SET cancelled = true, status = 'canceled', updated_at = now()
-                WHERE task_id = %s
-                """,
-                (task_id,),
-            )
-            conn.commit()
+        """状态由 RunbookExecutor.persist_cancel 写入，避免只改 status。"""
+        return None
 
 
 def _row(row) -> dict | None:

@@ -18,3 +18,11 @@
 | P1-PYTHON-LOCK | 本地、CI、镜像使用同一 `agent/uv.lock` | `agent/Dockerfile`、`.github/workflows/test.yml` | `uv export --frozen` 能读出 lock。干净镜像构建这次没有跑，CI 会跑 `images` job |
 
 真实 RAGFlow completion、真实 Prometheus/Loki 查询、Fault Lab 进程：`SKIPPED`。没有用 mock 代替这些运行。
+
+# P1.1 验收
+
+| 编号 | 要求 | 实现 | 测试 |
+| --- | --- | --- | --- |
+| P1.1-A2A-CANCEL | 取消同时写 status、cancelled、artifact 和 task_json；alias 可取消；终态不覆盖；迟到结果仍是 canceled；context_id 保留 | `RunbookExecutor.persist_cancel`、`_store` | `test_cancel_matches_task_json_and_keeps_context`、`test_cancel_is_idempotent_and_a_late_result_cannot_complete_it`、`test_cancel_does_not_replace_a_completed_task`、`test_postgres_cancel_matches_task_json_for_an_alias` |
+| P1.1-REPORT-BUDGET | 报告次数和 token 从现有上限预留，调查不能提前花掉 | `runtime/model.py` 的 `_report_attempt_reserve`、`_report_token_reserve` | `test_investigation_cannot_spend_the_report_reserve`、`test_report_attempts_stop_at_the_reserve`、`test_report_tokens_stop_at_the_reserve_and_the_global_cap`、`test_report_retries_count_and_two_callers_share_the_reserve` |
+| P1.1-PROM-UP | `sum(up)` 也标成 scrape 成功；`probe_success` 和 label 名 `up` 不标 | `_prom_metric` 复用 `_mask_promql` | `test_configured_query_writes_scoped_evidence_once` |
