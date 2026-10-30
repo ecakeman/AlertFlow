@@ -200,6 +200,30 @@ always safe.
 
 ---
 
+## Kubernetes (Kind, single node)
+
+`deploy/k8s/` holds a Kustomize tree for one local Kind cluster: every role runs
+as its own Pod (`api`, `monitor`, `publisher`, `consumer`, `delivery`, `agent`,
+`postgres`, `kafka`, `redis`) plus a separate `fault-lab` fault target, so a
+scenario never needs to scale a role to zero. The observability stack
+(Prometheus, blackbox, Loki, Alloy, both MCP servers) lives in a separate
+overlay and is applied after the core Pods are healthy.
+
+```bash
+export PATH=$HOME/bin:$PATH          # kind, kubectl, kustomize
+deploy/k8s/scripts/create-cluster.sh
+deploy/k8s/scripts/build-and-load-images.sh --load-only
+deploy/k8s/scripts/create-secrets.sh       # reads $HOME/.config/alertflow/k8s-secrets.env
+deploy/k8s/scripts/deploy-core.sh
+deploy/k8s/scripts/deploy-fault-lab.sh
+deploy/k8s/scripts/smoke-test.sh
+```
+
+Full runbook, resource budget, and the environment-specific notes (images must
+be imported into the node's containerd; the node has no outbound registry
+access) are in `deploy/k8s/README.md`. Stage-by-stage results are recorded in
+`docs/v2/REV6_ACCEPTANCE.md`.
+
 ## How it works
 
 One static Go binary embeds the built Vue app and serves both the API and the UI.

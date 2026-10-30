@@ -10,6 +10,23 @@ Companion docs: [CONFIGURATION.md](CONFIGURATION.md) (every `config.yaml` field)
 
 ---
 
+
+### Deployment topology
+
+The supported shape is one Pod per role: `alertflow-api` (Gin on `8080` and Go
+gRPC on `9090`), `monitor`, `publisher`, `consumer`, `delivery`, `agent`
+(FastAPI on `8000`, AgentTask gRPC on `9000`), plus `postgres`, `kafka`, and
+`redis` as StatefulSets or Deployments. The `alertflow` service id and the
+`fault-lab` service id are always distinct: `alertflow` is the application
+observing itself, `fault-lab` is the injected fault target. A fault scenario
+never scales `alertflow-api` to zero, because that Pod also serves the Go gRPC
+calls the agent depends on.
+
+The observer runs inside the `monitor` Pod with a namespace-scoped read-only
+Role in `alertflow` and a second one in `fault-lab`. Logs reach Loki through an
+Alloy DaemonSet that tails `/var/log/pods` on the node read-only; the agent
+never talks to the kubelet or to container runtimes directly.
+
 ## 1. Where data lives
 
 Four stores, each with a strict job. Putting data in the wrong one is the most

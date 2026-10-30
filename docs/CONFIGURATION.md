@@ -206,3 +206,22 @@ You can edit `config.yaml` directly. Changes made through the UI are written
 atomically (temp file + rename) and re-validated. If you edit the file while the
 app is running, use **Settings → Configuration** (or restart) to reload it. An
 invalid file is rejected with an error rather than applied.
+
+## Sources the agent reads through MCP
+
+The agent talks to Prometheus and Loki only through their MCP servers; the Go
+API is reached over gRPC. On Kubernetes these come from the `alertflow-env`
+ConfigMap, so a clean cluster deploy needs no extra environment:
+
+| Variable | Meaning |
+| --- | --- |
+| `ALERTFLOW_GRPC_TARGET` | AlertFlow Go gRPC address (`alertflow-api.alertflow.svc:9090`). Empty means timeline and Kubernetes state are unreadable; there is no HTTP fallback. |
+| `PROMETHEUS_MCP_URL` | Prometheus MCP endpoint (`http://prometheus-mcp.observability.svc:8080/mcp`). |
+| `LOKI_MCP_URL` | Loki MCP endpoint (`http://loki-mcp.observability.svc:8080/stream`). |
+| `PROMETHEUS_SERVICE_SELECTORS` / `LOKI_SERVICE_SELECTORS` | `service_id=...` matchers per service, used to scope every query. A service with no selector is reported as unmapped instead of being queried cluster-wide. |
+
+Selectors are the only way a query is tied to a service, so they must match the
+label the observability overlay writes (`service_id`). If a source is enabled
+but the model never queries it during an HTTP or runtime fault, the run records
+`PROMETHEUS_NOT_QUERIED` / `LOKI_NOT_QUERIED` in `coverage.gaps` instead of
+silently reporting "no evidence".
