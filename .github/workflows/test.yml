@@ -144,4 +144,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build the Loki MCP image
-        run: docker build --progress=plain -t alertflow-loki-mcp:ci deploy/observability/loki-mcp
+        run: docker build --progress=plain -t alertflow-loki-mcp:v0.6.0 deploy/observability/loki-mcp
+
+  kustomize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kustomize
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^ *kustomize_version: *//p' deploy/k8s/versions.lock.yaml | tr -d '"' | head -n1)"
+          version="${version:-v5.7.1}"
+          curl -fsSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${version}/kustomize_${version}_linux_amd64.tar.gz" -o /tmp/kustomize.tgz
+          tar -xzf /tmp/kustomize.tgz -C /tmp
+          sudo install -m 0755 /tmp/kustomize /usr/local/bin/kustomize
+      - name: Render every target
+        run: |
+          set -euo pipefail
+          for target in base overlays/local-kind overlays/fault-lab overlays/runbook overlays/observability; do
+            echo "== kustomize build $target"
+            kustomize build "deploy/k8s/$target" >/dev/null
+          done
+      - name: Reject floating tags and stray hostPath
+        run: |
+          set -euo pipefail
+          for target in base overlays/local-kind overlays/fault-lab overlays/runbook; do
+            kustomize build "deploy/k8s/$target"
+          done > /tmp/rendered.yaml
+          if grep -n 'image: .*:latest' /tmp/rendered.yaml; then
+            echo "floating image tag found" >&2
+            exit 1
+          fi
+          if grep -n 'hostPath:' /tmp/rendered.yaml; then
+            echo "hostPath is not allowed outside the observability overlay" >&2
+            exit 1
+          fi

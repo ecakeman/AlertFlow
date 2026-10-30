@@ -1,0 +1,84 @@
+# Prometheus（StatefulSet 单实例 + 小 PVC，72h retention；规格 §9.3）。
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: prometheus
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/component: server
+    app.kubernetes.io/part-of: alertflow
+spec:
+  serviceName: prometheus
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: prometheus
+        app.kubernetes.io/component: server
+        app.kubernetes.io/part-of: alertflow
+    spec:
+      serviceAccountName: prometheus
+      automountServiceAccountToken: false
+      # local-path 的 PV 是 hostPath，kubelet 不会对 hostPath 应用 fsGroup，
+      # 所以固定 uid 0 以保证能写 PVC（容器内不 privileged、不额外加 cap）。
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+      containers:
+        - name: prometheus
+          image: prom/prometheus
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=72h
+            - --storage.tsdb.retention.size=1GB
+            - --web.listen-address=:9090
+          ports:
+            - name: http
+              containerPort: 9090
+          resources:
+            requests:
+              cpu: 100m
+              memory: 300Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+              readOnly: true
+            - name: data
+              mountPath: /prometheus
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

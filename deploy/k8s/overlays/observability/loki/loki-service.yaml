@@ -1,0 +1,30 @@
+# Loki（StatefulSet 单实例 + 小 PVC，72h retention；规格 §9.3 / §11.2）。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: loki
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/component: logs
+    app.kubernetes.io/part-of: alertflow
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/component: logs
+    app.kubernetes.io/part-of: alertflow
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/component: logs
+  ports:
+    - name: http
+      port: 3100
+      targetPort: http

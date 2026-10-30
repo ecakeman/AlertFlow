@@ -1,0 +1,123 @@
+# Alloy K8s 日志采集配置（规格 §11.2）。
+#
+# 采集路线（P0 已实测通过，证据见 deploy/observability-lab/P0_AUDIT.md）：
+#   节点 /var/log/pods/<ns>_<pod>_<uid>/<container>/*.log  →  hostPath 只读挂载
+#   → discovery.kubernetes(role=pod, 限本节点+三个 namespace) → discovery.relabel
+#   → loki.source.file → loki.process(stage.cri) → loki.write(HTTP push)
+#
+# 关键点：
+#   - 不用 docker.sock，不 privileged，不写节点日志目录（只读挂载）。
+#   - discovery.kubernetes 的 field selector 把范围钉在 spec.nodeName == 本 Pod 所在
+#     节点（Downward API 注入 NODE_NAME），因此每个 Node 的 Alloy 只处理本节点 Pod。
+#   - service_id 只从 Pod label alertflow.io/service-id 复制，不靠 Pod 名/namespace 猜。
+#   - stage.cri 解析 CRI 行格式并沿用行首时间戳作为 entry 时间戳（已实测），
+#     故不需要 stage.timestamp；target labels 会自动成为 Loki stream labels，
+#     故不需要 stage.labels/static_labels。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-config
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/part-of: alertflow
+data:
+  config.alloy: |
+    logging {
+      level  = "info"
+      format = "logfmt"
+    }
+
+    // 只发现本节点上的 Pod，且只限三个 namespace。
+    discovery.kubernetes "pods" {
+      role = "pod"
+
+      namespaces {
+        names = ["alertflow", "fault-lab", "observability"]
+      }
+
+      selectors {
+        role  = "pod"
+        field = "spec.nodeName=" + sys.env("NODE_NAME")
+      }
+    }
+
+    // 把 K8s 元数据整理成 Loki labels；__path__ 由 Pod UID + 容器名拼出。
+    discovery.relabel "pods" {
+      targets = discovery.kubernetes.pods.targets
+
+      // /var/log/pods/<namespace>_<pod>_<uid>/<container>/<n>.log
+      rule {
+        source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_pod_container_name"]
+        separator     = "/"
+        regex         = "(.+)/(.+)"
+        target_label  = "__path__"
+        replacement   = "/var/log/pods/*$1/$2/*.log"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_namespace"]
+        target_label  = "namespace"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_name"]
+        target_label  = "pod"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_container_name"]
+        target_label  = "container"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_node_name"]
+        target_label  = "node"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+        target_label  = "app"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_component"]
+        target_label  = "component"
+      }
+      // 规格要求：service_id 必须来自 Pod 的 alertflow.io/service-id label。
+      // 没有该 label 的 Pod（观测设施自身）就不带 service_id，绝不从名字推断。
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_alertflow_io_service_id"]
+        target_label  = "service_id"
+      }
+      rule {
+        target_label = "cluster"
+        replacement  = "kind-alertflow-lab"
+      }
+    }
+
+    // loki.source.file 不会自己展开 glob：__path__ 里的 * 必须由 local.file_match
+    // 展开（实测：直接给带 * 的路径会报 `failed to create source, skipping ...
+    // stat failed: stat /var/log/pods/*<uid>/<container>/*.log`，因为组件按字面
+    // 路径 stat）。local.file_match 只下发真实存在的文件 target，未创建完成的 Pod
+    // 会被跳过而不是刷错误。
+    local.file_match "pods" {
+      path_targets = discovery.relabel.pods.output
+      sync_period  = "5s"
+    }
+
+    loki.source.file "pods" {
+      targets    = local.file_match.pods.targets
+      forward_to = [loki.process.pods.receiver]
+      // 从文件开头读：P5 首次验证需要在 apply 后立刻能查到行，而新 Pod 的日志
+      // 往往只有启动时那几行；positions 持久在 /var/lib/alloy（每 Node 独立），
+      // 重启不会重复推送，所以回放历史是一次性的、可接受的代价。
+      tail_from_end = false
+    }
+
+    loki.process "pods" {
+      forward_to = [loki.write.loki.receiver]
+      // CRI 格式：时间戳 + stream + flag + 内容；stage.cri 负责剥前缀并用行首时间戳。
+      stage.cri {}
+    }
+
+    loki.write "loki" {
+      endpoint {
+        url = "http://loki.observability.svc.cluster.local:3100/loki/api/v1/push"
+      }
+    }

@@ -1,0 +1,49 @@
+# 观测栈 overlay（规格 §9 / §11）。
+#
+# 本目录自包含，不引用 ../base：base 的 kustomization.yaml 由 deploy-agent 维护，
+# 且 base 已经声明 observability / alertflow / fault-lab 三个 Namespace。这里重复
+# 声明 observability Namespace 只是为了 `kubectl apply -k` 能独立幂等执行；先
+# apply base 还是本 overlay 都不影响对象存在性。
+#
+# 镜像版本集中：所有镜像 tag 只在这里（images:）维护；业务清单里写不带 tag 的
+# 镜像名，避免版本散落。deploy-agent 的 deploy/k8s/versions.lock.yaml 是权威清单，
+# 这里保持一致；禁 latest。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  # ---- Prometheus + Blackbox -------------------------------------------
+  - prometheus/prometheus-configmap.yaml
+  - prometheus/prometheus-service.yaml
+  - prometheus/prometheus-statefulset.yaml
+  - blackbox/blackbox-configmap.yaml
+  - blackbox/blackbox-service.yaml
+  - blackbox/blackbox-deployment.yaml
+  # ---- Loki -------------------------------------------------------------
+  - loki/loki-configmap.yaml
+  - loki/loki-service.yaml
+  - loki/loki-statefulset.yaml
+  # ---- Alloy DaemonSet + 最小 RBAC --------------------------------------
+  - alloy/alloy-rbac.yaml
+  - alloy/alloy-configmap.yaml
+  - alloy/alloy-daemonset.yaml
+  # ---- MCP 网关（ClusterIP only）---------------------------------------
+  - mcp/prometheus-mcp.yaml
+  - mcp/loki-mcp.yaml
+
+images:
+  - name: prom/prometheus
+    newTag: v3.15.1
+  - name: prom/blackbox-exporter
+    newTag: v0.29.1
+  - name: grafana/loki
+    newTag: 3.5.12
+  - name: grafana/alloy
+    newTag: v1.21.3
+  - name: ghcr.io/tjhop/prometheus-mcp-server
+    newTag: v0.18.0
+  # 由本仓库 deploy/observability/loki-mcp/Dockerfile 构建（CI job 见
+  # deploy/observability-mcp/README.md）；kind 集群需 `kind load docker-image`。
+  - name: alertflow-loki-mcp
+    newTag: v0.6.0

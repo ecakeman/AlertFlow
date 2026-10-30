@@ -1,0 +1,66 @@
+# Prometheus 抓取配置（规格 §11.1）。
+#
+# 与 docker-compose 的 deploy/observability/prometheus.yml 的差异（有意为之）：
+#   1. 多一个 fault-lab probe：fault-lab 是主故障演示目标，alertflow-api 只作自观察。
+#   2. 每个 job 用 relabel 从探测目标派生 `service_id` label（不靠 job 名猜），
+#      供 PROMETHEUS_SERVICE_SELECTORS 精确匹配。
+#   3. 抓取地址用集群 DNS（*.svc.cluster.local），不再是 compose 的服务名。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/component: server
+    app.kubernetes.io/part-of: alertflow
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      scrape_timeout: 10s
+      evaluation_interval: 30s
+
+    scrape_configs:
+      # 主故障 probe：Fault Lab 的 /health（http_503 / slow / flap / connection_reset
+      # 等故障模式都作用在 /health 上；/healthz 只表示模拟器自身存活，不能用来探测）。
+      - job_name: blackbox-fault-lab
+        metrics_path: /probe
+        params:
+          module: [http_2xx]
+        static_configs:
+          - targets:
+              - http://fault-lab.fault-lab.svc.cluster.local:8090/health
+        relabel_configs:
+          - source_labels: [__address__]
+            target_label: __param_target
+          - source_labels: [__param_target]
+            target_label: instance
+          - target_label: __address__
+            replacement: blackbox-exporter.observability.svc.cluster.local:9115
+          # service_id 由 relabel 生成：从探测 URL 派生，目标改名后配置就失效，
+          # 不会被静默沿用。替换值必须与 service_id 枚举一致（fault-lab）。
+          - source_labels: [__param_target]
+            regex: '.*fault-lab\..*'
+            target_label: service_id
+            replacement: fault-lab
+
+      # 自观察 probe：AlertFlow API 的 setup 状态接口。
+      - job_name: blackbox-alertflow-api
+        metrics_path: /probe
+        params:
+          module: [http_2xx]
+        static_configs:
+          - targets:
+              - http://alertflow-api.alertflow.svc.cluster.local:8080/api/setup/status
+        relabel_configs:
+          - source_labels: [__address__]
+            target_label: __param_target
+          - source_labels: [__param_target]
+            target_label: instance
+          - target_label: __address__
+            replacement: blackbox-exporter.observability.svc.cluster.local:9115
+          - source_labels: [__param_target]
+            regex: '.*alertflow-api\..*'
+            target_label: service_id
+            replacement: alertflow

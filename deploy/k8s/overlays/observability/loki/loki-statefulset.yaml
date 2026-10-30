@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: loki
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/component: logs
+    app.kubernetes.io/part-of: alertflow
+spec:
+  serviceName: loki
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: loki
+      app.kubernetes.io/component: logs
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: loki
+        app.kubernetes.io/component: logs
+        app.kubernetes.io/part-of: alertflow
+    spec:
+      serviceAccountName: loki
+      automountServiceAccountToken: false
+      # local-path 的 PV 是 hostPath，fsGroup 不生效；固定 uid 0 保证能写 PVC。
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+      containers:
+        - name: loki
+          image: grafana/loki
+          args:
+            - -config.file=/etc/loki/loki.yml
+          ports:
+            - name: http
+              containerPort: 3100
+          resources:
+            requests:
+              cpu: 100m
+              memory: 300Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          # Loki 单实例启动时 ingester 需要拉起 ring/TSDB，首次 Ready 约 10–20s。
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 6
+          volumeMounts:
+            - name: config
+              mountPath: /etc/loki
+              readOnly: true
+            - name: data
+              mountPath: /loki
+      volumes:
+        - name: config
+          configMap:
+            name: loki-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi

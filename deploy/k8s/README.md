@@ -27,7 +27,7 @@ deploy/k8s/
 │   ├── fault-lab/            # ns fault-lab：Fault Lab Deployment/Service/PVC
 │   ├── runbook/              # ns runbook：a2a-adapter（可选，需先给 Agent 镜像加 a2a-sdk）
 │   └── observability/        # 观测栈（不属于本目录作者，由 observability-agent 提供）
-└── scripts/                  # 10 个可重复执行的运维脚本
+└── scripts/                  # 11 个可重复执行的运维脚本 + lib.sh（公共函数）
 ```
 
 ## 2. 前置条件
@@ -90,29 +90,40 @@ deploy/k8s/
 | **核心 + fault-lab** | | **760m / 1824Mi ≈ 1.78 GiB** | **5100m / 4928Mi** | requests 占 allocatable **26.9% 内存 / 4.8% CPU** |
 | runbook a2a-adapter（可选） | Deployment | 30m / 96Mi | 300m / 384Mi | 需 `a2a-sdk==1.3.0` |
 
-### 3.3 观测栈（数字由 observability-agent 实测，本目录只汇总）
+### 3.3 观测栈（按 `kustomize build overlays/observability` 统计，本目录只汇总）
+
+> 2026-10-30 复核：以下数字直接从渲染后的清单统计（此前 observability-agent 估算
+> requests≈1.32GiB 偏保守）。**观测清单归 observability-agent 维护，若其改动 resources，
+> 本表与 §3.4/§3.6 需同步重算。**
 
 | 组件 | requests | limits |
 | --- | --- | --- |
-| prometheus | 200m / 256Mi | 500m / 1Gi |
-| blackbox-exporter | 20m / 32Mi | 100m / 64Mi |
-| loki | 100m / 256Mi | 500m / 512Mi |
-| alloy（DaemonSet） | 50m / 128Mi | 500m / 256Mi |
-| prometheus-mcp | 30m / 96Mi | 200m / 192Mi |
-| loki-mcp（frugal 模式） | 30m / 64Mi | 200m / 192Mi |
-| **小计** | **430m / 832Mi** | **2000m / 3064Mi** |
+| prometheus（StatefulSet） | 100m / 300Mi | 500m / 512Mi |
+| blackbox-exporter | 10m / 16Mi | 100m / 64Mi |
+| loki（StatefulSet） | 100m / 300Mi | 500m / 512Mi |
+| alloy（DaemonSet） | 50m / 50Mi | 200m / 200Mi |
+| prometheus-mcp | 20m / 32Mi | 200m / 128Mi |
+| loki-mcp（frugal 模式） | 20m / 32Mi | 200m / 128Mi |
+| **小计** | **300m / 730Mi** | **1700m / 1544Mi** |
+
+> **实测值（P5 复核）**：observability-agent 实测 requests 300m/730Mi、limits 1700m/1544Mi、
+> 6 个组件 RSS 合计 ≈420MB，与本表一致。P5 部署后把 §3.6 C 行回填为实测值；若 overlay
+> resources 变化，以实测为准重算，**不要为数字好看调整 limits**。
 
 ### 3.4 三阶段预算合计与余量
 
 | 阶段 | 内容 | requests 合计 | 占 allocatable | limits 合计 | 占 allocatable |
 | --- | --- | --- | --- | --- | --- |
-| A | 核心 9 Pod | 710m / 1696Mi | 12.0% / 25.6% | 4600m / 4544Mi | 28.8% / 67.1% |
-| B | + fault-lab | 760m / 1824Mi | 12.8% / 26.9% | 5100m / 4928Mi | 31.9% / 72.8% |
-| C | + 观测栈 6 个 | 1190m / 2656Mi | 18.6% / 40.9% | 7100m / 7992Mi | 44.4% / **117.6%** |
+| A | 核心 9 Pod | 710m / 1696Mi | 4.4% / 24.4% | 4600m / 4544Mi | 28.8% / 65.5% |
+| B | + fault-lab | 760m / 1824Mi | 4.8% / 26.3% | 5100m / 4928Mi | 31.9% / 71.0% |
+| C | + 观测栈 6 个 | 1060m / 2554Mi | 6.6% / 36.8% | 6800m / 6472Mi | 42.5% / 93.3% |
 
-余量（按 requests 口径，阶段 C）：CPU 14.81 核、内存 ≈3.91 GiB，可调度空间充足；
-按 limits 口径内存已 overcommit（7992Mi > 6.62 GiB allocatable），**但 limits 只是上限，不是预留**。
-真正的风险在宿主：WSL 只有 6.6 GiB，控制面 + containerd + 各容器 RSS 才是实际占用（见 §3.6 实测）。
+（allocatable：CPU 16000m、内存 6938Mi，见 §3.1。百分比 = 合计 / allocatable。）
+
+余量（按 requests 口径，阶段 C）：CPU ≈14.94 核、内存 ≈4.28 GiB，业务 Pod 可调度空间充足；
+按 **业务 limits** 口径内存 93.3%，尚未超；但**节点口径**还要加上 kube-system 组件的 limits
+（实测约 1934Mi），阶段 C 节点总 limits ≈8406Mi ≈ **121%**，属 overcommit，**但 limits 只是上限，
+不是预留**。真正的风险在宿主：WSL 只有 6.6 GiB，控制面 + containerd + 各容器 RSS 才是实际占用（见 §3.6 实测）。
 
 ### 3.5 预算口径说明（为什么不能“只调低 limits”）
 
@@ -131,8 +142,15 @@ deploy/k8s/
 | 阶段 | 时间 | `kubectl top pods -A`（或 docker stats） | node 内存 requests / limits | 事件 |
 | --- | --- | --- | --- | --- |
 | A 核心（9 Pod） | 2026-10-30 21:44 | 节点容器 2.219 GiB / 6.617 GiB，CPU 16.3% | 业务 requests 1696 Mi；节点合计 2844 Mi（41%，含 kube-system 组件） | 无 OOM/Evicted；`kafka` 首启重启 3 次（§7 已说明） |
-| B fault-lab（+10 Pod） | 2026-10-30 21:53 | 节点容器 2.67 GiB / 6.617 GiB，CPU 38.55%（含同时段冒烟压测） | 业务 requests 1824 Mi；节点合计 2844 Mi（41%）/ limits 6862 Mi（101%，已 overcommit） | 无 OOM/Evicted |
-| C 观测 | 待填（观测栈上线后回填；观测栈自带 requests 1.32 GiB，见 §3.3） | 待填 | 待填 | |
+| B fault-lab（+10 Pod） | 2026-10-30 21:53 | 节点容器 2.67 GiB / 6.617 GiB，CPU 38.55%（含同时段冒烟压测） | 业务 requests 1824 Mi；**节点口径** requests 2844 Mi（41%）/ limits 6862 Mi（101%） | 无 OOM/Evicted |
+| C 观测（预测，待实测回填） | 待填 | 预期节点容器 ≈3.2–3.5 GiB | 业务 requests 2554 Mi（36.8%）/ limits 6472 Mi（93.3%）；**节点口径** requests ≈3574 Mi（51.5%）/ limits ≈8406 Mi（121%） | 待实测 |
+
+**口径说明（避免数字对不上）**：
+- “业务 requests/limits”= 本目录管理的 workload（A 阶段 9 Pod、B 阶段 +fault-lab、C 阶段 +观测 6 个）。
+- “节点口径”= 节点上**全部 Pod** 的合计，包含 kube-system（kube-proxy/coredns/local-path-provisioner/kindnet），
+  实测这部分 limits ≈1934Mi。§3.6 的 6862Mi 是**节点口径**：核心 4544Mi + fault-lab 384Mi + kube-system ≈1934Mi。
+- **6862Mi 不包含 observability**（观测栈尚未部署）；它上线后按 §3.3 增加 1544Mi limits，
+  节点口径变为 ≈8406Mi（≈121%）。P5 部署观测栈后请把 C 行“待填”换成实测值。
 
 ## 4. 部署流程
 
@@ -157,6 +175,11 @@ scripts/create-secrets.sh                      # 缺失 token 会自动生成并
 
 # 4) 部署核心（含 RBAC、PVC、迁移、rollout 等待；渲染结果先做静态检查）
 scripts/deploy-core.sh
+
+# 4.1) 同步配置到 PVC（只在 --force 时覆盖；默认只打印差异，不重置 UI/手工改过的 config.yaml）
+#      seed 只在 config.yaml 不存在时写入，所以改了 config-seed.yaml 后必须手动同步。
+scripts/apply-config.sh                # 只读比较
+scripts/apply-config.sh --force        # 覆盖（先备份 config.yaml.bak.<时间戳>，再重启 API）
 
 # 5) 部署 Fault Lab（主故障演练对象）
 scripts/deploy-fault-lab.sh
@@ -183,6 +206,10 @@ kubectl -n alertflow logs deploy/alertflow-monitor -f
 kubectl -n alertflow logs deploy/alertflow-agent -f
 scripts/restore-fault.sh                # PUT 回注入前的 state（备份 /tmp/alertflow-fault-lab-state.json）
 ```
+
+演练前确认 monitor 的配置里已有 `fault-lab` 的 HTTP 检查（`id: fault-lab`，URL `/health`）：
+`kubectl -n alertflow logs deploy/alertflow-monitor | grep fault-lab`；若 PVC 上的 config.yaml
+是旧版本（只有 alertflow 一条服务），先 `scripts/apply-config.sh --force`。
 
 `FAULT_MODE` 支持 `http_503|slow|flap|connection_reset`；Fault Lab 的 `/healthz`（自身存活）
 永远是 200，被注入的是 `/health`，所以**不会把自己探死**。演练前请先跑通 `smoke-test.sh`。
@@ -319,5 +346,6 @@ scripts/delete-cluster.sh --yes --name=alertflow-lab
 | Agent `PermissionError: .../schemas/context.py` | 镜像内该文件权限 600（上游源码权限问题），非 root 读不了 | 当前 pod `securityContext` 临时以 root 运行（`base/workloads/agent-deployment.yaml`，有注释）；长期应由上游把文件改成 644 并重建镜像后改回 10000 |
 | Kafka `0/1` 且日志 `Could not establish connection ... :9093` | Service 未暴露 Controller 9093，或未设 `publishNotReadyAddresses`（broker Ready 前 Endpoints 为空 → 单节点 KRaft 自己连不上自己） | 清单已含 `controller: 9093` 与 `publishNotReadyAddresses: true`；首启重启 1–3 次属正常，等 5 分钟 |
 | UI 改的配置重启后还在吗 | config.yaml 在 PVC 上，seed 只在文件不存在时写入 | 持久；想重置需先备份再删 `alertflow-config` PVC（会丢 UI 修改） |
+| 改了 `config-seed.yaml`（如新增服务检查）但集群没生效 | seed 只在 config.yaml 不存在时写入，已有 PVC 不会被覆盖 | `scripts/apply-config.sh` 看差异；确认后 `scripts/apply-config.sh --force`（先备份 `config.yaml.bak.<时间戳>`，再重启 API）|
 | `kubectl top` 报错 | kind 默认没有 metrics-server | 用 `docker stats` 或 `kubectl get pods -o wide` 观察 |
 | 节点 NotReady / containerd 反复重启 | 宿主内存压力或 stale sandbox 元数据 | 由集群管理员重建；先降观测侧负载，再按 §3 预算分阶段重上 |

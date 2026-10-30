@@ -1,0 +1,103 @@
+# Alloy DaemonSet：每 Node 一个 Pod，读本节点 /var/log/pods（readOnly hostPath）。
+#
+# 必须以 uid 0 运行：实测 kindest/node:v1.33.0 节点上 /var/log/pods 目录是
+# 0750 root:root、日志文件是 0640 root:root，非 root 无法遍历/读取。这不是
+# privileged：没有 hostPID/hostNetwork，没有额外 capabilities，日志目录只读挂载。
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: alloy
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/part-of: alertflow
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alloy
+      app.kubernetes.io/component: agent
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alloy
+        app.kubernetes.io/component: agent
+        app.kubernetes.io/part-of: alertflow
+    spec:
+      serviceAccountName: alloy
+      automountServiceAccountToken: true
+      # 单 Node Kind 的 control-plane 没有 taint；多 Node Kind 时保证 DaemonSet 也能
+      # 落到 control-plane 上（规格要求每 Node 一个 Pod）。
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+      containers:
+        - name: alloy
+          image: grafana/alloy
+          args:
+            - run
+            - /etc/alloy/config.alloy
+            - --storage.path=/var/lib/alloy
+            - --server.http.listen-addr=0.0.0.0:12345
+          env:
+            # Downward API：把本 Pod 所在节点名注入，用于 field selector。
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: http-metrics
+              containerPort: 12345
+          resources:
+            requests:
+              cpu: 50m
+              memory: 50Mi
+            limits:
+              cpu: 200m
+              memory: 200Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http-metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http-metrics
+            initialDelaySeconds: 60
+            periodSeconds: 20
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alloy
+              readOnly: true
+            # 只读挂载节点容器日志目录（不写节点日志目录）。
+            - name: varlogpods
+              mountPath: /var/log/pods
+              readOnly: true
+            # 每个 Node 独立的 positions 存储，避免用 hostPath 共享同一文件。
+            - name: storage
+              mountPath: /var/lib/alloy
+      volumes:
+        - name: config
+          configMap:
+            name: alloy-config
+        - name: varlogpods
+          hostPath:
+            path: /var/log/pods
+            type: Directory
+        - name: storage
+          hostPath:
+            path: /var/lib/alloy
+            type: DirectoryOrCreate

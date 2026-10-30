@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/component: server
+    app.kubernetes.io/part-of: alertflow
+# Prometheus 不需要访问 K8s API（抓取目标写死在配置里），不挂 token。
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/component: server
+    app.kubernetes.io/part-of: alertflow
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/component: server
+  ports:
+    - name: http
+      port: 9090
+      targetPort: http

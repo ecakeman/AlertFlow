@@ -70,3 +70,99 @@ This is an operator check against a server you started. It is not part of the Ag
 3. Call `query` with a PromQL selector that contains the mapped matcher, and `loki_query` with the mapped stream selector, using a window of at most one hour.
 4. Call a tool that is not approved, such as `series`, and confirm the Agent does not store it as evidence.
 5. Unset the URL and confirm a new investigation still finishes without dialing the MCP port.
+
+## Kubernetes overlay
+
+`deploy/k8s/overlays/observability/` is the K8s form of this stack. It is a
+self-contained Kustomize overlay (no Helm, no Operator) and it keeps the same
+pinned versions:
+
+| Workload | Image | Endpoint |
+| --- | --- | --- |
+| Prometheus | `prom/prometheus:v3.15.1` (StatefulSet, 1Gi PVC, 72h retention) | `prometheus.observability.svc:9090` |
+| Blackbox | `prom/blackbox-exporter:v0.29.1` (Deployment) | `blackbox-exporter.observability.svc:9115` |
+| Loki | `grafana/loki:3.5.12` (StatefulSet, 2Gi PVC, 72h retention + compactor) | `loki.observability.svc:3100` |
+| Alloy | `grafana/alloy:v1.21.3` (DaemonSet, `/var/log/pods` read-only hostPath) | pushes to Loki |
+| Prometheus MCP | `ghcr.io/tjhop/prometheus-mcp-server:v0.18.0` | `http://prometheus-mcp.observability.svc:8080/mcp` |
+| Loki MCP | `alertflow-loki-mcp:v0.6.0` (built from `deploy/observability/loki-mcp/Dockerfile`) | `http://loki-mcp.observability.svc:8080/stream` |
+
+All services are `ClusterIP`; there is no NodePort and no Ingress. The
+Prometheus MCP runs with `--mcp.tools=core`, which keeps the five approved tools
+and removes the TSDB admin tools (`delete_series`, `clean_tombstones`, `snapshot`,
+`quit`, ...) from the server side. Service-account tokens are not mounted into
+any MCP container or Prometheus.
+
+Alloy runs as uid 0 because the node's `/var/log/pods` directory is `0750
+root:root` and the log files are `0640 root:root` (measured on
+`kindest/node:v1.33.0`). It is not privileged: no `hostPID`, no `hostNetwork`,
+no added capabilities, and `/var/log/pods` is mounted read-only. The Alloy
+ConfigMap only needs `pods` `get/list/watch` in `alertflow`, `fault-lab`, and
+`observability`.
+
+Image versions are centralized in `deploy/k8s/overlays/observability/kustomization.yaml`
+(`images:`). `deploy/k8s/versions.lock.yaml` is the authoritative lock file and
+must match.
+
+### CI job: build Loki MCP
+
+Add this job to the repository workflow (`.github/workflows/`) before the kind
+end-to-end job. It builds the locked image, checks that the binary serves the
+`/stream` MCP endpoint, and keeps the tag the overlay expects. The `kind load
+docker-image alertflow-loki-mcp:v0.6.0` step of the e2e job consumes it.
+
+```yaml
+  build-loki-mcp:
+    name: build Loki MCP image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: deploy/observability/loki-mcp
+          file: deploy/observability/loki-mcp/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: |
+            alertflow-loki-mcp:v0.6.0
+            alertflow-loki-mcp:${{ github.sha }}
+          cache-from: type=gha,scope=loki-mcp
+          cache-to: type=gha,mode=max,scope=loki-mcp
+
+      - name: Smoke test /stream initialize
+        run: |
+          docker run -d --name loki-mcp -p 18089:8080 \
+            -e LOKI_URL=http://127.0.0.1:3100 alertflow-loki-mcp:v0.6.0
+          for _ in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18089/stream \
+              -H 'Content-Type: application/json' \
+              -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' || true)
+            if [ "$code" = "200" ]; then
+              echo "loki-mcp /stream answered initialize"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "loki-mcp /stream did not answer initialize" >&2
+          docker logs loki-mcp
+          exit 1
+```
+
+`kind load docker-image` fails on multi-platform images pulled by Docker with
+`content digest ... not found`. In that case load through the node's containerd
+directly:
+
+```text
+docker save alertflow-loki-mcp:v0.6.0 |
+  docker exec -i <kind-node> ctr -n k8s.io images import \
+    --platform linux/amd64 --snapshotter=overlayfs -
+```
+
+The kind node cannot pull images itself when containerd is configured with an
+unreachable proxy (`crictl pull` fails with `proxyconnect tcp: dial tcp
+127.0.0.1:7897: connect: connection refused`); pre-load every observability
+image before applying the overlay.

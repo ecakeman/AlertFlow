@@ -27,6 +27,10 @@ data:
 
   # --- Python Agent ---
   ALERTFLOW_BASE_URL: "http://alertflow-api.alertflow.svc:8080"
+  # Agent → Go 控制面 gRPC（Agent 读 timeline / kubernetes state 的唯一通道；
+  # agent/src/alertflow_agent/config.py: alertflow_grpc_target 默认空 = 未配置且无 HTTP 回退，
+  # 空值会导致 P6 调查时读不到 timeline/K8s 状态）。
+  ALERTFLOW_GRPC_TARGET: "alertflow-api.alertflow.svc:9090"
   # 必须是 host:port。grpc-python 1.67 不接受裸 ":9000"（unparseable host:port，
   # 实测 agent 容器 CrashLoopBackOff）；Go 侧 ALERTFLOW_ADDR/ALERTFLOW_GRPC_ADDR
   # 用 ":port" 没有问题。
@@ -37,10 +41,14 @@ data:
   # 留空时 Agent 使用 ScriptedModel（不会真正调用模型）。
   LLM_BASE_URL: ""
   LLM_MODEL: ""
-  # 观测侧 MCP 地址。观测栈未部署时留空，Agent 会跳过这两项能力。
-  # observability overlay 部署后按实际 Service 名填写。
-  PROMETHEUS_MCP_URL: ""
-  LOKI_MCP_URL: ""
+  # 观测侧 MCP 地址（observability overlay 里的 Service DNS，集群内固定名）。
+  # 留空 = disabled；填了但服务不存在 = unavailable，两者在 coverage 里分开记录。
+  PROMETHEUS_MCP_URL: "http://prometheus-mcp.observability.svc:8080/mcp"
+  LOKI_MCP_URL: "http://loki-mcp.observability.svc:8080/stream"
+  # service_id → 查询选择器。没有条目的服务不查询（UNMAPPED），绝不跨 Service 取数。
+  # 与 blackbox relabel / Alloy 的 service_id 标签保持一致。
+  PROMETHEUS_SERVICE_SELECTORS: '{"alertflow":"service_id=\"alertflow\"","fault-lab":"service_id=\"fault-lab\""}'
+  LOKI_SERVICE_SELECTORS: '{"alertflow":"{service_id=\"alertflow\"}","fault-lab":"{service_id=\"fault-lab\"}"}'
   # 可选 RAGFlow A2A 适配器；overlays/runbook 部署后填 http://a2a-adapter.runbook.svc:8000。
   A2A_ADAPTER_URL: ""
   RAGFLOW_BASE_URL: ""

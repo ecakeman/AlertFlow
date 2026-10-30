@@ -1,0 +1,7 @@
+# observability：观测栈专用 namespace（base 也声明了同名 Namespace，幂等）。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    app.kubernetes.io/part-of: alertflow

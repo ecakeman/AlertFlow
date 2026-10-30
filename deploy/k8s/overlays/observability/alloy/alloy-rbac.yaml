@@ -1,0 +1,119 @@
+# Alloy 的最小 RBAC（规格 §11.2 权限约束）。
+#
+# 只读 Pod 列表：discovery.kubernetes role=pod + namespaces 限定为 alertflow /
+# fault-lab / observability，因此每个 namespace 一个 Role（不做 ClusterRole，
+# 不建 ClusterRoleBinding，Alloy 看不到其它 namespace）。verbs 只有 get/list/watch，
+# 没有 pods/log（Alloy 走 hostPath 读文件，不调 API），没有任何写权限。
+#
+# 应用前提：alertflow / fault-lab / observability 三个 Namespace 已存在（base 负责）。
+# 本文件属观测栈 overlay，不改 base/observer-rbac.yaml（那是 Monitor 的 SA）。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alloy
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/part-of: alertflow
+# discovery.kubernetes 需要 in-cluster token；这是 ClusterRole 都不需要的最小代价。
+automountServiceAccountToken: true
+---
+# ---- namespace alertflow --------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: alloy
+  namespace: alertflow
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/part-of: alertflow
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alloy
+  namespace: alertflow
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/part-of: alertflow
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: alloy
+subjects:
+  - kind: ServiceAccount
+    name: alloy
+    namespace: observability
+---
+# ---- namespace fault-lab --------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: alloy
+  namespace: fault-lab
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/part-of: alertflow
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alloy
+  namespace: fault-lab
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/part-of: alertflow
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: alloy
+subjects:
+  - kind: ServiceAccount
+    name: alloy
+    namespace: observability
+---
+# ---- namespace observability（采集 Prometheus/Loki 自身日志，便于自观察）----
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: alloy
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/part-of: alertflow
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alloy
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/part-of: alertflow
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: alloy
+subjects:
+  - kind: ServiceAccount
+    name: alloy
+    namespace: observability
