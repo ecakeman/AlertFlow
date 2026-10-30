@@ -7,12 +7,13 @@ import json
 import time
 
 
-def consult(url: str, payload: dict, message_id: str, timeout: float = 30) -> dict:
+def consult(url: str, payload: dict, message_id: str, timeout: float = 30, token: str = "") -> dict:
+    """一次 consult：payload 为 RunbookQueryV1；token 非空时带 Bearer 鉴权。"""
     text = json.dumps(payload, ensure_ascii=False)
-    return asyncio.run(_send(url, text, message_id, timeout))
+    return asyncio.run(_send(url, text, message_id, timeout, token))
 
 
-async def _send(url: str, text: str, message_id: str, timeout: float) -> dict:
+async def _send(url: str, text: str, message_id: str, timeout: float, token: str = "") -> dict:
     import httpx
     from a2a.client import ClientConfig, create_client
     from a2a.types.a2a_pb2 import GetTaskRequest, Message, Part, Role, SendMessageRequest, TaskState
@@ -23,7 +24,8 @@ async def _send(url: str, text: str, message_id: str, timeout: float) -> dict:
         TaskState.TASK_STATE_FAILED,
         TaskState.TASK_STATE_CANCELED,
     }
-    async with httpx.AsyncClient(timeout=timeout) as http:
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    async with httpx.AsyncClient(timeout=timeout, headers=headers) as http:
         client = await create_client(
             url,
             client_config=ClientConfig(
@@ -62,6 +64,9 @@ async def _send(url: str, text: str, message_id: str, timeout: float) -> dict:
     if not task.artifacts or not task.artifacts[-1].parts:
         raise RuntimeError("runbook agent returned no artifact")
     body = json.loads(task.artifacts[-1].parts[0].text)
+    if not isinstance(body, dict):
+        raise RuntimeError("runbook agent returned an invalid artifact")
     if body.get("error"):
-        raise RuntimeError("runbook lookup failed")
+        # 保留适配器给出的错误语义（invalid / lookup failed），便于上游区分 gap
+        raise RuntimeError(str(body["error"]))
     return body

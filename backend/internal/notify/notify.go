@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ecakeman/alertflow/internal/agentmessage"
 	"github.com/ecakeman/alertflow/internal/db"
 )
 
@@ -108,11 +109,9 @@ func (m Message) eventTime() time.Time {
 	return m.StartedAt
 }
 
+// severityOf 复用共享映射，避免 HTTP 与 gRPC 两条路径对 severity 的判断分叉。
 func severityOf(event Event) string {
-	if event == EventWarning {
-		return "warning"
-	}
-	return "outage"
+	return agentmessage.Severity(string(event))
 }
 
 // Sender delivers a message to one channel. config is the integration's stored

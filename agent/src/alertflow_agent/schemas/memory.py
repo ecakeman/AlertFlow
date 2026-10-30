@@ -166,3 +166,156 @@ class RecallHit(BaseModel):
     started_at: Optional[datetime] = None
     card: str = ""
     conclusion: Conclusion
+
+
+# ---------------------------------------------------------------------------
+# 时间线长期记忆（C3）：TimelineNode + TimelineAttachment
+#
+# 旧 ``EpisodeCard`` / ``episodes`` / ``service_profile`` / ``episode_corrections``
+# 全部保留（向前兼容）：Episode 只作为历史节点的一种**兼容投影**，不做数据迁移。
+# ---------------------------------------------------------------------------
+
+TimelineNodeType = Literal[
+    "runtime_event",
+    "incident_transition",
+    "check_transition",
+    "diagnostic",
+    "kubernetes_change",
+    "agent_diagnosis",
+    "recovery_verification",
+    "correction",
+]
+TimelineAnchorType = Literal["runtime_event", "incident", "time_window"]
+AttachmentType = Literal[
+    "diagnosis_report",
+    "evidence_summary",
+    "runbook_advice",
+    "recovery_result",
+    "human_correction",
+    "metrics_summary",
+    "logs_summary",
+    "diagnostic_summary",
+]
+AttachmentTrust = Literal[
+    "validated_agent_report", "expert_advice", "human_verified", "derived_summary"
+]
+MemoryTimeAccuracy = Literal["exact", "derived", "reconciled_after_gap", "unknown"]
+
+
+class SourceRef(BaseModel):
+    """附件/节点的来源引用：只存定位与摘要，不复制原文。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_type: str
+    source_record_id: str = ""
+    evidence_id: str = ""
+    digest: str = ""
+
+
+class TimelineAttachment(BaseModel):
+    """挂在某个时间锚点上的“结论性附件”（报告/Runbook 建议/纠正/恢复结果）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    attachment_id: str
+    service_id: str
+    anchor_type: TimelineAnchorType
+    anchor_id: str
+    attachment_type: AttachmentType
+    source_system: str
+    source_record_id: str
+    run_id: Optional[str] = None
+    incident_id: Optional[int] = None
+    occurred_at: Optional[datetime] = None
+    recorded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    summary: str = ""
+    trust_level: AttachmentTrust = "derived_summary"
+    source_refs: list[SourceRef] = Field(default_factory=list)
+    content_digest: str = ""
+    metadata: dict = Field(default_factory=dict)
+
+    def unique_key(self) -> tuple:
+        """与 SQL UNIQUE 约束一致：重试/resume 不得重复写入同一条附件。"""
+        return (
+            self.anchor_type,
+            self.anchor_id,
+            self.attachment_type,
+            self.source_system,
+            self.source_record_id,
+        )
+
+
+class TimelineNode(BaseModel):
+    """时间线节点：由来源事实投影而来，**不复制** Go 原始行。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str
+    service_id: str
+    incident_id: Optional[int] = None
+    node_type: TimelineNodeType
+    source_system: str
+    source_record_id: str
+    occurred_at: Optional[datetime] = None
+    observed_at: Optional[datetime] = None
+    recorded_at: Optional[datetime] = None
+    time_accuracy: MemoryTimeAccuracy = "exact"
+    summary: str = ""
+    facts: list[SourceRef] = Field(default_factory=list)
+    attachments: list[TimelineAttachment] = Field(default_factory=list)
+    source_locator: dict = Field(default_factory=dict)
+
+
+class TimelineAttachmentInput(BaseModel):
+    """Lead/Memory Manager 写入附件的入参（来自一次 run 的报告/Runbook 建议）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    service_id: str
+    anchor_type: TimelineAnchorType
+    anchor_id: str
+    attachment_type: AttachmentType
+    source_system: str
+    source_record_id: str
+    run_id: Optional[str] = None
+    incident_id: Optional[int] = None
+    occurred_at: Optional[datetime] = None
+    summary: str = ""
+    trust_level: AttachmentTrust = "derived_summary"
+    source_refs: list[SourceRef] = Field(default_factory=list)
+    metadata: dict = Field(default_factory=dict)
+
+
+class TimelineRecallRequest(BaseModel):
+    """Memory adapter 的检索请求；同时作为 ``RetrievalRequest`` 的一种 SourceRequest。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    service_id: str
+    incident_id: Optional[int] = None
+    time_start: Optional[datetime] = None
+    time_end: Optional[datetime] = None
+    event_types: list[str] = Field(default_factory=list)
+    query_text: Optional[str] = None
+    top_k: int = Field(default=10, gt=0)
+    include_attachments: bool = True
+    include_corrected_history: bool = False
+
+    @property
+    def source_type(self) -> str:
+        return "memory_reference"
+
+
+class TimelineRecallResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    nodes: list[TimelineNode] = Field(default_factory=list)
+    total_candidates: int = 0
+    returned_count: int = 0
+    has_more: bool = False
+    time_order: Literal["asc", "desc"] = "desc"
+    semantic_rank_used: bool = False
+    coverage_gaps: list[str] = Field(default_factory=list)

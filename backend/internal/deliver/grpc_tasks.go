@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 
 	agentv1 "github.com/ecakeman/alertflow/gen/alertflow/agent/v1"
+	"github.com/ecakeman/alertflow/internal/agentmessage"
 	"github.com/ecakeman/alertflow/internal/db"
 	"github.com/ecakeman/alertflow/internal/notify"
 	"github.com/ecakeman/alertflow/internal/query"
@@ -49,11 +50,10 @@ func (g *GRPCTasks) Accept(ctx context.Context, row db.ClaimedDelivery) error {
 		return &notify.StatusError{Code: 400, Body: "invalid task payload"}
 	}
 	msg.DeliveryID = row.ID
-	raw, err := (notify.AgentSender{Q: g.Q}).Encode(ctx, msg)
+	// 与 HTTP 路径共用同一个 builder：gRPC 只是另一层 transport。
+	diag, chat := notify.AgentMessageInputs(msg)
+	raw, err := agentmessage.Encode(g.Q, diag, chat, 0)
 	if err != nil {
-		if permanent(err) {
-			return err
-		}
 		return err
 	}
 	var env struct {

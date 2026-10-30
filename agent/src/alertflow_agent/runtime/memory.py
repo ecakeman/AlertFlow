@@ -7,6 +7,8 @@ try/except 包住，出错只记日志。事件卡是确定性地从「事件 + 
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -24,7 +26,9 @@ from ..schemas.memory import (
     ServiceBaseline,
     ServiceProfile,
     SignatureItem,
+    SourceRef,
     Symptom,
+    TimelineAttachment,
 )
 
 log = logging.getLogger("alertflow_agent")
@@ -229,6 +233,50 @@ def merge_profile(previous: dict | None, service_id: str, card: EpisodeCard, bas
     return profile
 
 
+def _diagnosis_attachment(state: dict, report: dict, card: EpisodeCard) -> TimelineAttachment:
+    """把本次 run 的结论落成一条时间轴附件（只存结论与来源定位，不复制原文）。"""
+    run_id = str(state.get("run_id") or card.run_id or "")
+    if card.incident_id is not None:
+        anchor_type, anchor_id = "incident", str(card.incident_id)
+    else:
+        anchor_type, anchor_id = "time_window", run_id or card.service_id
+
+    refs: list[SourceRef] = []
+    for ident, item in list((state.get("evidence") or {}).items())[:20]:
+        if not isinstance(item, dict):
+            continue
+        refs.append(SourceRef(
+            source_type=str(item.get("source_type") or "unknown"),
+            source_record_id=str(ident),
+            evidence_id=str(ident),
+            digest=hashlib.sha256(json.dumps(item.get("data"), sort_keys=True, default=str).encode()).hexdigest()[:16],
+        ))
+
+    summary = str(report.get("summary") or "")[:1000]
+    passed = bool((report.get("verification") or {}).get("passed"))
+    digest = hashlib.sha256(
+        json.dumps({"summary": summary, "refs": [r.model_dump() for r in refs]}, sort_keys=True).encode()
+    ).hexdigest()
+    return TimelineAttachment(
+        attachment_id=f"att:{run_id}:diagnosis_report",
+        service_id=card.service_id,
+        anchor_type=anchor_type,
+        anchor_id=anchor_id,
+        attachment_type="diagnosis_report",
+        source_system="agent_runtime",
+        source_record_id=run_id,
+        run_id=run_id or None,
+        incident_id=card.incident_id,
+        occurred_at=card.started_at,
+        recorded_at=datetime.now(timezone.utc),
+        summary=summary,
+        trust_level="validated_agent_report" if passed else "derived_summary",
+        source_refs=refs,
+        content_digest=digest,
+        metadata={"report_version": report.get("version"), "status": report.get("status")},
+    )
+
+
 def remember(state: dict, report: dict, repo, embed, settings) -> dict:
     """写入事件簿 + 更新档案。返回结构化摘要（给日志与 API 展示）。"""
     card = build_card(state, report)
@@ -242,5 +290,12 @@ def remember(state: dict, report: dict, repo, embed, settings) -> dict:
     previous = repo.get_profile(card.service_id)
     profile = merge_profile(previous, card.service_id, card, baseline)
     repo.upsert_profile(profile)
+    # 时间轴附件与旧事件簿并存：重复 remember（resume/重试）由唯一约束保证幂等。
+    attachment_saved = False
+    try:
+        attachment_saved = repo.save_attachment(_diagnosis_attachment(state, report, card))
+    except Exception as exc:  # 记忆写入失败绝不能打断调查
+        log.warning("timeline attachment not saved: %s", exc)
     return {"saved": True, "episode_id": episode_id, "profile_key": card.profile_key,
-            "episodes": profile.episode_count, "embedded": bool(vector)}
+            "episodes": profile.episode_count, "embedded": bool(vector),
+            "attachment_saved": attachment_saved}

@@ -62,6 +62,9 @@ type Server struct {
 	agentBaseURL  string
 	agentAPIToken string
 	stop          chan struct{}
+	// retentionDone 在保留期清理 goroutine 退出后关闭。Close 先等它，
+	// 避免正在执行的删除语句撞上已关闭的数据库。
+	retentionDone chan struct{}
 }
 
 // New opens the database and config for configDir, builds the Gin engine, and
@@ -121,7 +124,11 @@ func New(configDir string) (*Server, error) {
 	}
 	s.newEngine()
 
-	go s.retentionLoop()
+	s.retentionDone = make(chan struct{})
+	go func() {
+		defer close(s.retentionDone)
+		s.retentionLoop()
+	}()
 	return s, nil
 }
 
@@ -148,6 +155,9 @@ func (s *Server) newEngine() *gin.Engine {
 // Close stops background work and closes the database.
 func (s *Server) Close() {
 	close(s.stop)
+	if s.retentionDone != nil {
+		<-s.retentionDone
+	}
 	s.scheduler().Stop()
 	_ = s.redis.Close()
 	s.mu.Lock()

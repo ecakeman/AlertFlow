@@ -55,6 +55,11 @@ class ReportHypothesis(BaseModel):
     confidence: Literal["low", "medium", "high"] | None = None
     supporting_evidence_ids: list[str] = Field(default_factory=list)
     weakening_evidence_ids: list[str] = Field(default_factory=list)
+    # verifier 从 catalog 解析出的 {evidence_id, path, value}：事实引用以自报 id 为准
+    supporting_fact_ids: list[str] = Field(default_factory=list)
+    weakening_fact_ids: list[str] = Field(default_factory=list)
+    supporting_facts: list[Fact] = Field(default_factory=list)
+    weakening_facts: list[Fact] = Field(default_factory=list)
     rationale: str = ""
     missing_info: list[str] = Field(default_factory=list)
 
@@ -84,6 +89,9 @@ class LLMHypothesis(BaseModel):
     status: Literal["supported", "possible", "weakened", "ruled_out", "undetermined"]
     supporting_evidence_ids: list[str] = Field(default_factory=list)
     weakening_evidence_ids: list[str] = Field(default_factory=list)
+    # 事实级引用（fact catalog id）；旧报告可省略，保持向后兼容
+    supporting_fact_ids: list[str] = Field(default_factory=list)
+    weakening_fact_ids: list[str] = Field(default_factory=list)
 
 
 class LLMReport(BaseModel):
@@ -96,6 +104,9 @@ class LLMReport(BaseModel):
     hypotheses: list[LLMHypothesis]
     unknowns: list[UnknownItem] = Field(default_factory=list)
     recommended_next_steps: list[NextStep] = Field(default_factory=list)
+    # 报告级事实引用与结论依据（§7.7.10）；旧报告缺省时保持兼容
+    fact_ids: list[str] = Field(default_factory=list)
+    conclusion_basis_hypothesis_id: str | None = None
 
     @field_validator("summary")
     @classmethod

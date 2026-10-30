@@ -100,3 +100,5 @@ class Settings(BaseSettings):
     ragflow_api_key: str = ""
     ragflow_agent_id: str = ""
     a2a_adapter_url: str = ""
+    a2a_adapter_token: str = ""
+    a2a_adapter_timeout_seconds: float = 30.0

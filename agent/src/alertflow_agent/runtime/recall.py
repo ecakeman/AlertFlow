@@ -83,7 +83,14 @@ def recall_prior(state: dict, repo, embed, rerank, settings) -> dict | None:
 
     key = current_signature_key(state)
     same_key = [h for h in recent if key != "sig:none" and h.get("conclusion") and _key_of(h) == key]
-    return {"profile": profile, "hits": hits, "query": query, "signature_key": key, "same_key_hits": same_key}
+    # 时间轴附件（C3）与事件簿一并召回；读失败只丢附件，不影响事件簿结论。
+    attachments: list[dict] = []
+    try:
+        attachments = repo.list_attachments(service_id, limit=20)
+    except Exception:
+        attachments = []
+    return {"profile": profile, "hits": hits, "query": query, "signature_key": key,
+            "same_key_hits": same_key, "attachments": attachments}
 
 
 def _key_of(episode: dict) -> str | None:
@@ -123,4 +130,11 @@ def render_block(prior: dict | None) -> str | None:
         score_text = f"rerank={score:.3f}" if isinstance(score, (int, float)) else (
             f"cos={hit['vector_score']:.3f}" if isinstance(hit.get("vector_score"), (int, float)) else "recency")
         lines.append(f"  ep:{hit['id']}｜{when}｜{score_text}｜{conclusion}")
+    attachments = prior.get("attachments") or []
+    if attachments:
+        lines.append("近期时间轴附件（历史结论/专家建议，需用本次证据复核）:")
+        for item in attachments[:5]:
+            when = str(item.get("occurred_at") or item.get("recorded_at") or "?")[:16].replace("T", " ")
+            text = str(item.get("summary") or "").replace("\n", " ")[:160]
+            lines.append(f"  {item.get('attachment_type')}｜{item.get('trust_level')}｜{when}｜{text}")
     return "既往上下文（来自长期记忆）:\n" + "\n".join(lines)

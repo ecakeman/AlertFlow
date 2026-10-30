@@ -130,6 +130,10 @@ func (w *Worker) sendOne(ctx context.Context, row db.ClaimedDelivery) error {
 		}
 		return w.DB.SucceedDelivery(row.ID, w.Owner, w.now(), w.now())
 	}
+	// 历史兼容分支：db.ClaimDeliveries 只领取 integration_id IS NULL 的行，
+	// 所以这里的旧渠道 Sender 路径当前不可达（内部 Agent 任务走上方的
+	// Tasks.Accept）。保留它是为了兼容旧 notification_deliveries 行与测试，
+	// 不代表还有第二条自动投递通道。
 	sender, ok := notify.SenderFor(row.IntegrationType)
 	if !ok {
 		return w.fail(row, notify.ErrNoSender, true)

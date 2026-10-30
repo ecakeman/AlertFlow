@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import uvicorn
 from google.protobuf.json_format import MessageToDict, ParseDict
 from starlette.applications import Starlette
+from starlette.responses import JSONResponse
 
 from a2a.server.agent_execution.agent_executor import AgentExecutor
 from a2a.server.request_handlers.default_request_handler_v2 import DefaultRequestHandlerV2
@@ -29,7 +30,7 @@ from a2a.types.a2a_pb2 import (
 )
 from a2a.utils.constants import TransportProtocol
 
-from alertflow_agent.a2a_adapter.ragflow import artifact_text, research
+from alertflow_agent.a2a_adapter.ragflow import artifact_text, query_from_runbook_request, research
 from alertflow_agent.a2a_adapter.store import MemoryLedger, PostgresLedger
 
 
@@ -137,7 +138,10 @@ class RunbookExecutor(AgentExecutor):
             return
         self.ledger.live.add(message_id)
         await self._emit(event_queue, task_id, context.context_id, "working", None, persist=True)
-        query = "\n".join(part.text for part in message.parts if part.text)[:8000]
+        raw = "\n".join(part.text for part in message.parts if part.text)[:8000]
+        # A2A 请求是 RunbookQueryV1 JSON；RAGFlow completion 只有 query 文本字段，
+        # 因此在适配器层一次性完成映射，Mock 与真实 RAGFlow 走同一条路径。
+        query = query_from_runbook_request(raw)
         self._jobs.append(asyncio.create_task(self._run(message_id, task_id, context.context_id, query, float(timeout))))
 
     async def _run(self, message_id: str, task_id: str, context_id: str, query: str, timeout: float) -> None:
@@ -153,14 +157,18 @@ class RunbookExecutor(AgentExecutor):
                 query,
                 timeout,
             )
+            if not isinstance(artifact, dict):
+                # 合规的 artifact 必须是 JSON 对象：响应解析失败按失败任务收敛
+                raise RuntimeError("invalid runbook artifact")
             current = self.ledger.get_message(message_id) or {}
             if current.get("status") in _TERMINAL:
                 return
             self._store(task_id, "completed", artifact, context_id)
-        except Exception:
+        except Exception as exc:
             current = self.ledger.get_message(message_id) or {}
             if current.get("status") not in _TERMINAL:
-                self._store(task_id, "failed", {**_EMPTY_ARTIFACT, "error": "runbook lookup failed"}, context_id)
+                error = "invalid runbook artifact" if "invalid runbook artifact" in str(exc) else "runbook lookup failed"
+                self._store(task_id, "failed", {**_EMPTY_ARTIFACT, "error": error}, context_id)
         finally:
             self.ledger.live.discard(message_id)
 
@@ -240,7 +248,33 @@ def _task(task_id: str, context_id: str, status: str, artifact: dict | None) -> 
     )
 
 
-def build_app(ledger=None, settings: dict | None = None, public_url: str = "http://127.0.0.1:8001") -> Starlette:
+class BearerAuthMiddleware:
+    """可选的 A2A 入站鉴权：配置 token 后，除 Agent Card 外的请求都要求 Bearer。"""
+
+    def __init__(self, app, token: str = "") -> None:
+        self.app = app
+        self.token = str(token or "").strip()
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or not self.token:
+            return await self.app(scope, receive, send)
+        path = scope.get("path") or ""
+        if path.endswith("agent-card.json"):
+            return await self.app(scope, receive, send)
+        headers = {key.lower(): value for key, value in scope.get("headers") or []}
+        expected = f"Bearer {self.token}".encode()
+        if headers.get(b"authorization") != expected:
+            response = JSONResponse({"error": "unauthorized"}, status_code=401)
+            return await response(scope, receive, send)
+        return await self.app(scope, receive, send)
+
+
+def build_app(
+    ledger=None,
+    settings: dict | None = None,
+    public_url: str = "http://127.0.0.1:8001",
+    auth_token: str = "",
+) -> Starlette:
     ledger = ledger or MemoryLedger()
     settings = settings or {}
     card = build_card(public_url)
@@ -248,7 +282,10 @@ def build_app(ledger=None, settings: dict | None = None, public_url: str = "http
     store = LedgerTaskStore(ledger, executor.read_task)
     store.persist_cancel = executor.persist_cancel
     handler = DefaultRequestHandlerV2(executor, store, card)
-    return Starlette(routes=[*create_agent_card_routes(card), *create_rest_routes(handler)])
+    app = Starlette(routes=[*create_agent_card_routes(card), *create_rest_routes(handler)])
+    if str(auth_token or "").strip():
+        app.add_middleware(BearerAuthMiddleware, token=str(auth_token).strip())
+    return app
 
 
 def main() -> None:
@@ -261,5 +298,5 @@ def main() -> None:
         "ragflow_agent_id": os.environ.get("RAGFLOW_AGENT_ID", ""),
         "timeout_seconds": os.environ.get("A2A_TASK_TIMEOUT_SECONDS", "30"),
     }
-    app = build_app(ledger, settings, public_url)
+    app = build_app(ledger, settings, public_url, os.environ.get("A2A_AUTH_TOKEN", ""))
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("A2A_PORT", "8000")))

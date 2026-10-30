@@ -13,6 +13,16 @@ from pathlib import Path
 
 from alertflow_agent.analysis.timeline import status_counts
 from alertflow_agent.runtime.context_window import HIGH, LOW, MEDIUM, PIN, Block, Fit, assemble, estimate_tokens
+from alertflow_agent.schemas.context import (
+    BLOCK_ORDER,
+    ContextBlock,
+    InvestigationScope,
+    PromptContextBundle,
+    SourceReference,
+    default_window,
+    utc_now,
+)
+from alertflow_agent.runtime.window import scope_from_event, window_from_state
 
 _ROOT = Path(__file__).resolve().parents[1]
 _PROMPTS = {
@@ -33,7 +43,169 @@ def build_context(node: str, state: dict, budget: int = DEFAULT_BUDGET_TOKENS) -
 
 
 def build_context_report(node: str, state: dict, budget: int = DEFAULT_BUDGET_TOKENS) -> Fit:
-    return assemble(build_blocks(node, state), budget)
+    """装配上下文，并把叶子块重组为**固定六区块**（规格 §7.7.5）。"""
+    leaves = build_blocks(node, state)
+    fit = assemble(leaves, budget)
+    sections = group_sections(leaves, fit.texts)
+    text = render_sections(sections)
+    return Fit(text=text, tokens=estimate_tokens(text), budget=budget, floor=fit.floor,
+               blocks=fit.blocks, texts=[section["content"] for section in sections])
+
+
+# ------------------------------------------------------------- 六区块 ----
+
+# 固定顺序：current_task / service_timeline / current_evidence /
+# historical_experience / expert_knowledge / investigation_state。
+SECTION_ORDER = list(BLOCK_ORDER)
+_SECTION_PRIORITY = {
+    "current_task": "PIN",
+    "service_timeline": "HIGH",
+    "current_evidence": "PIN",
+    "historical_experience": "MEDIUM",
+    "expert_knowledge": "LOW",
+    "investigation_state": "HIGH",
+}
+_SECTION_TRUST = {
+    "current_task": "model_state",
+    "service_timeline": "observed_fact",
+    "current_evidence": "observed_fact",
+    "historical_experience": "historical_experience",
+    "expert_knowledge": "expert_advice",
+    "investigation_state": "model_state",
+}
+_SECTION_REQUIRED = {"current_task": True, "current_evidence": True}
+_SECTION_HEADERS = {
+    "current_task": "## current_task（任务与当前事件）",
+    "service_timeline": "## service_timeline（时间线/事件流）",
+    "current_evidence": "## current_evidence（本次调查证据）",
+    "historical_experience": "## historical_experience（历史记忆，需复核）",
+    "expert_knowledge": "## expert_knowledge（专家知识与技能，非本次证据）",
+    "investigation_state": "## investigation_state（计划、消息与调查状态）",
+}
+
+
+def section_of(name: str) -> str:
+    """叶子块 -> 六区块之一。未识别的一律落到 investigation_state，不丢内容。"""
+    if name in ("system", "node_prompt", "event", "question"):
+        return "current_task"
+    if name.startswith("evidence:"):
+        ident = name[len("evidence:"):]
+        if ident.startswith(("tl:", "k8s:", "inc:", "evt:")):
+            return "service_timeline"
+        if ident.startswith("ep:"):
+            return "historical_experience"
+        if ident.startswith("runbook:"):
+            return "expert_knowledge"
+        return "current_evidence"
+    if name in ("digest", "fact_catalog", "verify_findings", "previous_report"):
+        return "current_evidence"
+    if name in ("prior", "prior_report"):
+        return "historical_experience"
+    if name in ("semantics", "mcp_tools", "runbook_tool") or name.startswith("skill:"):
+        return "expert_knowledge"
+    return "investigation_state"
+
+
+def group_sections(leaves: list[Block], texts: list[str]) -> list[dict]:
+    """按固定顺序聚合叶子块被裁剪后的文本；空区块省略，但六区块顺序不变。"""
+    buckets: dict[str, dict] = {}
+    for index, block in enumerate(leaves):
+        name = section_of(block.name)
+        content = texts[index] if index < len(texts) else ""
+        if not content:
+            continue
+        bucket = buckets.setdefault(name, {"name": name, "parts": [], "items": 0})
+        bucket["parts"].append(content)
+        bucket["items"] += 1
+    sections = []
+    for name in SECTION_ORDER:
+        bucket = buckets.get(name)
+        if bucket is None:
+            continue
+        sections.append({
+            "name": name,
+            "content": "\n\n".join(bucket["parts"]),
+            "items": bucket["items"],
+            "priority": _SECTION_PRIORITY[name],
+            "trust_level": _SECTION_TRUST[name],
+            "required": _SECTION_REQUIRED.get(name, False),
+        })
+    return sections
+
+
+def render_sections(sections: list[dict]) -> str:
+    return "\n\n".join(f"{_SECTION_HEADERS[item['name']]}\n{item['content']}" for item in sections)
+
+
+def _source_refs(state: dict, sections: list[dict]) -> list[SourceReference]:
+    evidence = state.get("evidence") or {}
+    joined = "\n".join(item["content"] for item in sections)
+    refs: list[SourceReference] = []
+    for ident, item in evidence.items():
+        if f"evidence:{ident}" not in joined and ident not in joined:
+            continue
+        refs.append(SourceReference(
+            source_type=str((item or {}).get("source_type") or "unknown"),
+            source_record_id=str(ident),
+            evidence_id=str(ident),
+            digest=str((item or {}).get("content_digest") or ""),
+        ))
+        if len(refs) >= 100:
+            break
+    return refs
+
+
+def build_prompt_bundle(node: str, state: dict, budget: int = DEFAULT_BUDGET_TOKENS,
+                        reserved_output_tokens: int = 0) -> PromptContextBundle:
+    """六区块 PromptContextBundle：动态内容全部由 Pydantic 契约承载。"""
+    leaves = build_blocks(node, state)
+    fit = assemble(leaves, budget)
+    sections = group_sections(leaves, fit.texts)
+    event = state.get("event") or {}
+    run_id = str(state.get("run_id") or "")
+    window = None
+    try:
+        window = window_from_state(state, None) if state.get("window") else None
+    except Exception:
+        window = None
+    if event and (event.get("occurred_at") or event.get("started_at")):
+        scope = scope_from_event(event, run_id, window=window)
+    else:
+        scope = InvestigationScope(
+            run_id=run_id or "run-unknown",
+            service_id=str(event.get("service_id") or "unknown"),
+            incident_id=event.get("incident_id"),
+            trigger_type=str(event.get("event") or "manual"),
+            occurred_at=utc_now(),
+            observed_at=utc_now(),
+            recorded_at=utc_now(),
+            time_accuracy="unknown",
+            window=window or default_window(utc_now()),
+        )
+    refs = _source_refs(state, sections)
+    blocks = [
+        ContextBlock(
+            name=item["name"],
+            priority=item["priority"],
+            trust_level=item["trust_level"],
+            required=item["required"],
+            content=item["content"],
+            source_refs=[ref for ref in refs if ref.evidence_id and ref.evidence_id in item["content"]],
+            max_items=100,
+        )
+        for item in sections
+    ]
+    return PromptContextBundle(
+        run_id=scope.run_id,
+        scope=scope,
+        blocks=blocks,
+        rendered_prompt_sections=render_sections(sections),
+        estimated_input_tokens=estimate_tokens(render_sections(sections)),
+        reserved_output_tokens=reserved_output_tokens,
+        budget_limit=budget,
+        truncation_summary=fit.summary(),
+        source_refs=refs,
+    )
 
 
 # ------------------------------------------------------------------ 块 ----
@@ -260,4 +432,6 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit]
 
 
-__all__ = ["build_context", "build_context_report", "build_blocks", "estimate_tokens", "DEFAULT_BUDGET_TOKENS"]
+__all__ = ["build_context", "build_context_report", "build_blocks", "build_prompt_bundle",
+           "group_sections", "render_sections", "section_of", "SECTION_ORDER",
+           "estimate_tokens", "DEFAULT_BUDGET_TOKENS"]

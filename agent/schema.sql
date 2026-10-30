@@ -161,3 +161,30 @@ CREATE TABLE IF NOT EXISTS episode_corrections (
     reason text,
     created_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- 时间轴附件（C3 / 规格 §7.7.7）：长期主轴是 TimelineNode + TimelineAttachment。
+-- 只存结论性附件与来源定位，不复制 Go 原始行、原始日志/指标或 Runbook 全文。
+-- UNIQUE 保证 remember/resume 重试不会重复写入同一条附件。
+CREATE TABLE IF NOT EXISTS timeline_attachments (
+    attachment_id text PRIMARY KEY,
+    service_id text NOT NULL,
+    anchor_type text NOT NULL,
+    anchor_id text NOT NULL,
+    attachment_type text NOT NULL,
+    source_system text NOT NULL,
+    source_record_id text NOT NULL,
+    run_id text,
+    incident_id bigint,
+    occurred_at timestamptz,
+    recorded_at timestamptz NOT NULL DEFAULT now(),
+    summary text NOT NULL DEFAULT '',
+    trust_level text NOT NULL DEFAULT 'derived_summary',
+    source_refs jsonb NOT NULL DEFAULT '[]'::jsonb,
+    content_digest text NOT NULL DEFAULT '',
+    metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+    UNIQUE (anchor_type, anchor_id, attachment_type, source_system, source_record_id)
+);
+
+-- 主检索轴与服务/时间一致；按 run 回溯也常用。
+CREATE INDEX IF NOT EXISTS timeline_attachments_service ON timeline_attachments (service_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS timeline_attachments_run ON timeline_attachments (run_id);

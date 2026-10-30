@@ -160,16 +160,25 @@ def _scalars(data, prefix: str = "", depth: int = 0) -> list[tuple[str, object]]
     return []
 
 
+def _facts(ids, by_id: dict, findings: list) -> tuple[list[str], list[dict]]:
+    """事实引用必须能在本 run 的 catalog 中定位；解析结果原样带回 draft。"""
+    kept, facts = [], []
+    for fact_id_value in ids or []:
+        row = by_id.get(fact_id_value)
+        if not row:
+            findings.append({"rule": "fact_ref", "detail": fact_id_value})
+            continue
+        kept.append(fact_id_value)
+        facts.append({"evidence_id": row["evidence_id"], "path": row["path"], "value": row["value"]})
+    return kept, facts
+
+
 def _assemble(parsed: dict, by_id: dict, evidence: dict, findings: list) -> dict:
+    # 报告级 fact_ids：只校验可定位性，具体事实仍从 catalog 取
+    _facts(parsed.get("fact_ids") or [], by_id, findings)
     observations = []
     for obs in parsed.get("observations") or []:
-        facts = []
-        for fact_id_value in obs.get("fact_ids") or []:
-            row = by_id.get(fact_id_value)
-            if not row:
-                findings.append({"rule": "fact_ref", "detail": fact_id_value})
-                continue
-            facts.append({"evidence_id": row["evidence_id"], "path": row["path"], "value": row["value"]})
+        _, facts = _facts(obs.get("fact_ids") or [], by_id, findings)
         observations.append({
             "id": obs.get("id"),
             "text": obs.get("text"),
@@ -180,10 +189,12 @@ def _assemble(parsed: dict, by_id: dict, evidence: dict, findings: list) -> dict
     for hyp in parsed.get("hypotheses") or []:
         supporting = _known_ids(hyp.get("supporting_evidence_ids") or [], evidence, findings)
         weakening = _known_ids(hyp.get("weakening_evidence_ids") or [], evidence, findings)
+        supporting_ids, supporting_facts = _facts(hyp.get("supporting_fact_ids") or [], by_id, findings)
+        weakening_ids, weakening_facts = _facts(hyp.get("weakening_fact_ids") or [], by_id, findings)
         status = hyp.get("status")
-        if status == "supported" and not supporting:
+        if status == "supported" and not supporting and not supporting_facts:
             findings.append({"rule": "conclusion", "detail": hyp.get("id")})
-        if status in {"weakened", "ruled_out"} and not weakening:
+        if status in {"weakened", "ruled_out"} and not weakening and not weakening_facts:
             findings.append({"rule": "conclusion", "detail": hyp.get("id")})
         hypotheses.append({
             "id": hyp.get("id"),
@@ -193,9 +204,16 @@ def _assemble(parsed: dict, by_id: dict, evidence: dict, findings: list) -> dict
             "confidence": None,
             "supporting_evidence_ids": supporting,
             "weakening_evidence_ids": weakening,
+            "supporting_fact_ids": supporting_ids,
+            "weakening_fact_ids": weakening_ids,
+            "supporting_facts": supporting_facts,
+            "weakening_facts": weakening_facts,
             "rationale": "",
             "missing_info": [],
         })
+    basis = parsed.get("conclusion_basis_hypothesis_id")
+    if basis and basis not in {str(item.get("id")) for item in hypotheses}:
+        findings.append({"rule": "conclusion", "detail": str(basis)})
     unknowns = []
     for unknown in parsed.get("unknowns") or []:
         unknowns.append({

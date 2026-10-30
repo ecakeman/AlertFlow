@@ -13,7 +13,20 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from .schemas.memory import EpisodeCard, EpisodeOutcome, Conclusion, KnownCause, KnownPattern, ServiceBaseline, ServiceProfile, SignatureItem, Symptom, EvidenceSignature
+from .schemas.memory import (
+    EpisodeCard,
+    EpisodeOutcome,
+    Conclusion,
+    KnownCause,
+    KnownPattern,
+    ServiceBaseline,
+    ServiceProfile,
+    SignatureItem,
+    Symptom,
+    EvidenceSignature,
+    TimelineAttachment,
+    TimelineNode,
+)
 
 log = logging.getLogger("alertflow_agent")
 
@@ -32,6 +45,30 @@ def _row_to_card(row: dict) -> dict:
         "card": row.get("card") or "",
         "conclusion": row.get("conclusion") or {},
     }
+
+
+def episode_to_node(episode: dict) -> TimelineNode:
+    """旧 EpisodeCard -> TimelineNode 的**兼容投影**（不迁移数据、不删旧表）。
+
+    旧事件簿仍是已落库事实，只有读取时按时间线视图投影一次；
+    node_id 用 ``episode:<id>``，便于与附件/新节点区分。
+    """
+    episode_id = str(episode.get("id") or "")
+    started = episode.get("started_at")
+    returned = TimelineNode(
+        node_id=f"episode:{episode_id}",
+        service_id=str(episode.get("service_id") or ""),
+        incident_id=episode.get("incident_id"),
+        node_type="agent_diagnosis",
+        source_system="agent_memory",
+        source_record_id=episode_id,
+        occurred_at=started,
+        recorded_at=started,
+        time_accuracy="derived",
+        summary=str(episode.get("card") or "")[:500],
+        source_locator={"legacy": "episodes"},
+    )
+    return returned
 
 
 class MemoryRepo:
@@ -149,6 +186,69 @@ class MemoryRepo:
              json.dumps(to_value, ensure_ascii=False), reason),
         )
 
+    # ---- 时间轴附件（C3 / 规格 §7.7.7） ----
+    def save_attachment(self, attachment: TimelineAttachment) -> bool:
+        """按 UNIQUE(anchor_type,anchor_id,attachment_type,source_system,source_record_id) 幂等写入。"""
+        payload = attachment.model_dump(mode="json")
+        row = self.conn.execute(
+            """INSERT INTO timeline_attachments (attachment_id, service_id, anchor_type, anchor_id,
+                   attachment_type, source_system, source_record_id, run_id, incident_id,
+                   occurred_at, recorded_at, summary, trust_level, source_refs, content_digest, metadata)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s::jsonb)
+               ON CONFLICT (anchor_type, anchor_id, attachment_type, source_system, source_record_id)
+               DO NOTHING
+               RETURNING attachment_id""",
+            (
+                attachment.attachment_id, attachment.service_id, attachment.anchor_type,
+                attachment.anchor_id, attachment.attachment_type, attachment.source_system,
+                attachment.source_record_id, attachment.run_id, attachment.incident_id,
+                attachment.occurred_at, attachment.recorded_at, attachment.summary[:1000],
+                attachment.trust_level,
+                json.dumps(payload["source_refs"], ensure_ascii=False),
+                attachment.content_digest,
+                json.dumps(payload["metadata"], ensure_ascii=False),
+            ),
+        ).fetchone()
+        return row is not None
+
+    def list_attachments(self, service_id: str, *, limit: int = 20,
+                         since: datetime | None = None) -> list[dict]:
+        """按服务 + 时间倒序读附件（不复制原文，只返回结构）。"""
+        rows = self.conn.execute(
+            """SELECT attachment_id, service_id, anchor_type, anchor_id, attachment_type,
+                      source_system, source_record_id, run_id, incident_id, occurred_at,
+                      recorded_at, summary, trust_level, source_refs, content_digest, metadata
+               FROM timeline_attachments
+               WHERE service_id=%s AND (%s::timestamptz IS NULL OR recorded_at >= %s)
+               ORDER BY COALESCE(occurred_at, recorded_at) DESC
+               LIMIT %s""",
+            (service_id, since, since, limit),
+        ).fetchall()
+        return [
+            {
+                "attachment_id": r[0], "service_id": r[1], "anchor_type": r[2], "anchor_id": r[3],
+                "attachment_type": r[4], "source_system": r[5], "source_record_id": r[6],
+                "run_id": r[7], "incident_id": r[8], "occurred_at": r[9], "recorded_at": r[10],
+                "summary": r[11], "trust_level": r[12], "source_refs": r[13],
+                "content_digest": r[14], "metadata": r[15],
+            }
+            for r in rows
+        ]
+
+    def timeline_nodes(self, service_id: str, days: int, limit: int = 50) -> list[TimelineNode]:
+        """时间线视角：旧 Episode 投影 + 挂在节点上的附件（新旧并存）。"""
+        attachments = self.list_attachments(service_id, limit=limit)
+        nodes = [episode_to_node(item) for item in self.list_recent(service_id, days, limit)]
+        by_incident: dict[str, list] = {}
+        for item in attachments:
+            key = str(item.get("incident_id") or item.get("anchor_id") or "")
+            by_incident.setdefault(key, []).append(item)
+        for node in nodes:
+            node.attachments = [
+                TimelineAttachment(**item) for item in by_incident.get(str(node.incident_id), [])
+            ]
+        return nodes
+
 
 class InMemoryMemoryRepo(MemoryRepo):
     """测试用：不依赖 Postgres / pgvector，向量检索在 Python 里算余弦。"""
@@ -158,6 +258,7 @@ class InMemoryMemoryRepo(MemoryRepo):
         self.vectors: dict[str, list[float]] = {}
         self.profiles: dict[str, dict] = {}
         self.corrections: list[dict] = []
+        self.attachments: list[dict] = []
 
     def save_episode(self, card: EpisodeCard, embedding: list[float] | None, embed_model: str = "") -> str:
         import uuid
@@ -213,3 +314,43 @@ class InMemoryMemoryRepo(MemoryRepo):
     def record_correction(self, episode_id: str, field: str, from_value, to_value, reason: str = "") -> None:
         self.corrections.append({"episode_id": episode_id, "field": field,
                                  "from": from_value, "to": to_value, "reason": reason})
+
+    # ---- 时间轴附件（C3）：内存实现与 Postgres 同语义 ----
+    def save_attachment(self, attachment: TimelineAttachment) -> bool:
+        payload = attachment.model_dump(mode="json")
+        key = attachment.unique_key()
+        if any((item["anchor_type"], item["anchor_id"], item["attachment_type"],
+                item["source_system"], item["source_record_id"]) == key for item in self.attachments):
+            return False
+        self.attachments.append({
+            "attachment_id": attachment.attachment_id, "service_id": attachment.service_id,
+            "anchor_type": attachment.anchor_type, "anchor_id": attachment.anchor_id,
+            "attachment_type": attachment.attachment_type, "source_system": attachment.source_system,
+            "source_record_id": attachment.source_record_id, "run_id": attachment.run_id,
+            "incident_id": attachment.incident_id,
+            "occurred_at": attachment.occurred_at.isoformat() if attachment.occurred_at else None,
+            "recorded_at": attachment.recorded_at.isoformat(),
+            "summary": attachment.summary[:1000], "trust_level": attachment.trust_level,
+            "source_refs": payload["source_refs"], "content_digest": attachment.content_digest,
+            "metadata": payload["metadata"],
+        })
+        return True
+
+    def list_attachments(self, service_id: str, *, limit: int = 20,
+                         since: datetime | None = None) -> list[dict]:
+        rows = [item for item in self.attachments if item["service_id"] == service_id]
+        if since is not None:
+            stamp = since.isoformat()
+            rows = [item for item in rows if (item.get("recorded_at") or "") >= stamp]
+        rows.sort(key=lambda item: item.get("occurred_at") or item.get("recorded_at") or "", reverse=True)
+        return rows[:limit]
+
+    def timeline_nodes(self, service_id: str, days: int, limit: int = 50) -> list[TimelineNode]:
+        attachments = self.list_attachments(service_id, limit=limit)
+        nodes = [episode_to_node(item) for item in self.list_recent(service_id, days, limit)]
+        for node in nodes:
+            node.attachments = [
+                TimelineAttachment(**item) for item in attachments
+                if str(item.get("incident_id") or item.get("anchor_id")) == str(node.incident_id)
+            ]
+        return nodes

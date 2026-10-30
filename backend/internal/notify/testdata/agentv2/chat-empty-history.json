@@ -1,0 +1,1 @@
+{"schema_version":"v2","message_id":"chat:req-2","message_type":"chat.requested","correlation_id":"incident:1","sent_at":"2023-11-14T22:15:23Z","payload":{"request_id":"req-2","incident_id":1,"service_id":"svc","message":"还在吗？","history":[]}}

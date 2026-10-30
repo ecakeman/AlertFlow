@@ -12,10 +12,19 @@ from alertflow_agent.integrations.alertflow import collect_checks, iso_now, norm
 from alertflow_agent.integrations.mcp import enabled_mcp_tools, scope_hint, sources_from_settings
 from alertflow_agent.integrations.project_diagnostics import fetch, load_config
 from alertflow_agent.runtime.guards import before_lead, fresh_guard, note_tool
+from alertflow_agent.runtime.context_manager import ContextManager
 from alertflow_agent.runtime.model import call_model
 from alertflow_agent.runtime.planner import validate_plan_diff
+from alertflow_agent.runtime.evidence import EvidenceManager, candidates_from_evidence
 from alertflow_agent.runtime.tools import _add, clip, run_tool
-from alertflow_agent.runtime.verify import build_catalog, cited, verify
+from alertflow_agent.runtime.verify import build_catalog, cited
+from alertflow_agent.runtime.window import (
+    build_investigation_window,
+    scope_from_event,
+    window_from_context,
+    window_from_state,
+)
+from alertflow_agent.schemas.context import InvestigationWindow
 
 log = logging.getLogger("alertflow_agent")
 
@@ -24,6 +33,7 @@ class GraphState(TypedDict, total=False):
     run_id: str
     mode: str
     event: dict
+    window: dict      # 父级算好的 InvestigationWindow（唯一时间来源）
     evidence: dict
     raw_checks: list
     series: list
@@ -55,6 +65,9 @@ class GraphState(TypedDict, total=False):
     diagnostic_calls: int
     prior_report: dict
     fact_catalog: list
+    evidence_registration: dict
+    evidence_registry: dict
+    report_verification: dict
     llm_report: dict
     replan_bad: bool
     cancelled: bool
@@ -67,6 +80,19 @@ class GraphState(TypedDict, total=False):
 
 def _epoch(value: str) -> int:
     return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+
+
+def _findings(verification) -> list[dict]:
+    """把 VerificationResult 摊回旧 findings 形状（rule/detail），保持报告兼容。"""
+    findings: list[dict] = []
+    for rule, items in (
+        ("schema", verification.schema_errors),
+        ("evidence_ref", verification.unknown_evidence_ids),
+        ("fact_ref", verification.invalid_fact_refs),
+        ("conclusion", verification.hypothesis_reference_errors),
+    ):
+        findings.extend({"rule": rule, "detail": item} for item in items)
+    return findings
 
 
 def _evidence(state, ident, source, kind, summary, data, limitations=None):
@@ -94,6 +120,9 @@ class Runner:
         self.embed = embed        # 嵌入客户端（None / 未配置 → 不做向量召回）
         self.rerank = rerank      # 重排客户端（None / 未配置 → 退回向量序）
         self.mcp = sources_from_settings(settings) if mcp is None else mcp
+        # 检索唯一入口：四个来源共用一个 ContextManager，adapter 只消费统一时间窗。
+        self.context_manager = ContextManager(alertflow=alertflow, mcp=self.mcp,
+                                              memory=memory, settings=settings)
         self.graph = self._graph(checkpointer)
 
     def _refresh_runtime_config(self) -> None:
@@ -223,8 +252,12 @@ class Runner:
         # 下推的上下文单独取出来：它是"启动这次诊断的材料"，不是事件本身。
         # 混进 state["event"] 会被当成事件字段喂给模型。
         provided_context = event.pop("diagnostic_context", None)
-        occurred = event["occurred_at"]
-        end_at = event.get("resolved_at") or occurred
+        # 唯一时间窗：父级算一次，后续所有节点/adapter 只消费 state["window"]
+        window = build_investigation_window(
+            event,
+            lookback_minutes=self.settings.check_lookback_minutes,
+            max_window_seconds=self.settings.mcp_max_window_seconds,
+        )
         return self.graph.invoke({
                 "run_id": run_id,
                 "mode": row["mode"],
@@ -233,7 +266,8 @@ class Runner:
                 "evidence": {},
                 "raw_checks": [],
                 "series": [],
-                "coverage": {"from": _epoch(occurred) - self.settings.check_lookback_minutes * 60, "to": _epoch(end_at), "gaps": []},
+                "window": window.model_dump(mode="json"),
+                "coverage": window.coverage(),
                 "skills": [],
                 "skills_loaded": [],
                 "plan": None,
@@ -418,11 +452,13 @@ class Runner:
         gaps = list(state["coverage"].get("gaps") or [])
         status = {"provided_context": "ok"}
 
-        window = context.get("timeWindow") or {}
-        if window.get("from") and window.get("to"):
-            # 窗口由事件时间决定，不由投递时刻决定——Go 侧已经算好了，直接采用。
-            state["coverage"]["from"] = _epoch(window["from"])
-            state["coverage"]["to"] = _epoch(window["to"])
+        # 窗口由事件时间决定，不由投递时刻决定——Go 侧已经算好了，直接采用。
+        # 统一转成 InvestigationWindow，工具/adapter 之后只读 state["window"]。
+        provided_window = window_from_context(context, self.settings)
+        if provided_window is not None:
+            state["window"] = provided_window.model_dump(mode="json")
+            state["coverage"]["from"] = provided_window.start_epoch()
+            state["coverage"]["to"] = provided_window.end_epoch()
         coverage = context.get("coverage") or {}
         for name, value in (coverage.get("sources") or {}).items():
             status[name] = value
@@ -506,9 +542,10 @@ class Runner:
         event = state.get("event") or {}
         service_id = event.get("service_id") or ""
         try:
-            occurred = _epoch(event["occurred_at"])
+            # 不再自己算 occurred-3600：直接用父级窗口
+            window = window_from_state(state, self.settings)
             page = client.timeline(
-                service_id, occurred - 3600, occurred,
+                service_id, window.start_epoch(), window.end_epoch(),
                 ["application_diagnostics", "kubernetes", "incident", "agent"], 50,
             )
         except Exception:
@@ -710,6 +747,7 @@ class Runner:
             clients = {
                 "alertflow": self.alertflow, "model": self.model, "store": self.store,
                 "memory": getattr(self, "memory", None),
+                "context": self.context_manager,
             }
             if self.mcp is not None:
                 clients["mcp"] = self.mcp
@@ -766,6 +804,42 @@ class Runner:
             return "report"
         return "lead"
 
+    def _register_evidence(self, state):
+        """把本 run 的检索结果登记进 EvidenceManager，并派生 Fact Catalog。
+
+        只做确定性投影：evidence_id 由父级按 run + 定位 + 窗口 + payload 摘要生成，
+        不接受模型自报；非法候选只拒绝自己，不打断整批登记。
+        """
+        window = (
+            InvestigationWindow.model_validate(state["window"])
+            if state.get("window")
+            else build_investigation_window(
+                state["event"],
+                lookback_minutes=self.settings.check_lookback_minutes,
+                max_window_seconds=self.settings.mcp_max_window_seconds,
+            )
+        )
+        scope = scope_from_event(state["event"], state["run_id"], window=window, settings=self.settings)
+        manager = EvidenceManager(
+            state["run_id"],
+            scope,
+            max_rows=self.settings.check_max_rows,
+            max_bytes=self.settings.mcp_max_response_bytes,
+        )
+        candidates, rejected = candidates_from_evidence(state, scope, window)
+        result = manager.register_batch(candidates)
+        result.rejected_candidates.extend(rejected)
+        state["evidence_registration"] = {
+            "accepted": len(result.accepted_evidence_ids),
+            "duplicates": len(result.duplicate_evidence_ids),
+            "rejected": len(result.rejected_candidates),
+            "rejected_candidates": [item.model_dump(mode="json") for item in result.rejected_candidates],
+            "fact_count_by_source_type": result.fact_count_by_source_type,
+            "catalog_truncated": result.catalog_truncated,
+        }
+        state["evidence_registry"] = manager.registry()
+        return manager, manager.catalog()
+
     def write_report(self, state):
         if self._stop_if_cancelled(state) or state.get("failure_reason") in {"collect_failed", "llm_error"}:
             return state
@@ -773,7 +847,9 @@ class Runner:
         if now - state["started"] > self.settings.run_timeout_seconds + self.settings.report_grace_seconds:
             state["failure_reason"] = "report_timeout"
             return state
-        state["fact_catalog"] = build_catalog(state.get("evidence") or {})
+        _, catalog = self._register_evidence(state)
+        # 登记为空（例如所有来源都无映射）时回退到旧派生，保证 prompt 仍可用
+        state["fact_catalog"] = catalog or build_catalog(state.get("evidence") or {})
         draft = call_model(self.model, "write_report", state, self.settings, self.store)
         if not draft:
             if not state.get("failure_reason"):
@@ -791,13 +867,20 @@ class Runner:
             self.settings.llm_base_url, self.settings.llm_api_key,
             self.settings.prometheus_mcp_token, self.settings.loki_mcp_token,
         ]
-        result = verify(
-            state["report"], state["evidence"], tokens, state["coverage"].get("gaps") or [],
-            state.get("fact_catalog") or build_catalog(state.get("evidence") or {}),
+        manager, _ = self._register_evidence(state)
+        verification = manager.verify_report(
+            state["report"], state["evidence"], tokens, state["coverage"].get("gaps") or []
         )
-        state["report"] = result["draft"]
-        state["verification"] = {"passed": result["passed"], "findings": result["findings"], "warnings": result["warnings"]}
-        if not result["passed"]:
+        state["report"] = manager.last_draft if manager.last_draft is not None else state["report"]
+        state["verification"] = {
+            "passed": verification.passed,
+            "findings": _findings(verification),
+            "warnings": verification.warnings,
+            # Runbook citation 双 ID 校验结果（只记录，不改变 passed 语义）
+            "invalid_document_citations": verification.invalid_document_citations,
+        }
+        state["report_verification"] = verification.model_dump(mode="json")
+        if not verification.passed:
             state["revisions"] += 1
         return state
 
@@ -838,6 +921,7 @@ class Runner:
                 "gaps": state["coverage"].get("gaps") or [],
             },
             "verification": state.get("verification"),
+            "evidence_registration": state.get("evidence_registration"),
             "usage": {
                 "llm_calls": state["guard"]["llm_calls"],
                 "llm_attempts": state["guard"].get("llm_attempts", state["guard"]["llm_calls"]),

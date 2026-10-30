@@ -1,6 +1,7 @@
 import hashlib
 import json
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from alertflow_agent.analysis.errors import classify_error
@@ -23,7 +24,27 @@ from alertflow_agent.integrations.mcp import (
     summarize_result,
 )
 from alertflow_agent.integrations.project_diagnostics import fetch, load_config
+from alertflow_agent.integrations.runbook_contract import (
+    ARTIFACT_SCHEMA,
+    InvalidArtifact,
+    RunbookFactHint,
+    build_query,
+    parse_artifact,
+    query_payload,
+)
 from alertflow_agent.runtime.model import call_model
+from alertflow_agent.runtime.window import (
+    parse_time,
+    scope_from_event,
+    window_between,
+    window_from_state,
+)
+from alertflow_agent.schemas.context import (
+    AlertFlowQueryRequest,
+    LokiQueryRequest,
+    PrometheusQueryRequest,
+    RetrievalRequest,
+)
 
 _SKILLS = Path(__file__).resolve().parents[1] / "skills"
 _ALLOWED_SKILLS = {"service-unavailable", "intermittent-failure", "latency-degradation", "tls-evidence"}
@@ -71,6 +92,20 @@ def _epoch(value) -> int:
     return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp())
 
 
+def _step_seconds(value) -> int:
+    try:
+        return max(1, int(str(value).rstrip("s")))
+    except (TypeError, ValueError):
+        return 60
+
+
+def _optional_int(value):
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _charge_query(state, settings) -> str | None:
     """给「回头找 AlertFlow 要数据」的工具记一次调用，超限就拒。
 
@@ -85,16 +120,62 @@ def _charge_query(state, settings) -> str | None:
     return None
 
 
+_FAILED_STATUSES = {"failed", "unavailable", "timeout", "disabled", "invalid_request"}
+
+
+def _manager(clients, settings):
+    """取进程内唯一的 ContextManager；工具层不直接访问任何检索 adapter。"""
+    manager = clients.get("context")
+    if manager is None:
+        from alertflow_agent.runtime.context_manager import ContextManager
+
+        manager = ContextManager(
+            alertflow=clients.get("alertflow"), mcp=clients.get("mcp"),
+            memory=clients.get("memory"), settings=settings,
+        )
+    return manager
+
+
+def _scope_for(state, settings, start, end, *, kind="root_cause"):
+    """工具子窗口仍派生自父级 InvestigationWindow（唯一时间来源）。"""
+    base = window_from_state(state, settings)
+    win = window_between(base, int(start), int(end), kind=kind)
+    return scope_from_event(
+        state.get("event") or {}, str(state.get("run_id") or "run"),
+        window=win, settings=settings,
+    )
+
+
+def _retrieve(state, settings, clients, scope, sources, *, purpose="targeted_followup"):
+    """唯一检索入口；失败返回 None 由调用方映射成本源的 gap/note，不抛出。"""
+    try:
+        request = RetrievalRequest(
+            request_id=f"tool:{scope.run_id}:{time.time_ns()}",
+            scope=scope, purpose=purpose, source_requests=list(sources),
+        )
+        return _manager(clients, settings).retrieve_now(request)
+    except Exception as exc:  # 单次检索失败不得打断整个工具调用
+        state.setdefault("retrieval_errors", []).append(str(exc))
+        return None
+
+
+def _first(batch, source_type):
+    if batch is None:
+        return None
+    return (batch.by_source(source_type) or [None])[0]
+
+
 def _history(args, state, settings, clients) -> dict:
     blocked = _charge_query(state, settings)
     if blocked:
         return {"status": "invalid_request", "note": blocked, "evidence_ids": []}
     event = state["event"]
-    occurred = _epoch(event["occurred_at"])
+    # 窗口只认父级 state["window"]：不再用 occurred-24h 自己推导
+    window = window_from_state(state, settings)
     now = int(datetime.now(timezone.utc).timestamp())
-    earliest = occurred - 24 * 3600
-    start = int(args.get("from") or occurred - 3600)
-    end = int(args.get("to") or occurred)
+    earliest = window.start_epoch()
+    start = int(args.get("from") or window.start_epoch())
+    end = int(args.get("to") or window.end_epoch())
     if start > end:
         return {"status": "invalid_request", "note": "from is after to", "evidence_ids": []}
     start = max(earliest, start)
@@ -104,14 +185,28 @@ def _history(args, state, settings, clients) -> dict:
     limit = int(args.get("limit") or 50)
     if limit < 1 or limit > 500:
         return {"status": "invalid_request", "note": "limit", "evidence_ids": []}
-    rows = collect_checks(clients["alertflow"], event["service_id"], start, end, min(limit, settings.check_max_rows))
+    scope = _scope_for(state, settings, start, end)
+    incident_id = _optional_int(event.get("incident_id"))
+    source = AlertFlowQueryRequest(
+        request_id=f"checks:{scope.run_id}:{start}:{end}",
+        run_id=scope.run_id, service_id=event["service_id"], incident_id=incident_id,
+        resources=["checks"],
+        window_start=datetime.fromtimestamp(start, timezone.utc),
+        window_end=datetime.fromtimestamp(end, timezone.utc),
+        page_size=min(limit, settings.check_max_rows),
+    )
+    result = _first(_retrieve(state, settings, clients, scope, [source]), "checks")
+    if result is None:
+        return {"status": "error", "note": "checks retrieval failed", "evidence_ids": []}
+    if result.status in _FAILED_STATUSES:
+        return {"status": "error", "note": f"checks retrieval {result.status}", "evidence_ids": []}
+    rows = [item.data for item in result.items if isinstance(item.data, dict)]
     merged = {row["id"]: row for row in state.get("raw_checks") or []}
     for row in rows:
         merged[row["id"]] = row
     state["raw_checks"] = sorted(merged.values(), key=lambda row: row["ts"])
     ids = _add_checks(state, key_checks(rows))
     return {"status": "success" if rows else "empty", "evidence_ids": ids, "data": {"returned": len(rows)}}
-
 
 def _analyze(args, state) -> dict:
     minutes = int(args.get("window_minutes") or 0)
@@ -179,7 +274,8 @@ def _incident(args, state, settings, clients) -> dict:
 def _timeline(args, state, settings, clients) -> dict:
     """Read application, kubernetes, incident and agent events from Go.
 
-    The window grows 1h → 24h → retention. Empty is not treated as healthy.
+    所有跨度都经 ``ContextManager.retrieve`` 走统一入口；窗口从 1h 扩到 24h/retention
+    只是显式的 historical_recall 探测，不改变父级 InvestigationWindow 的定义。
     """
     if getattr(settings, "agent_diagnostics_mode", "timeline") == "legacy":
         return {"status": "unavailable", "note": "timeline mode is off", "evidence_ids": []}
@@ -187,18 +283,45 @@ def _timeline(args, state, settings, clients) -> dict:
     if blocked:
         return {"status": "invalid_request", "note": blocked, "evidence_ids": []}
     event = state["event"]
-    occurred = _epoch(event["occurred_at"])
+    window = window_from_state(state, settings)
+    end = window.end_epoch()
     retention_days = int(args.get("retention_days") or 30)
-    windows = [3600, 24 * 3600, retention_days * 24 * 3600]
+    windows = [max(1, window.duration_seconds), 24 * 3600, retention_days * 24 * 3600]
     sources = args.get("sources") or ["application_diagnostics", "kubernetes", "incident", "agent"]
     limit = int(args.get("limit") or 50)
     if limit < 1 or limit > 200:
         return {"status": "invalid_request", "note": "limit", "evidence_ids": []}
-    client = clients["alertflow"]
     page = {"events": [], "coverage": []}
     for span in windows:
-        page = client.timeline(event["service_id"], occurred - span, occurred, sources, limit)
-        if page.get("events"):
+        kind = "root_cause" if span == windows[0] else "historical_recall"
+        if span > window.duration_seconds:
+            state.setdefault("window_expansions", []).append(
+                {"kind": "historical_recall", "start": end - span, "end": end, "seconds": span}
+            )
+        start = end - span
+        scope = _scope_for(state, settings, start, end, kind=kind)
+        source = AlertFlowQueryRequest(
+            request_id=f"timeline:{scope.run_id}:{start}:{end}",
+            run_id=scope.run_id, service_id=event["service_id"],
+            incident_id=_optional_int(event.get("incident_id")),
+            resources=["service_timeline"],
+            window_start=datetime.fromtimestamp(start, timezone.utc),
+            window_end=datetime.fromtimestamp(end, timezone.utc),
+            page_size=limit,
+        )
+        result = _first(_retrieve(state, settings, clients, scope, [source],
+                                  purpose="historical_recall" if kind == "historical_recall" else "targeted_followup"), "timeline")
+        if result is None:
+            return {"status": "error", "note": "timeline retrieval failed", "evidence_ids": []}
+        if result.status in _FAILED_STATUSES:
+            return {"status": "error", "note": f"timeline retrieval {result.status}", "evidence_ids": []}
+        events = [item.data for item in result.items if isinstance(item.data, dict)]
+        page = {
+            "events": events,
+            "coverage": (result.query_metadata or {}).get("coverage") or [],
+            "from": start, "to": end,
+        }
+        if events:
             break
         if int(state.get("query_calls") or 0) >= settings.max_query_calls:
             break
@@ -231,7 +354,6 @@ def _timeline(args, state, settings, clients) -> dict:
         state.setdefault("coverage", {}).setdefault("gaps", []).append("TIMELINE_EMPTY")
         return {"status": "empty", "evidence_ids": ids, "data": {"coverage": coverage_rows}}
     return {"status": "success", "evidence_ids": ids, "data": {"events": len(page.get("events") or [])}}
-
 
 def _diagnostics(args, state, settings) -> dict:
     if getattr(settings, "agent_diagnostics_mode", "timeline") != "legacy":
@@ -352,7 +474,10 @@ def _recall_episode(args, state, clients) -> dict:
 
 
 def _mcp(name, args, state, settings, clients) -> dict:
-    """配置了 URL 才调用。失败只记本源的 coverage gap，不抛出。"""
+    """配置了 URL 才调用。失败只记本源的 coverage gap，不抛出。
+
+    参数整形留在工具层；真正的 MCP tools/call 只发生在 ContextManager.retrieve 内部。
+    """
     configured = (settings.prometheus_mcp_url if name in PROMETHEUS_TOOLS else settings.loki_mcp_url) or ""
     if not str(configured).strip():
         return {"status": "invalid_request", "note": "unknown tool", "evidence_ids": []}
@@ -364,34 +489,64 @@ def _mcp(name, args, state, settings, clients) -> dict:
         return {"status": "error", "note": _mcp_note(source, exc.kind), "evidence_ids": []}
     if sent is None:
         return {"status": "invalid_request", "note": "unknown tool", "evidence_ids": []}
-    client = clients.get("mcp")
+    if int(state.get("mcp_calls") or 0) >= int(settings.mcp_max_calls):
+        _mcp_gap(state, source, "budget")
+        return {"status": "error", "note": _mcp_note(source, "budget"), "evidence_ids": []}
+    encoded = json.dumps(sent, sort_keys=True, default=str).encode()
+    if len(encoded) > int(settings.mcp_max_response_bytes):
+        _mcp_gap(state, source, "too_large")
+        return {"status": "error", "note": _mcp_note(source, "too_large"), "evidence_ids": []}
+    # 调用前记账：超时/失败同样消耗额度（§7.7.12）
+    state["mcp_calls"] = int(state.get("mcp_calls") or 0) + 1
+    # instant query 的 recorded 只有 timestamp，没有起止；用 1 秒窗口近似，仍派生自父级窗口
+    end_dt = parse_time(recorded.get("end") or recorded.get("timestamp"))
+    start_dt = parse_time(recorded.get("start")) or (
+        end_dt - timedelta(seconds=1) if end_dt is not None else None
+    )
+    if start_dt is None or end_dt is None:
+        _mcp_gap(state, source, "malformed")
+        return {"status": "error", "note": _mcp_note(source, "malformed"), "evidence_ids": []}
+    start, end = int(start_dt.timestamp()), int(end_dt.timestamp())
+    scope = _scope_for(state, settings, start, end)
+    service_id = (state.get("event") or {}).get("service_id") or ""
+    cap = int(settings.mcp_max_log_lines if source == "loki" else settings.mcp_max_samples)
+    if source == "prometheus":
+        request = PrometheusQueryRequest(
+            request_id=f"mcp:{name}:{scope.run_id}:{start}:{end}",
+            service_id=service_id, query_mode="instant" if name == "query" else "range",
+            promql=str(recorded.get("query") or ""), selector={}, start=start_dt, end=end_dt,
+            step_seconds=_step_seconds(sent.get("step")), max_samples=cap,
+            timeout_seconds=int(settings.mcp_timeout_seconds), tool=name, tool_args=sent,
+        )
+    else:
+        request = LokiQueryRequest(
+            request_id=f"mcp:{name}:{scope.run_id}:{start}:{end}",
+            service_id=service_id, selector={}, logql=str(recorded.get("query") or ""),
+            start=start_dt, end=end_dt, limit=int(recorded.get("limit") or cap),
+            timeout_seconds=int(settings.mcp_timeout_seconds), tool=name, tool_args=sent,
+        )
+    result = _first(_retrieve(state, settings, clients, scope, [request],
+                              purpose="historical_recall" if source == "loki" else "targeted_followup"), source)
+    if result is None:
+        return {"status": "error", "note": "retrieval failed", "evidence_ids": []}
+    if result.status in _FAILED_STATUSES:
+        meta = result.query_metadata or {}
+        kind = str(meta.get("mcp_kind") or (result.error.category if result.error else "") or "malformed")
+        _mcp_gap(state, source, kind)
+        return {"status": "error", "note": _mcp_note(source, kind), "evidence_ids": []}
+    text = _scrub(str((result.query_metadata or {}).get("text") or ""), settings)
+    if name not in EVIDENCE_TOOLS:
+        return {
+            "status": "success",
+            "evidence_ids": [],
+            "data": {"note": "not stored as service evidence", "text": text[:400]},
+        }
+    limit = settings.mcp_max_log_lines if source == "loki" else settings.mcp_max_samples
     try:
-        if client is None:
-            raise MCPError("malformed")
-        if int(state.get("mcp_calls") or 0) >= int(settings.mcp_max_calls):
-            raise MCPError("budget")
-        encoded = json.dumps(sent, sort_keys=True, default=str).encode()
-        if len(encoded) > int(settings.mcp_max_response_bytes):
-            raise MCPError("too_large")
-        state["mcp_calls"] = int(state.get("mcp_calls") or 0) + 1
-        text = client.call(name, sent)
-        if not isinstance(text, str):
-            raise MCPError("malformed")
-        text = _scrub(text, settings)
-        if name not in EVIDENCE_TOOLS:
-            return {
-                "status": "success",
-                "evidence_ids": [],
-                "data": {"note": "not stored as service evidence", "text": text[:400]},
-            }
-        limit = settings.mcp_max_log_lines if source == "loki" else settings.mcp_max_samples
         summary = summarize_result(text, source, limit)
     except MCPError as exc:
         _mcp_gap(state, source, exc.kind)
         return {"status": "error", "note": _mcp_note(source, exc.kind), "evidence_ids": []}
-    except Exception:
-        _mcp_gap(state, source, "malformed")
-        return {"status": "error", "note": _mcp_note(source, "malformed"), "evidence_ids": []}
     truncated = summary.pop("truncated", False)
     data = {
         "source": source,
@@ -411,7 +566,6 @@ def _mcp(name, args, state, settings, clients) -> dict:
     _add(state, ident, source, name, name, f"{source} {data['query']} => {value}", data, limitations)
     return {"status": "success", "evidence_ids": [ident], "data": {"text": str(value)[:400]}}
 
-
 def _mcp_request(name, args, state, settings, source):
     """返回发给上游的参数，以及写入 evidence 的时间窗。
 
@@ -426,11 +580,13 @@ def _mcp_request(name, args, state, settings, source):
             raise MCPError("unmapped")
     else:
         selector = ""
-    occurred = _epoch(state["event"]["occurred_at"])
+    # 时间窗来自父级 state["window"]；用户显式传 start/end 时仍受 MCP 窗口上限约束
+    window = window_from_state(state, settings)
+    occurred = window.end_epoch()
     start, end = clamp_window(
         occurred,
-        _optional_epoch(args.get("start", args.get("from"))),
-        _optional_epoch(args.get("end", args.get("to", args.get("time")))),
+        _optional_epoch(args.get("start", args.get("from"))) or window.start_epoch(),
+        _optional_epoch(args.get("end", args.get("to", args.get("time")))) or window.end_epoch(),
         settings.mcp_max_window_seconds,
     )
     start_text = _rfc3339(start)
@@ -617,6 +773,11 @@ def _put_analysis(state, n: int, rows=None, window_from=None) -> None:
 
 
 def _consult_runbook(args, state, settings, clients) -> dict:
+    """一次 consult：请求是 RunbookQueryV1，响应按 ArtifactV1 解析。
+
+    失败只记 coverage gap，不打断当前调查；FAILED/CANCELED 的 artifact
+    即使带建议文本也不能登记为成功证据。
+    """
     url = str(getattr(settings, "a2a_adapter_url", "") or "").strip()
     if not url:
         return {"status": "invalid_request", "note": "runbook agent is not configured", "evidence_ids": []}
@@ -624,45 +785,86 @@ def _consult_runbook(args, state, settings, clients) -> dict:
         return {"status": "error", "note": "runbook already consulted", "evidence_ids": []}
     state["runbook_consulted"] = True
     event = state.get("event") or {}
-    observations = []
-    for item in list((state.get("evidence") or {}).values())[:8]:
-        observations.append({"id": item.get("id"), "summary": str(item.get("summary") or "")[:200]})
-    payload = {
-        "service_id": event.get("service_id"),
-        "occurred_at": event.get("occurred_at"),
-        "observations": observations,
-        "hypothesis": str(args.get("hypothesis") or "")[:500],
-        "question": str(args.get("question") or "")[:500],
-    }
-    message_id = f"runbook:{state.get('run_id') or event.get('service_id')}"
+    window = window_from_state(state, settings)
+    facts = []
+    for entry in list(state.get("fact_catalog") or [])[:8]:
+        if not isinstance(entry, dict):
+            continue
+        value = entry.get("value")
+        facts.append(
+            RunbookFactHint(
+                fact_id=str(entry.get("fact_id") or ""),
+                evidence_id=str(entry.get("evidence_id") or ""),
+                summary=f"{entry.get('path')} = {value}"[:200],
+                value=str(value)[:200],
+            )
+        )
+    question = str(args.get("question") or "").strip()[:500]
+    if not question:
+        question = "What does the runbook say about this incident?"
+    run_id = str(state.get("run_id") or "")
+    service_id = str(event.get("service_id") or "")
+    incident_id = event.get("incident_id")
+    query = build_query(
+        request_id=f"runbook:{run_id or service_id}",
+        run_id=run_id,
+        service_id=service_id,
+        question=question,
+        window_start=window.window_start.isoformat(),
+        window_end=window.window_end.isoformat(),
+        incident_id=str(incident_id) if incident_id not in (None, "") else None,
+        symptom_summary=str(event.get("title") or event.get("message") or event.get("error") or "")[:500],
+        known_facts=facts,
+    )
+    payload = query_payload(query)
+    message_id = f"runbook:{run_id or service_id}"
     try:
         sender = clients.get("a2a")
         if sender is None:
             from alertflow_agent.integrations.runbook import consult
-            sender = consult
-        artifact = sender(url, payload, message_id)
-    except Exception:
+            artifact = consult(
+                url,
+                payload,
+                message_id,
+                timeout=float(getattr(settings, "a2a_adapter_timeout_seconds", 30.0) or 30.0),
+                token=str(getattr(settings, "a2a_adapter_token", "") or ""),
+            )
+        else:
+            artifact = sender(url, payload, message_id)
+    except Exception as exc:
+        if "invalid" in str(exc).lower():
+            _gap(state, "runbook artifact is invalid")
+            return {"status": "error", "note": "runbook artifact is invalid", "evidence_ids": []}
         _gap(state, "runbook agent did not answer")
         return {"status": "error", "note": "runbook lookup failed", "evidence_ids": []}
-    if artifact.get("error"):
-        _gap(state, "runbook agent did not answer")
-        return {"status": "error", "note": "runbook lookup failed", "evidence_ids": []}
+    try:
+        parsed = parse_artifact(artifact)
+    except InvalidArtifact:
+        _gap(state, "runbook artifact is invalid")
+        return {"status": "error", "note": "runbook artifact is invalid", "evidence_ids": []}
+    if parsed.status in ("failed", "canceled"):
+        _gap(state, "runbook lookup failed")
+        return {"status": "error", "note": f"runbook lookup {parsed.status}", "evidence_ids": []}
     ident = f"runbook:{message_id}"
-    content = str(artifact.get("content") or "")[:8000]
-    citations = [
-        item for item in (artifact.get("citations") or [])
-        if isinstance(item, dict) and item.get("document_id") and item.get("id")
-    ]
-    cited = bool(artifact.get("citations_available")) and bool(citations)
+    content = parsed.summary[:8000]
+    citations = [citation.model_dump(mode="json") for citation in parsed.citations]
+    cited = parsed.citations_available and bool(citations)
     _add(state, ident, "runbook", message_id, "runbook", content[:400], {
-        "schema": artifact.get("schema"),
+        "schema": ARTIFACT_SCHEMA,
+        "artifact_status": parsed.status,
         "content": content,
+        "summary": content,
+        "recommendations": [item.model_dump(mode="json") for item in parsed.recommendations][:8],
         "citations_available": cited,
         "citations": citations if cited else [],
+        "warnings": parsed.warnings[:10],
         "source": "ragflow",
     })
-    return {"status": "success", "data": {"citations_available": bool(artifact.get("citations_available"))}, "evidence_ids": [ident]}
-
+    return {
+        "status": "success",
+        "data": {"citations_available": cited, "citations": len(citations)},
+        "evidence_ids": [ident],
+    }
 
 def _gap(state, text: str) -> None:
     state.setdefault("coverage", {}).setdefault("gaps", []).append(text)

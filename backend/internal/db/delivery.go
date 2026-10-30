@@ -139,6 +139,9 @@ func (db *DB) ClaimDeliveries(owner string, now, leaseUntil int64, limit, maxAtt
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
+	// 历史兼容分支：上面的 SQL 只领取 integration_id IS NULL 的内部 Agent 任务，
+	// 所以这里对非 0 integration_id 的处理当前不可达。保留它是为了不改变旧表的
+	// 结构与语义；若将来恢复旧渠道消费，需要连同 ClaimDeliveries 的 WHERE 一起改。
 	for i := range claimed {
 		if claimed[i].IntegrationID == 0 {
 			continue
@@ -183,6 +186,10 @@ func AgentTasksEnabled() bool {
 
 // InsertInternalAgentTask queues one gRPC investigation or chat task.
 // A repeated event id and type is ignored. The row has no integration.
+//
+// notification_deliveries 是历史表名：该表同时承载旧的渠道投递行与现在的
+// 内部 Agent 任务行，二者靠 integration_id 是否为 NULL 区分。表名与列保持
+// 不变以避免迁移；新增代码请只把 NULL 行视为任务。
 func InsertInternalAgentTask(tx *sql.Tx, eventID string, incidentID *int64, eventType string, payload []byte, now int64) (int64, error) {
 	var id int64
 	err := tx.QueryRow(

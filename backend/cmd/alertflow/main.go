@@ -34,31 +34,35 @@ func main() {
 	var (
 		addr      string
 		configDir string
+		smoke     bool
 	)
 	flag.StringVar(&addr, "addr", envOr("ALERTFLOW_ADDR", ":8080"), "HTTP listen address")
 	flag.StringVar(&configDir, "config-dir", "", "config directory (default: $ALERTFLOW_CONFIG_DIR or ./config)")
+	// smoke 只构造当前角色的依赖（打开数据库、读配置、建客户端），
+	// 不监听端口、不进入循环，构造成功即退出 0。用于部署后的启动自检。
+	flag.BoolVar(&smoke, "smoke", false, "construct the role's dependencies, then exit 0 without serving")
 	flag.Parse()
 
 	switch envOr("ALERTFLOW_ROLE", "server") {
 	case "server":
-		runServer(addr, configDir)
+		runServer(addr, configDir, smoke)
 	case "monitor":
-		runMonitor(configDir)
+		runMonitor(configDir, smoke)
 	case "publisher":
-		runPublisher()
+		runPublisher(smoke)
 	case "consumer":
-		runConsumer()
+		runConsumer(smoke)
 	case "delivery":
-		runDelivery()
+		runDelivery(smoke)
 	case "retire-deliveries":
-		runRetireDeliveries()
+		runRetireDeliveries(smoke)
 	default:
 		slog.Error("ALERTFLOW_ROLE must be server, monitor, publisher, consumer, delivery, or retire-deliveries")
 		os.Exit(1)
 	}
 }
 
-func runServer(addr, configDir string) {
+func runServer(addr, configDir string, smoke bool) {
 	dir := resolveConfigDir(configDir)
 	slog.Info("starting alertflow", "config_dir", dir, "addr", addr)
 
@@ -68,6 +72,11 @@ func runServer(addr, configDir string) {
 		os.Exit(1)
 	}
 	defer srv.Close()
+
+	if smoke {
+		slog.Info("smoke: server dependencies constructed")
+		return
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -96,7 +105,7 @@ func runServer(addr, configDir string) {
 	}
 }
 
-func runMonitor(configDir string) {
+func runMonitor(configDir string, smoke bool) {
 	dir := resolveConfigDir(configDir)
 	database := openRoleDB()
 	defer database.Close()
@@ -112,6 +121,10 @@ func runMonitor(configDir string) {
 	}
 	defer redisCache.Close()
 	loop := &monitor.Loop{DB: database, Dir: dir, Cache: redisCache}
+	if smoke {
+		slog.Info("smoke: monitor dependencies constructed")
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	slog.Info("monitor started", "config_dir", dir)
@@ -121,13 +134,17 @@ func runMonitor(configDir string) {
 	}
 }
 
-func runPublisher() {
+func runPublisher(smoke bool) {
 	database := openRoleDB()
 	defer database.Close()
 	pub, err := publish.New(database, os.Getenv("ALERTFLOW_KAFKA_BROKERS"), publish.Topic, "")
 	if err != nil {
 		slog.Error("publisher", "error", err)
 		os.Exit(1)
+	}
+	if smoke {
+		slog.Info("smoke: publisher dependencies constructed")
+		return
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -138,13 +155,17 @@ func runPublisher() {
 	}
 }
 
-func runConsumer() {
+func runConsumer(smoke bool) {
 	database := openRoleDB()
 	defer database.Close()
 	cons, err := consume.New(database, os.Getenv("ALERTFLOW_KAFKA_BROKERS"), publish.Topic, "")
 	if err != nil {
 		slog.Error("consumer", "error", err)
 		os.Exit(1)
+	}
+	if smoke {
+		slog.Info("smoke: consumer dependencies constructed")
+		return
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -158,9 +179,13 @@ func runConsumer() {
 // runRetireDeliveries cancels queued tasks on the four retired channels and
 // writes an audit row for any still running. It exits. Start it only after
 // every old delivery worker has stopped.
-func runRetireDeliveries() {
+func runRetireDeliveries(smoke bool) {
 	database := openRoleDB()
 	defer database.Close()
+	if smoke {
+		slog.Info("smoke: retire-deliveries dependencies constructed")
+		return
+	}
 	result, err := database.CancelRetiredDeliveries(time.Now().Unix())
 	if err != nil {
 		slog.Error("retire deliveries", "error", err)
@@ -169,11 +194,15 @@ func runRetireDeliveries() {
 	slog.Info("retired channel deliveries", "cancelled", result.Cancelled, "running_left", result.Audited)
 }
 
-func runDelivery() {
+func runDelivery(smoke bool) {
 	database := openRoleDB()
 	defer database.Close()
 	reads := registerAgentSender(database, resolveConfigDir(""))
 	worker := deliver.New(database, "")
+	if smoke {
+		slog.Info("smoke: delivery dependencies constructed")
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	target := os.Getenv("ALERTFLOW_AGENT_GRPC_TARGET")

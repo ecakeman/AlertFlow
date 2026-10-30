@@ -75,6 +75,9 @@ class Fit:
     budget: int
     floor: int = 0
     blocks: list[dict] = field(default_factory=list)
+    # 每个块最终选中的文本（与 blocks 同序，丢弃的为空串）。
+    # 供上层把叶子块重组为固定六区块，同时保留细粒度裁剪。
+    texts: list[str] = field(default_factory=list)
 
     @property
     def trimmed(self) -> bool:
@@ -129,17 +132,21 @@ def assemble(blocks: list[Block], budget: int) -> Fit:
 
     rendered = []
     report = []
+    texts: list[str] = []
     for i, block in enumerate(blocks):
         if dropped[i]:
             report.append({"name": block.name, "tier": TIER_NAMES[block.tier], "variant": -1,
                            "tokens": 0, "action": "dropped"})
+            texts.append("")
             continue
         text = block.variants[index[i]]
         if not text:
             report.append({"name": block.name, "tier": TIER_NAMES[block.tier], "variant": index[i],
                            "tokens": 0, "action": "dropped"})
+            texts.append("")
             continue
         rendered.append(text)
+        texts.append(text)
         report.append({
             "name": block.name, "tier": TIER_NAMES[block.tier], "variant": index[i],
             "tokens": estimate_tokens(text),
@@ -147,7 +154,7 @@ def assemble(blocks: list[Block], budget: int) -> Fit:
         })
     text = "\n\n".join(rendered)
     return Fit(text=text, tokens=estimate_tokens(text), budget=budget,
-               floor=sum(b.floor_tokens() for b in blocks), blocks=report)
+               floor=sum(b.floor_tokens() for b in blocks), blocks=report, texts=texts)
 
 
 def _step_down(blocks: list[Block], index: list[int], dropped: list[bool], order: list[int]) -> bool:

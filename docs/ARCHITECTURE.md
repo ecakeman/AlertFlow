@@ -18,7 +18,7 @@ common design mistake here.
 | Store | Path | Holds | Written by |
 | --- | --- | --- | --- |
 | `config.yaml` | `<config-dir>/config.yaml` | services, app settings, **widget mode + grid layout** | `config.Save` (atomic temp-file + rename) |
-| PostgreSQL | `ALERTFLOW_DATABASE_URL` | users, sessions, checks history, `outbox_events`, `service_tls`, **incidents + comments**, **integrations + notification log**, `a2a_adapter_tasks`, `a2a_adapter_task_aliases` | `internal/db/*.go` |
+| PostgreSQL | `ALERTFLOW_DATABASE_URL` | users, sessions, checks history, `outbox_events`, `service_tls`, **incidents + comments**, **integrations + notification log** (`a2a_adapter_tasks` and `a2a_adapter_task_aliases` are legacy tables with no Go references) | `internal/db/*.go` |
 | images | `<config-dir>/images/<id>.webp` | service icons | `internal/image` |
 | `state.json` | outside the config dir | which config dir is active | `internal/state` |
 
@@ -90,7 +90,7 @@ One `check()` does, in order:
 5. `RecordCheckAndOutbox(...)` — in one transaction, append the check (stamped with the cycle's **start**), an unpublished `monitor.check.completed` outbox row whose payload carries that check id, and the cert snapshot when this cycle has one. The cert write uses the same service lock and presence check. If this fails, stop: do not move `lastStatus`.
 6. Update `w.lastStatus`, which the next cycle uses only to decide whether to retry.
 
-The scheduler stops there. It does not call `OnTransition` and it does not send notifications. `published_at` stays NULL in the monitor process. Claiming an outbox row uses `FOR UPDATE SKIP LOCKED` on `outbox_events` only. That is not a lock on a service. `RecordCheckAndOutbox`, diagnostics apply and `DeleteServiceRecords` take `pg_advisory_xact_lock` keyed by the service id. After that lock, a check or diagnostics write re-reads `config.yaml` and skips the insert when the service is gone. When `REDIS_URL` is set, the monitor process invalidates that service's cached reads after a check commits. A Redis failure is logged and the check still writes.
+The scheduler stops there. It does not apply the transition and it does not send notifications. `published_at` stays NULL in the monitor process. Claiming an outbox row uses `FOR UPDATE SKIP LOCKED` on `outbox_events` only. That is not a lock on a service. `RecordCheckAndOutbox`, diagnostics apply and `DeleteServiceRecords` take `pg_advisory_xact_lock` keyed by the service id. After that lock, a check or diagnostics write re-reads `config.yaml` and skips the insert when the service is gone. When `REDIS_URL` is set, the monitor process invalidates that service's cached reads after a check commits. A Redis failure is logged and the check still writes.
 
 When `ALERTFLOW_K8S_ENABLED` is `true` or `1`, the same process runs `internal/observe/kubernetes`. It watches Pods, Events, ReplicaSets, Deployments, and StatefulSets. A service `kubernetes` block still maps one Deployment. `settings.kubernetes.targets` adds more Deployments and StatefulSets, each with its own service id. A Pod is kept only when its owner UID is a listed ReplicaSet whose Deployment UID is listed, or a listed StatefulSet UID. The next `Sync` tries `Connect` again after a failed connection. A database write error leaves the source `gap` until a later reconcile succeeds. The initial list is reconciled with `live=false`. Objects added after that sync are handled by the informer's add event; the first observation is still `first_seen`. A semantic fingerprint change writes `runtime_events` with source `kubernetes` and updates `runtime_object_states`. A later event key includes the object's `resourceVersion`, so a return to an earlier fingerprint is stored once for that version and a replay of the same version is ignored. A fingerprint that differs only after a restart, or after a watch expiry relist, is `reconciled_after_gap`. The same fingerprint as the stored row writes nothing. A watch error on any of the five informers marks the source `gap` or `unavailable`, then the cache is reconciled again. Removing or moving a `kubernetes` block marks that mapping's objects inactive and the source `disabled` with `mapping removed`, and leaves the timeline rows in place. Turning collection off does the same for the current mappings, with `collection disabled`, and does not write that row again while the mapping is unchanged. Two services cannot name the same cluster, namespace, kind, and name. The first list/watch waits at most 15 seconds, off the config reload loop. If it does not finish, the source is marked `unavailable` and the informer keeps retrying. `Close` cancels that wait. It does not call `event.Decide` and it does not open an incident. A connection failure, permission error, or watch expiry updates `runtime_source_state` only after the service lock, and only when the service is still configured. HTTP checks continue. Other Kubernetes writes use the same lock and skip the insert when the service is gone.
 
@@ -161,14 +161,14 @@ after the check transaction commits.
 
 ## 4. Incident lifecycle
 
-**The principle: an incident is derived from a check transition, never from a stored status by itself.** The check scheduler does not apply that change. It only stores the check and an outbox event. The consumer applies check transitions with `event.Decide` inside one database transaction. It does not call `OnTransition`. When that transaction actually opens or resolves an outage, it also writes one `runtime_events` row (`incident:{id}:opened` or `incident:{id}:resolved`). A warning check and a repeated open do not. **An incident stays open while the HTTP status is `offline`, and closes when a check recovers.** `warning` still counts as HTTP up. HTTP is the only source that opens or closes an incident. A manual incident is written by `POST /api/incidents` in its own transaction, with the same timeline keys and one `incident_start` task per usable `agent_webhook`.
+**The principle: an incident is derived from a check transition, never from a stored status by itself.** The check scheduler does not apply that change. It only stores the check and an outbox event. The consumer applies check transitions with `event.Decide` inside one database transaction. When that transaction actually opens or resolves an outage, it also writes one `runtime_events` row (`incident:{id}:opened` or `incident:{id}:resolved`). A warning check and a repeated open do not. **An incident stays open while the HTTP status is `offline`, and closes when a check recovers.** `warning` still counts as HTTP up. HTTP is the only source that opens or closes an incident. A manual incident is written by `POST /api/incidents` in its own transaction, with the same timeline keys and one `incident_start` task per usable `agent_webhook`.
 
 | prev ↓ / current → | `online` | `warning` | `offline` |
 | --- | --- | --- | --- |
 | `online` | no-op | no ongoing incident; fires a `warning` notification (opted-in channels only) and logs a `CreateWarningEvent` | `CreateIncident` → `incident_start` |
 | `warning` | no-op, no notification | no-op — this is what dedupes a service that blips every cycle | `CreateIncident` → `incident_start` |
 | `offline` | `ResolveOngoingIncident` → `incident_resolve` | same, and **no** warning notification or event log: the resolve already says we are back | no-op — why a service that stays down doesn't spawn an incident every tick |
-| `unknown` | resolve (silent) | logs a `CreateWarningEvent` (unreachable in practice — `InitialStatus` never seeds `unknown`) | `CreateIncident` → `incident_start` |
+| `unknown` | resolve (silent) | logs a `CreateWarningEvent` (unreachable in practice — the status seed is always `online`/`offline`) | `CreateIncident` → `incident_start` |
 
 A resolving transition closes the service's ongoing incident; there is no second source that can keep it open.
 
@@ -216,7 +216,7 @@ reset in one transaction. An archive that has no `integrations.json` does not
 call it, so existing tasks stay.
 
 `prev == current` returns immediately, which is the overwhelmingly common path.
-`InitialStatus` deliberately still returns only `online`/`offline` — a third seed
+The previous-status seed is deliberately only `online`/`offline` — a third seed
 value would change nothing in the matrix. The one visible consequence: a restart
 that lands exactly on a warning re-seeds as `online` and may send one duplicate
 warning notification. The UI is unaffected (status comes from the latest row).
@@ -262,29 +262,21 @@ die only with their service, or by explicit delete.
 
 A single failed check no longer opens an incident: the retry ladder (§3) has to
 exhaust every attempt first, so one network blip becomes a `warning` rather than
-an outage. `internal/incident` did not need to learn about retries — it is
-decoupled from *how* we decided the service is down, and only gained the third
-status.
+an outage. The transition rule is decoupled from *how* we decided the service is down, and
+the matrix gained a third status.
 
 What is still unprotected is **warning notification noise**. A service
 alternating `warning → online → warning` fires a warning every other cycle, since
 the `prev == current` dedupe does not catch an alternation. That is why warnings
-are opt-in per channel. A cooldown would have to live on `worker`; `incident` is
+are opt-in per channel. A cooldown would have to live on `worker`; the transition rule is
 deliberately stateless.
-
-### Why `incident` is its own package
-
-The check scheduler does not import `incident`. `incident` still must not import
-`monitor`. Hence everything arrives as arguments:
-`OnTransition(ctx, db, svc, prev, Outcome{...}, ts)` — `Outcome`
-carries the attempt count and first-failure reason. It depends only on `db`.
 
 ## 5. Notifications
 
 Three events: incident start, incident resolve, and `warning` (a check that
 recovered on a retry). Nothing else notifies.
 
-`incident.OnTransition` still records an incident when called, and it no longer fans notifications out. The check path and the consumer do not call it. `Dispatcher.Test` remains the immediate "send test" API and only reaches a registered sender. The only registered sender is `agent_webhook`. Automatic delivery is the `delivery` role: one `notification_deliveries` row, one `Sender`, then a `notification_log` row for that attempt.
+`Dispatcher.Test` remains the immediate "send test" API and only reaches a registered sender. The only registered sender is `agent_webhook`. Automatic delivery is the `delivery` role: one `notification_deliveries` row, one `Sender`, then a `notification_log` row for that attempt.
 
 Warnings are opt-in per channel and off by default: they are frequent by design,
 and a channel that pages a human wants outages only. A warning has no incident,
@@ -523,5 +515,3 @@ a throwaway PostgreSQL database per test (`db.OpenTest`, from `ALERTFLOW_TEST_DA
 Tests live beside the package. There is **no frontend test framework** — verify
 UI changes by running the dev servers (see [DEVELOPMENT.md](DEVELOPMENT.md)).
 
-Worth knowing when testing incidents: `OnTransition` accepts a `nil` dispatcher,
-so incident logic is testable without any notification plumbing.
