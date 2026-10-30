@@ -11,6 +11,9 @@ func (c *Config) Clone() *Config {
 	if es := c.Settings.Dashboard.UptimeExcludedServices; es != nil {
 		cp.Settings.Dashboard.UptimeExcludedServices = append([]string(nil), es...)
 	}
+	if targets := c.Settings.Kubernetes.Targets; targets != nil {
+		cp.Settings.Kubernetes.Targets = append([]KubernetesTarget(nil), targets...)
+	}
 	cp.Services = make([]Service, len(c.Services))
 	copy(cp.Services, c.Services)
 	// Diagnostics and Kubernetes are strings and an int, so this copy owns them.

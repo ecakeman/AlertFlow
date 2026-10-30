@@ -74,11 +74,29 @@ type Config struct {
 
 // Settings holds app-wide options.
 type Settings struct {
-	DefaultWidgetMode string            `yaml:"default_widget_mode"`
-	Theme             string            `yaml:"theme"`
-	Check             CheckDefaults     `yaml:"check"`
-	Dashboard         DashboardSettings `yaml:"dashboard"`
-	Agent             AgentSettings     `yaml:"agent,omitempty"`
+	DefaultWidgetMode string             `yaml:"default_widget_mode"`
+	Theme             string             `yaml:"theme"`
+	Check             CheckDefaults      `yaml:"check"`
+	Dashboard         DashboardSettings  `yaml:"dashboard"`
+	Agent             AgentSettings      `yaml:"agent,omitempty"`
+	Kubernetes        KubernetesSettings `yaml:"kubernetes,omitempty"`
+}
+
+// KubernetesSettings maps several workloads onto existing HTTP services.
+// Each target keeps its own service id. An empty target list adds nothing.
+type KubernetesSettings struct {
+	ClusterID string             `yaml:"cluster_id,omitempty"`
+	Namespace string             `yaml:"namespace,omitempty"`
+	Targets   []KubernetesTarget `yaml:"targets,omitempty"`
+}
+
+// KubernetesTarget is one Deployment or StatefulSet. Namespace falls back to
+// the settings namespace when it is omitted.
+type KubernetesTarget struct {
+	ServiceID string `yaml:"service_id"`
+	Namespace string `yaml:"namespace,omitempty"`
+	Kind      string `yaml:"kind"`
+	Name      string `yaml:"name"`
 }
 
 // AgentSettings configures the diagnostic Agent and the retrieval models it uses.
@@ -320,19 +338,7 @@ func (c *Config) Validate() error {
 		}
 		seen[id] = true
 	}
-	workloads := make(map[string]string)
-	for _, svc := range c.Services {
-		k := svc.Kubernetes
-		if k.ClusterID == "" || k.Namespace == "" || k.WorkloadName == "" {
-			continue
-		}
-		key := k.ClusterID + "\x00" + k.Namespace + "\x00" + k.WorkloadName
-		if other, ok := workloads[key]; ok {
-			return fmt.Errorf("services %q and %q map the same kubernetes workload %s/%s", other, svc.ID, k.Namespace, k.WorkloadName)
-		}
-		workloads[key] = svc.ID
-	}
-	return nil
+	return c.normalizeKubernetesTargets()
 }
 
 // Validate checks a single service and clamps out-of-range values.
@@ -411,6 +417,55 @@ func (s *Service) normalizeKubernetes() error {
 	}
 	if k.WorkloadKind != "Deployment" {
 		return fmt.Errorf("kubernetes workload_kind must be Deployment")
+	}
+	return nil
+}
+
+func (c *Config) normalizeKubernetesTargets() error {
+	k := &c.Settings.Kubernetes
+	k.ClusterID = strings.TrimSpace(k.ClusterID)
+	k.Namespace = strings.TrimSpace(k.Namespace)
+	seen := map[string]string{}
+	for _, svc := range c.Services {
+		m := svc.Kubernetes
+		if m.ClusterID == "" || m.Namespace == "" || m.WorkloadName == "" {
+			continue
+		}
+		key := m.ClusterID + "\x00" + m.Namespace + "\x00" + m.WorkloadKind + "\x00" + m.WorkloadName
+		if other, ok := seen[key]; ok {
+			return fmt.Errorf("services %q and %q map the same kubernetes workload %s/%s", other, svc.ID, m.Namespace, m.WorkloadName)
+		}
+		seen[key] = svc.ID
+	}
+	if len(k.Targets) == 0 {
+		return nil
+	}
+	if k.ClusterID == "" {
+		return fmt.Errorf("settings.kubernetes.cluster_id is required")
+	}
+	for i := range k.Targets {
+		t := &k.Targets[i]
+		t.ServiceID = strings.TrimSpace(t.ServiceID)
+		t.Namespace = strings.TrimSpace(t.Namespace)
+		t.Kind = strings.TrimSpace(t.Kind)
+		t.Name = strings.TrimSpace(t.Name)
+		if t.Namespace == "" {
+			t.Namespace = k.Namespace
+		}
+		if t.ServiceID == "" || t.Namespace == "" || t.Name == "" {
+			return fmt.Errorf("kubernetes target %d needs service_id, namespace, and name", i)
+		}
+		if c.Find(t.ServiceID) == nil {
+			return fmt.Errorf("kubernetes target service %q does not exist", t.ServiceID)
+		}
+		if t.Kind != "Deployment" && t.Kind != "StatefulSet" {
+			return fmt.Errorf("kubernetes target kind must be Deployment or StatefulSet")
+		}
+		key := k.ClusterID + "\x00" + t.Namespace + "\x00" + t.Kind + "\x00" + t.Name
+		if other, ok := seen[key]; ok {
+			return fmt.Errorf("kubernetes %s %s/%s is already mapped to %q", t.Kind, t.Namespace, t.Name, other)
+		}
+		seen[key] = t.ServiceID
 	}
 	return nil
 }

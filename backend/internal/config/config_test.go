@@ -302,6 +302,79 @@ func TestKubernetesMappingValidation(t *testing.T) {
 	}
 }
 
+func TestKubernetesTargetsKeepKindInTheIdentity(t *testing.T) {
+	cfg, err := Parse([]byte(`
+version: 1
+settings:
+  default_widget_mode: name
+  kubernetes:
+    cluster_id: lab
+    namespace: alertflow
+    targets:
+      - service_id: alertflow
+        kind: Deployment
+        name: api
+      - service_id: alertflow
+        kind: StatefulSet
+        name: api
+      - service_id: fault-lab
+        kind: Deployment
+        name: fault-lab
+services:
+  - id: alertflow
+    name: AlertFlow
+    url: https://example.com
+  - id: fault-lab
+    name: Fault Lab
+    url: https://example.com
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Settings.Kubernetes.Targets[0].Namespace != "alertflow" {
+		t.Fatalf("namespace = %q", cfg.Settings.Kubernetes.Targets[0].Namespace)
+	}
+	clone := cfg.Clone()
+	clone.Settings.Kubernetes.Targets[0].Name = "renamed"
+	if cfg.Settings.Kubernetes.Targets[0].Name != "api" {
+		t.Fatal("clone shared the target slice")
+	}
+	again, err := Parse(mustMarshal(t, cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Settings.Kubernetes.Targets[1].Kind != "StatefulSet" || again.Settings.Kubernetes.Targets[2].ServiceID != "fault-lab" {
+		t.Fatalf("round trip = %+v", again.Settings.Kubernetes.Targets)
+	}
+	cfg.Settings.Kubernetes.Targets = append(cfg.Settings.Kubernetes.Targets, KubernetesTarget{
+		ServiceID: "missing", Kind: "Deployment", Name: "other",
+	})
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("unknown service was accepted")
+	}
+	cfg.Settings.Kubernetes.Targets[3].ServiceID = "fault-lab"
+	cfg.Settings.Kubernetes.Targets[3].Name = "fault-lab"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("duplicate target was accepted")
+	}
+	cfg.Services[0].Kubernetes = ServiceKubernetes{
+		ClusterID: "lab", Namespace: "alertflow", WorkloadKind: "Deployment", WorkloadName: "api",
+	}
+	cfg.Settings.Kubernetes.Targets = cfg.Settings.Kubernetes.Targets[:1]
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("target conflicting with the service mapping was accepted")
+	}
+}
+
+func mustMarshal(t *testing.T, cfg *Config) []byte {
+	t.Helper()
+	data, err := Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
 func equalInts(a, b []int) bool {
 	if len(a) != len(b) {
 		return false

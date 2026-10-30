@@ -88,7 +88,7 @@ func (l *Loop) apply(sched *Scheduler, diag *diagnostics.Collector, cluster *kub
 	}
 	sched.Sync(loaded.Services)
 	diag.Sync(loaded.Services)
-	cluster.Sync(loaded.Services)
+	cluster.SyncTargets(loaded.Services, loaded.Settings.Kubernetes)
 }
 
 func (l *Loop) present(serviceID string) bool {

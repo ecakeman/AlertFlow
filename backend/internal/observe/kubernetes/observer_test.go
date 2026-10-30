@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
+	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 
@@ -411,6 +412,132 @@ func TestCloseWhileCacheSyncIsPending(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatalf("shutdown wrote source rows = %d", n)
+	}
+}
+
+func TestStatefulSetStaysOnItsOwnService(t *testing.T) {
+	replicas := int32(1)
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "lab", UID: "deploy-1", ResourceVersion: "1"},
+		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+		Status:     appsv1.DeploymentStatus{ReadyReplicas: 1, AvailableReplicas: 1, Replicas: 1, UpdatedReplicas: 1},
+	}
+	set := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "lab", UID: "set-1", ResourceVersion: "1"},
+		Spec:       appsv1.StatefulSetSpec{Replicas: &replicas},
+		Status:     appsv1.StatefulSetStatus{Replicas: 1, ReadyReplicas: 1, CurrentReplicas: 1, UpdatedReplicas: 1, CurrentRevision: "a", UpdateRevision: "a"},
+	}
+	rs := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "api-rs", Namespace: "lab", UID: "rs-1",
+		OwnerReferences: []metav1.OwnerReference{{Kind: "Deployment", Name: "api", UID: "deploy-1"}},
+	}}
+	deployPod := readyPod("api-pod", "pod-d", "rs-1")
+	setPod := readyPod("api-0", "pod-s", "rs-1")
+	setPod.OwnerReferences = []metav1.OwnerReference{{Kind: "StatefulSet", Name: "api", UID: "set-1"}}
+	loose := readyPod("api-loose", "pod-loose", "rs-1")
+	loose.OwnerReferences = []metav1.OwnerReference{{Kind: "StatefulSet", Name: "api"}}
+	warning := &corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Name: "set-warn", Namespace: "lab", UID: "ev-set"},
+		InvolvedObject: corev1.ObjectReference{Kind: "StatefulSet", Name: "api", Namespace: "lab", UID: "set-1"},
+		Type:           corev1.EventTypeWarning, Reason: "FailedCreate", Message: "create failed", Count: 1,
+	}
+	client := fake.NewClientset(deploy, set, rs, deployPod, setPod, loose, warning)
+	database := db.OpenTest(t)
+	obs := New(database, func(string) bool { return true })
+	obs.client = client
+	obs.SyncTargets([]config.Service{
+		{ID: "alertflow", Name: "AlertFlow", URL: "https://example.com"},
+		{ID: "fault-lab", Name: "Fault Lab", URL: "https://example.com"},
+	}, config.KubernetesSettings{
+		ClusterID: "local", Namespace: "lab",
+		Targets: []config.KubernetesTarget{
+			{ServiceID: "alertflow", Kind: "Deployment", Name: "api"},
+			{ServiceID: "fault-lab", Kind: "StatefulSet", Name: "api"},
+		},
+	})
+	t.Cleanup(obs.Close)
+	waitSynced(t, obs, "lab")
+	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE service_id = 'alertflow' AND event_type = 'kubernetes.deployment.first_seen'`); n != 1 {
+		t.Fatalf("deployment events = %d", n)
+	}
+	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE service_id = 'fault-lab' AND event_type = 'kubernetes.statefulset.first_seen'`); n != 1 {
+		t.Fatalf("statefulset events = %d", n)
+	}
+	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE service_id = 'alertflow' AND resource_uid = 'pod-d'`); n != 1 {
+		t.Fatalf("deployment pod = %d", n)
+	}
+	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE service_id = 'fault-lab' AND resource_uid = 'pod-s'`); n != 1 {
+		t.Fatalf("statefulset pod = %d", n)
+	}
+	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE resource_uid = 'pod-loose'`); n != 0 {
+		t.Fatalf("uid-less pod = %d", n)
+	}
+	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE service_id = 'alertflow' AND resource_uid = 'pod-s'`); n != 0 {
+		t.Fatalf("statefulset pod crossed services = %d", n)
+	}
+	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE service_id = 'fault-lab' AND event_type = 'kubernetes.event'`); n != 1 {
+		t.Fatalf("statefulset warning = %d", n)
+	}
+	set.ResourceVersion = "2"
+	if written, _ := obs.observeStatefulSet(set, true); len(written) != 1 {
+		t.Fatalf("same fingerprint written = %v", written)
+	}
+	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'kubernetes.statefulset.first_seen' OR event_type = 'kubernetes.statefulset.changed'`); n != 1 {
+		t.Fatalf("resourceVersion wrote a timeline row, count = %d", n)
+	}
+}
+
+func TestObjectWriteFailureMarksAGap(t *testing.T) {
+	database := db.OpenTest(t)
+	obs := New(database, func(string) bool { return true })
+	obs.mu.Lock()
+	obs.targets = []target{{ServiceID: "svc", ClusterID: "local", Namespace: "lab", Kind: "Deployment", Name: "api"}}
+	obs.mu.Unlock()
+	written, failed := obs.observeDeployment(&appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "lab"},
+	}, true)
+	if len(written) != 0 || len(failed) != 1 {
+		t.Fatalf("written %v failed %v", written, failed)
+	}
+	var status string
+	if err := database.QueryRow(`SELECT status FROM runtime_source_state WHERE service_id = 'svc'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "gap" {
+		t.Fatalf("status = %s", status)
+	}
+}
+
+func TestSyncReconnectsAfterTheInitialFailure(t *testing.T) {
+	t.Setenv("ALERTFLOW_K8S_ENABLED", "true")
+	replicas := int32(1)
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "lab", UID: "deploy-1", ResourceVersion: "1"},
+		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+		Status:     appsv1.DeploymentStatus{ReadyReplicas: 1, AvailableReplicas: 1},
+	}
+	client := fake.NewClientset(deploy)
+	database := db.OpenTest(t)
+	obs := New(database, func(string) bool { return true })
+	calls := 0
+	obs.dial = func() (clientset.Interface, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("down")
+		}
+		return client, nil
+	}
+	if err := obs.Connect(); err == nil {
+		t.Fatal("first connect succeeded")
+	}
+	obs.Sync([]config.Service{mapped()})
+	t.Cleanup(obs.Close)
+	waitSynced(t, obs, "lab")
+	if calls != 2 {
+		t.Fatalf("dials = %d", calls)
+	}
+	if n := rows(t, database, `SELECT COUNT(*) FROM runtime_events WHERE event_type = 'kubernetes.deployment.first_seen'`); n != 1 {
+		t.Fatalf("first_seen = %d", n)
 	}
 }
 

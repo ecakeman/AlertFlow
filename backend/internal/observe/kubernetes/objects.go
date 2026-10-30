@@ -29,7 +29,8 @@ func podFingerprint(pod *corev1.Pod) (string, []byte) {
 	var containers []string
 	for _, cs := range pod.Status.ContainerStatuses {
 		state, reason, code := containerState(cs.State)
-		containers = append(containers, fmt.Sprintf("%s %d %s %s %d", cs.Name, cs.RestartCount, state, reason, code))
+		started, finished := containerTimes(cs.State)
+		containers = append(containers, fmt.Sprintf("%s %d %s %s %d %s %s", cs.Name, cs.RestartCount, state, reason, code, started, finished))
 	}
 	sort.Strings(containers)
 	deleted := ""
@@ -77,9 +78,44 @@ func deploymentFingerprint(deploy *appsv1.Deployment) (string, []byte) {
 	return hash(canonical), raw
 }
 
+func statefulSetFingerprint(set *appsv1.StatefulSet) (string, []byte) {
+	var desired int32
+	if set.Spec.Replicas != nil {
+		desired = *set.Spec.Replicas
+	}
+	canonical := fmt.Sprintf("%d %d %d %d %d %d %d %s %s",
+		set.Generation, set.Status.ObservedGeneration, desired,
+		set.Status.Replicas, set.Status.ReadyReplicas, set.Status.CurrentReplicas,
+		set.Status.UpdatedReplicas, set.Status.CurrentRevision, set.Status.UpdateRevision,
+	)
+	raw, _ := json.Marshal(map[string]any{
+		"generation": set.Generation, "observedGeneration": set.Status.ObservedGeneration,
+		"replicas": desired, "readyReplicas": set.Status.ReadyReplicas,
+		"currentReplicas": set.Status.CurrentReplicas, "updatedReplicas": set.Status.UpdatedReplicas,
+		"currentRevision": set.Status.CurrentRevision, "updateRevision": set.Status.UpdateRevision,
+	})
+	return hash(canonical), raw
+}
+
 func hash(canonical string) string {
 	sum := sha256.Sum256([]byte(canonical))
 	return hex.EncodeToString(sum[:])
+}
+
+func containerTimes(state corev1.ContainerState) (started, finished string) {
+	const layout = "2006-01-02T15:04:05Z"
+	switch {
+	case state.Running != nil && !state.Running.StartedAt.IsZero():
+		started = state.Running.StartedAt.Time.UTC().Format(layout)
+	case state.Terminated != nil:
+		if !state.Terminated.StartedAt.IsZero() {
+			started = state.Terminated.StartedAt.Time.UTC().Format(layout)
+		}
+		if !state.Terminated.FinishedAt.IsZero() {
+			finished = state.Terminated.FinishedAt.Time.UTC().Format(layout)
+		}
+	}
+	return started, finished
 }
 
 func containerState(state corev1.ContainerState) (name, reason string, code int32) {
@@ -95,29 +131,13 @@ func containerState(state corev1.ContainerState) (name, reason string, code int3
 	}
 }
 
-func deploymentOfPod(pod *corev1.Pod, sets map[types.UID]*appsv1.ReplicaSet) (string, bool) {
-	for _, ref := range pod.OwnerReferences {
-		if ref.Kind != "ReplicaSet" {
-			continue
-		}
-		rs := sets[ref.UID]
-		if rs == nil {
-			continue
-		}
-		if name, ok := controllerName(rs.OwnerReferences, "Deployment"); ok {
-			return name, true
-		}
-	}
-	return "", false
-}
-
-func controllerName(refs []metav1.OwnerReference, kind string) (string, bool) {
+func controllerIdentity(refs []metav1.OwnerReference, kind string) (string, types.UID, bool) {
 	for _, ref := range refs {
-		if ref.Kind == kind && ref.Name != "" {
-			return ref.Name, true
+		if ref.Kind == kind && ref.Name != "" && ref.UID != "" {
+			return ref.Name, ref.UID, true
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 func podSeverity(pod *corev1.Pod) string {
@@ -138,6 +158,17 @@ func deploymentSeverity(deploy *appsv1.Deployment) string {
 		desired = *deploy.Spec.Replicas
 	}
 	if deploy.Status.AvailableReplicas < desired {
+		return "warning"
+	}
+	return "info"
+}
+
+func statefulSetSeverity(set *appsv1.StatefulSet) string {
+	var desired int32 = 1
+	if set.Spec.Replicas != nil {
+		desired = *set.Spec.Replicas
+	}
+	if set.Status.ReadyReplicas < desired {
 		return "warning"
 	}
 	return "info"

@@ -93,15 +93,20 @@ Each entry defines one monitored endpoint.
   collector. `token_env` is the name of an environment variable. The service
   form does not edit this block, and saving a service from the form leaves it
   in place.
-- **`kubernetes`** is optional. An empty block does not start collection.
+- **`kubernetes`** on a service is optional and still means one Deployment.
   `workload_kind` must be `Deployment`. The service form does not edit this
-  block. Collection also requires `ALERTFLOW_K8S_ENABLED=true` on the monitor
+  block. `settings.kubernetes.targets` can attach more Deployments and
+  StatefulSets to services that already exist. Each target has its own
+  `service_id`, and `namespace` falls back to `settings.kubernetes.namespace`.
+  The same cluster, namespace, kind, and name cannot belong to two services.
+  Collection also requires `ALERTFLOW_K8S_ENABLED=true` on the monitor
   process. `ALERTFLOW_KUBECONFIG` is a kubeconfig path; when it is empty the
   process uses its in-cluster config. A connection or permission failure marks
-  that source unavailable and does not stop HTTP checks. The Role for one
-  namespace only needs `get`, `list`, and `watch` on `pods`, `events`,
-  `replicasets`, and `deployments`. It does not need a ClusterRole or any
-  write verb.
+  that source unavailable and does not stop HTTP checks. The next config
+  reload tries the connection again. The Role for one namespace only needs
+  `get`, `list`, and `watch` on `pods`, `events`, `replicasets`,
+  `deployments`, and `statefulsets`. It does not need a ClusterRole or any
+  write verb. `deploy/k8s/observer-rbac.yaml` is that Role.
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -114,7 +119,7 @@ rules:
     resources: ["pods", "events"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
-    resources: ["replicasets", "deployments"]
+    resources: ["replicasets", "deployments", "statefulsets"]
     verbs: ["get", "list", "watch"]
 ```
 

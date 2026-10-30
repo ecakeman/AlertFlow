@@ -453,6 +453,8 @@ func kindKey(kind string) string {
 	switch kind {
 	case "Deployment":
 		return "deployment"
+	case "StatefulSet":
+		return "statefulset"
 	default:
 		return "pod"
 	}
