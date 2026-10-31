@@ -276,3 +276,47 @@ uv run --frozen --extra dev pytest -q
 
 > 说明：Mock/fixture 结果不标记为真实集成通过；P6 真机复测（指标/日志实际被调用、
 > remember 实际写库）仍以 lead 侧新 run 为准，本文件只记录代码修复与本地/真实数据复现证据。
+
+## 9. 认知侧收尾 P1–P4（本轮，2026-10-31）
+
+### 9.1 审计发现（改动前的真实缺口）
+
+| 缺口 | 证据（改动前） |
+|---|---|
+| 工具层绕过 Manager | `tools.py::_metrics` 直接 `clients["alertflow"].metrics()`；`_incident` 直接 `.incident()` |
+| 初始快照绕过 Manager | `graph.py::_collect_live` 四处直接调用；`_collect_timeline` 直接 `timeline()`/`kubernetes_state()` |
+| 跨度写死 | `context_manager.aggregated_metrics` 固定 `"24h"`，与父窗口无关 |
+| 时间过滤是空转 | `_memory_recall` 完全不读 `time_start/time_end/event_types/include_attachments/include_corrected_history`；既有用例把附件时间放在窗口**外**仍通过，说明过滤从未生效 |
+| 历史轴是投影 | `timeline_nodes()` = `episodes` 投影 + 附件，Go Runtime Timeline 不在轴上 |
+| 日志正文进事实表 | `_scalars()` 递归 Loki `lines`，短日志正文变成标量 fact |
+| Chat 独立上下文 | `chat.py` 自拼字符串，不走六区块 |
+
+### 9.2 处理结果与验证
+
+| 项 | 处理 | 测试 |
+|---|---|---|
+| P1 统一入口 | `_metrics`/`_incident`/`_collect_live`/`_collect_timeline` 全部改经 `ContextManager.retrieve_now()`；新增 `related_incidents` 资源与 `metrics_range` 字段；`_collect_live` 的职责与唯一例外写进契约（C9.1） | `tests/test_tools.py`、`tests/test_graph.py`、`tests/test_context_manager.py` |
+| P1 父子窗口 | 跨度按父窗口派生 + `window_clipped` 标记 + `query_metadata` 透出 | `tests/test_context_manager.py` |
+| P2 主轴 | Go Timeline 节点 + 旧 Episode 诊断节点 + 附件/纠正合并、真实过滤与排序 | `tests/test_timeline_recall.py`（8 例） |
+| P2 兼容 | `MemoryRepo.timeline_nodes()` 保留；旧 Episode 读取路径不变 | `tests/test_memory_timeline.py` |
+| P3 事实提取 | `fact_rows()` 白名单；三时间字段继承来源 | `tests/test_fact_extraction.py`（9 例） |
+| P4 Chat | `build_chat_bundle()` + `prompts/chat.md` | `tests/test_chat_context.py`（7 例） |
+
+### 9.3 回归证据（本轮实跑）
+
+- 无数据库：`cd agent && uv run --frozen --extra dev pytest -q` → **254 passed, 4 skipped**
+  （基线 231+4；新增 23 例：timeline_recall 8、fact_extraction 9、chat_context 7，其中 1 例与原
+  `test_evidence_manager` 重叠计数）。
+- 有数据库（与 CI agent job 同形，`postgres` 库 + `apply_schema` 幂等）：
+  `ALERTFLOW_TEST_DATABASE_URL=postgres://alertflow:alertflow@127.0.0.1:55432/postgres?sslmode=disable`
+  → **257 passed, 1 skipped**。
+- 备注：本地用 `alertflow_agent_repro` 库跑会命中 `tests/test_runbook.py` 的
+  "maintenance database must be named postgres" 前置断言（用例自身约束，与本次改动无关）。
+
+### 9.4 未完成 / 未验证（不为消 PARTIAL 改文字）
+
+- checkpoint 中断/恢复的真实数据库集成测试：**NOT RUN**（既有单测仅覆盖
+  `budget.indeterminate_attempts` 语义；真实 Postgres checkpointer 恢复未编写）。
+- P2 的 Postgres 版 `list_diagnoses/list_corrections/list_attachments(until=)` 已实现，
+  但只有 InMemory 与集成路径覆盖，真实集群上跑一次端到端 run 复核：**NOT RUN**。
+- 真实 RAGFlow：**SKIPPED**（服务未运行，决定 5），Runbook 契约以 Mock A2A 为准。

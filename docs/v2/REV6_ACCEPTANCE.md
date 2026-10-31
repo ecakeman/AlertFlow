@@ -58,6 +58,7 @@
 | P1-2 | Go 构建/静态检查 | `go build ./...` exit 0；`go vet ./...` exit 0 | PASS |
 | P1-3 | Go 全量测试（真实 Postgres） | `ALERTFLOW_TEST_DATABASE_URL=postgres://…@localhost:55432/postgres` + `ALERTFLOW_PYTHON=agent/.venv/bin/python` + `go test -count=1 -p 1 -timeout 900s ./...` → `GO_EXIT=0`（14 个包 ok，含 `internal/api` 的 `TestCrossLanguageGRPC`） | PASS |
 | P1-4 | Compose profile 校验 | 默认/`agent`/`demo`/`observability`/`ragflow`/`runbook` 六个 `docker compose config --quiet` 全部 exit 0 | PASS |
+| P1-5 | 认知侧收尾 C1–C4 复核（P1–P4 收尾轮） | 见 §P1-5；`agent` 全量 `254 passed, 4 skipped`（无库）/`257 passed, 1 skipped`（CI 同形库） | PASS（checkpoint 真实恢复 NOT RUN，见 §P1-5） |
 
 环境说明：
 - `TestCrossLanguageGRPC` 需要 `ALERTFLOW_PYTHON=<repo>/agent/.venv/bin/python`，CI 未设置该变量。
@@ -65,7 +66,24 @@
 - checkpoint 中断/恢复的真实数据库集成测试未编写（单测覆盖 `budget.indeterminate_attempts`），标 NOT RUN。
 - `agent/schema.sql` 的新 DDL 只做了幂等声明，未对真实 Postgres 执行验证，标 NOT RUN（P4 阶段随集群验证）。
 
+### P1-5 认知侧收尾（P1–P4，本轮）
+
+| 项 | 内容 | 证据 | 判定 |
+|---|---|---|---|
+| P1-5a | `_metrics`/`_incident`/`_collect_live`/`_collect_timeline` 统一经 `ContextManager` | `runtime/tools.py`、`runtime/graph.py`；契约 C9.1 | PASS |
+| P1-5b | 唯一例外 `_refresh_runtime_config()` 已写明职责与理由（运行配置，非业务事实，不产证据） | 契约 C9.1 | PASS |
+| P1-5c | `aggregated_metrics` 不再固定 24h；跨度按父窗口派生并透出 `window_clipped` | `runtime/context_manager.py`；`tests/test_context_manager.py` | PASS |
+| P1-5d | Go Runtime Timeline 成为历史主轴；旧 Episode 降为诊断投影 | `tests/test_timeline_recall.py` 8 passed | PASS |
+| P1-5e | `TimelineRecallRequest` 的 time/type/attachment/correction 四个开关真实生效 | 同上（含"时间窗过滤后只剩 1 个节点"用例） | PASS |
+| P1-5f | Fact Catalog 白名单提取，日志正文不再进事实表；事实继承来源时间 | `tests/test_fact_extraction.py` 9 passed | PASS |
+| P1-5g | Chat 复用六区块（`build_chat_bundle` + `prompts/chat.md`） | `tests/test_chat_context.py` 7 passed | PASS |
+| P1-5h | 全量回归 | 无库 `254 passed, 4 skipped`；CI 同形库 `257 passed, 1 skipped` | PASS |
+| P1-5i | checkpoint 中断/恢复真实数据库集成测试 | 未编写 | NOT RUN |
+| P1-5j | P1–P4 改动在真实集群上的一次端到端 run 复核 | 本轮未重跑集群 run | NOT RUN |
+
 **P1 判定：PASS**（上述 NOT RUN 项不影响 P1 门禁，已在 P3/P4 跟踪）。
+
+> P1-5i/P1-5j 属"未执行"而非"通过"，不因本轮代码改动转为 PASS。
 
 ---
 

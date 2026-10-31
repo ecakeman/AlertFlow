@@ -117,12 +117,13 @@ def test_memory_recall_reads_timeline_attachments():
         attachment_id="att:run-0:diagnosis_report", service_id="api",
         anchor_type="incident", anchor_id="7", attachment_type="diagnosis_report",
         source_system="agent_runtime", source_record_id="run-0", run_id="run-0",
-        occurred_at=datetime(2026, 10, 10, tzinfo=timezone.utc),
-        recorded_at=datetime(2026, 10, 10, tzinfo=timezone.utc),
+        occurred_at=datetime(2026, 10, 11, 9, 55, tzinfo=timezone.utc),
+        recorded_at=datetime(2026, 10, 11, 9, 55, tzinfo=timezone.utc),
         summary="上次是进程崩溃", trust_level="validated_agent_report",
         source_refs=[SourceRef(source_type="analysis", source_record_id="ana:status")],
         content_digest="digest",
     ))
+    # 时间窗必须真实生效：附件时间落在父窗口内才返回（越界过滤见 test_timeline_recall）。
     request = _request(TimelineRecallRequest(request_id="m1", service_id="api", top_k=5,
                                              include_attachments=True))
     result = ContextManager(memory=repo).retrieve_now(request).results[0]

@@ -31,6 +31,7 @@ _PROMPTS = {
     "replan": "replan.md",
     "write_report": "report.md",
     "subagent": "subagent.md",
+    "chat": "chat.md",
 }
 DEFAULT_BUDGET_TOKENS = 24_000
 # 原始检查行可能有几百条，只留这几条（key_checks 选出来的）进上下文。
@@ -86,7 +87,7 @@ _SECTION_HEADERS = {
 
 def section_of(name: str) -> str:
     """叶子块 -> 六区块之一。未识别的一律落到 investigation_state，不丢内容。"""
-    if name in ("system", "node_prompt", "event", "question"):
+    if name in ("system", "node_prompt", "event", "question", "messages"):
         return "current_task"
     if name.startswith("evidence:"):
         ident = name[len("evidence:"):]
@@ -97,7 +98,7 @@ def section_of(name: str) -> str:
         if ident.startswith("runbook:"):
             return "expert_knowledge"
         return "current_evidence"
-    if name in ("digest", "fact_catalog", "verify_findings", "previous_report"):
+    if name in ("digest", "fact_catalog", "verify_findings", "previous_report", "report"):
         return "current_evidence"
     if name in ("prior", "prior_report"):
         return "historical_experience"
@@ -290,6 +291,46 @@ def build_blocks(node: str, state: dict) -> list[Block]:
     return blocks
 
 
+def build_chat_blocks(state: dict) -> list[Block]:
+    """Chat 的叶子块：复用诊断同一套块/层级/降级，六区块仍由 group_sections 归类。"""
+    blocks: list[Block] = [
+        Block("system", PIN, [_read("prompts/system.md")], protect=True),
+        Block("node_prompt", PIN, [_read("prompts/chat.md")], protect=True),
+        Block("event", PIN, [_event_block(state.get("event") or {})], protect=True),
+    ]
+    if state.get("question"):
+        blocks.append(Block("question", PIN, ["Engineer's question: " + _clip(state["question"], 1200)],
+                            protect=True))
+    if state.get("report"):
+        blocks.append(Block("report", HIGH, [
+            "Report (yours):\n" + _clip(state["report"], 4000),
+            "Report (yours, trimmed):\n" + _clip(state["report"], 1500),
+        ]))
+    blocks.extend(_evidence_blocks(state.get("evidence") or {}))
+    if state.get("prior_block"):
+        blocks.append(_prior_block(str(state["prior_block"])))
+    messages = state.get("messages") or []
+    if messages:
+        recent = "\n".join(_clip(str(item), 500) for item in messages[-12:])
+        shorter = "\n".join(_clip(str(item), 200) for item in messages[-6:])
+        blocks.append(Block("messages", MEDIUM, [
+            "Conversation so far:\n" + recent,
+            "Conversation so far (trimmed):\n" + (shorter or "(none)"),
+            "",
+        ]))
+    return blocks
+
+
+def build_chat_bundle(state: dict, budget: int = DEFAULT_BUDGET_TOKENS) -> Fit:
+    """Chat 的上下文装配：与诊断输出**同一形状**的六区块，而不是另拼一段字符串。"""
+    leaves = build_chat_blocks(state)
+    fit = assemble(leaves, budget)
+    sections = group_sections(leaves, fit.texts)
+    text = render_sections(sections)
+    return Fit(text=text, tokens=estimate_tokens(text), budget=budget, floor=fit.floor,
+               blocks=fit.blocks, texts=[section["content"] for section in sections])
+
+
 def _prior_block(text: str) -> Block:
     """既往上下文：完整 → 只留档案摘要（丢掉事件列表）。"""
     profile_only = "\n".join(line for line in text.splitlines() if not line.strip().startswith("ep:"))
@@ -439,11 +480,13 @@ def _metric_summary(data: dict) -> str:
     return f"{len(series)} points from {first} to {last}. Latency statistics are in ana:latency."
 
 
-def _clip(text: str, limit: int) -> str:
-    text = text.replace("\n", " ")
+def _clip(value, limit: int) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    text = str(text).replace("\n", " ")
     return text if len(text) <= limit else text[:limit]
 
 
 __all__ = ["build_context", "build_context_report", "build_blocks", "build_prompt_bundle",
+           "build_chat_blocks", "build_chat_bundle",
            "group_sections", "render_sections", "section_of", "SECTION_ORDER",
            "estimate_tokens", "DEFAULT_BUDGET_TOKENS"]

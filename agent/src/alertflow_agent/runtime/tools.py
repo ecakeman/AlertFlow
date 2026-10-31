@@ -224,17 +224,41 @@ def _analyze(args, state) -> dict:
     return {"status": "success" if rows else "empty", "evidence_ids": [f"ana:status@{n}"], "data": {"n": n, "rows": len(rows)}}
 
 
+_METRIC_SPANS = {"1h": 3600, "6h": 21600, "24h": 86400, "7d": 604800, "30d": 2592000}
+
+
 def _metrics(args, state, settings, clients) -> dict:
     blocked = _charge_query(state, settings)
     if blocked:
         return {"status": "invalid_request", "note": blocked, "evidence_ids": []}
     span = args.get("range") or ""
-    if span not in {"1h", "6h", "24h", "7d", "30d"}:
+    if span not in _METRIC_SPANS:
         return {"status": "invalid_request", "note": "range", "evidence_ids": []}
-    body = clients["alertflow"].metrics(state["event"]["service_id"], span)
+    # 指标跨度是模型显式请求的子窗口：仍然派生自父级 window，超出父窗口时按
+    # historical_recall 标记（不另造时间算法）。
+    base = window_from_state(state, settings)
+    now = int(datetime.now(timezone.utc).timestamp())
+    start = max(0, now - _METRIC_SPANS[span])
+    end = now
+    kind = "root_cause" if start >= base.start_epoch() else "historical_recall"
+    scope = _scope_for(state, settings, start, end, kind=kind)
+    source = AlertFlowQueryRequest(
+        request_id=f"metrics:{scope.run_id}:{span}",
+        run_id=scope.run_id, service_id=state["event"]["service_id"],
+        incident_id=_optional_int((state.get("event") or {}).get("incident_id")),
+        resources=["aggregated_metrics"], metrics_range=span,
+        window_start=datetime.fromtimestamp(start, timezone.utc),
+        window_end=datetime.fromtimestamp(end, timezone.utc),
+        page_size=200,
+    )
+    result = _first(_retrieve(state, settings, clients, scope, [source]), "go_metric")
+    if result is None:
+        return {"status": "error", "note": "metrics retrieval failed", "evidence_ids": []}
+    if result.status in _FAILED_STATUSES:
+        return {"status": "error", "note": f"metrics retrieval {result.status}", "evidence_ids": []}
     series = [
         {"ts": point.get("ts"), "avgLatency": point.get("avgLatency")}
-        for point in (body.get("series") or [])[:200]
+        for point in [item.data for item in result.items if isinstance(item.data, dict)][:200]
     ]
     values = [point["avgLatency"] for point in series if isinstance(point.get("avgLatency"), (int, float))]
     stats = {
@@ -263,7 +287,22 @@ def _incident(args, state, settings, clients) -> dict:
     known = f"inc:{ident}"
     if known not in state["evidence"]:
         return {"status": "invalid_request", "note": "incident is not in the registry", "evidence_ids": []}
-    detail = clients["alertflow"].incident(ident)
+    window = window_from_state(state, settings)
+    scope = _scope_for(state, settings, window.start_epoch(), window.end_epoch())
+    source = AlertFlowQueryRequest(
+        request_id=f"incident:{scope.run_id}:{ident}",
+        run_id=scope.run_id, service_id=state["event"]["service_id"], incident_id=ident,
+        resources=["incident"],
+        window_start=datetime.fromtimestamp(window.start_epoch(), timezone.utc),
+        window_end=datetime.fromtimestamp(window.end_epoch(), timezone.utc),
+        page_size=1,
+    )
+    result = _first(_retrieve(state, settings, clients, scope, [source]), "diagnostic")
+    if result is None:
+        return {"status": "error", "note": "incident retrieval failed", "evidence_ids": []}
+    if result.status in _FAILED_STATUSES:
+        return {"status": "error", "note": f"incident retrieval {result.status}", "evidence_ids": []}
+    detail = next((item.data for item in result.items if isinstance(item.data, dict)), {})
     if detail.get("serviceId") != state["event"]["service_id"]:
         return {"status": "invalid_request", "note": "different service", "evidence_ids": []}
     added = []

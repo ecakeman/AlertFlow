@@ -212,17 +212,24 @@ class MemoryRepo:
         return row is not None
 
     def list_attachments(self, service_id: str, *, limit: int = 20,
-                         since: datetime | None = None) -> list[dict]:
-        """按服务 + 时间倒序读附件（不复制原文，只返回结构）。"""
+                         since: datetime | None = None,
+                         until: datetime | None = None) -> list[dict]:
+        """按服务 + 时间倒序读附件（不复制原文，只返回结构）。
+
+        ``since``/``until`` 会被真实下推到 SQL：时间窗过滤必须作用在返回结果上，
+        不能读出来再交给调用方自理。
+        """
         rows = self.conn.execute(
             """SELECT attachment_id, service_id, anchor_type, anchor_id, attachment_type,
                       source_system, source_record_id, run_id, incident_id, occurred_at,
                       recorded_at, summary, trust_level, source_refs, content_digest, metadata
                FROM timeline_attachments
-               WHERE service_id=%s AND (%s::timestamptz IS NULL OR recorded_at >= %s)
+               WHERE service_id=%s
+                 AND (%s::timestamptz IS NULL OR COALESCE(occurred_at, recorded_at) >= %s)
+                 AND (%s::timestamptz IS NULL OR COALESCE(occurred_at, recorded_at) <= %s)
                ORDER BY COALESCE(occurred_at, recorded_at) DESC
                LIMIT %s""",
-            (service_id, since, since, limit),
+            (service_id, since, since, until, until, limit),
         ).fetchall()
         return [
             {
@@ -232,6 +239,42 @@ class MemoryRepo:
                 "summary": r[11], "trust_level": r[12], "source_refs": r[13],
                 "content_digest": r[14], "metadata": r[15],
             }
+            for r in rows
+        ]
+
+    def list_diagnoses(self, service_id: str, start: datetime, end: datetime,
+                       limit: int = 20) -> list[dict]:
+        """窗口内的历史诊断（旧 Episode 投影），作为时间线里的历史节点。"""
+        rows = self.conn.execute(
+            """SELECT id, service_id, incident_id, started_at, resolved_at, card, created_at,
+                      target_endpoint, profile_key
+               FROM episodes
+               WHERE service_id=%s AND started_at >= %s AND started_at <= %s
+               ORDER BY started_at DESC
+               LIMIT %s""",
+            (service_id, start, end, limit),
+        ).fetchall()
+        return [episode_to_node({
+            "id": str(r[0]), "service_id": r[1], "incident_id": r[2],
+            "started_at": r[3].isoformat() if hasattr(r[3], "isoformat") else r[3],
+            "card": r[5] or "",
+        }).model_dump(mode="json") for r in rows]
+
+    def list_corrections(self, service_id: str, start: datetime, end: datetime,
+                         limit: int = 20) -> list[dict]:
+        """人工纠正：挂在 episode 上，按创建时间过滤，供 include_corrected_history 使用。"""
+        rows = self.conn.execute(
+            """SELECT c.id, c.episode_id, c.field, c.from_value, c.to_value, c.reason, c.created_at
+               FROM episode_corrections c
+               JOIN episodes e ON e.id = c.episode_id
+               WHERE e.service_id=%s AND e.started_at >= %s AND e.started_at <= %s
+               ORDER BY c.created_at DESC
+               LIMIT %s""",
+            (service_id, start, end, limit),
+        ).fetchall()
+        return [
+            {"id": r[0], "episode_id": str(r[1]), "field": r[2], "from_value": r[3],
+             "to_value": r[4], "reason": r[5], "created_at": r[6]}
             for r in rows
         ]
 
@@ -313,7 +356,8 @@ class InMemoryMemoryRepo(MemoryRepo):
 
     def record_correction(self, episode_id: str, field: str, from_value, to_value, reason: str = "") -> None:
         self.corrections.append({"episode_id": episode_id, "field": field,
-                                 "from": from_value, "to": to_value, "reason": reason})
+                                 "from_value": from_value, "to_value": to_value, "reason": reason,
+                                 "created_at": datetime.now(timezone.utc).isoformat()})
 
     # ---- 时间轴附件（C3）：内存实现与 Postgres 同语义 ----
     def save_attachment(self, attachment: TimelineAttachment) -> bool:
@@ -337,12 +381,62 @@ class InMemoryMemoryRepo(MemoryRepo):
         return True
 
     def list_attachments(self, service_id: str, *, limit: int = 20,
-                         since: datetime | None = None) -> list[dict]:
+                         since: datetime | None = None,
+                         until: datetime | None = None) -> list[dict]:
         rows = [item for item in self.attachments if item["service_id"] == service_id]
+
+        def stamp_of(item: dict) -> str:
+            return item.get("occurred_at") or item.get("recorded_at") or ""
+
         if since is not None:
             stamp = since.isoformat()
-            rows = [item for item in rows if (item.get("recorded_at") or "") >= stamp]
-        rows.sort(key=lambda item: item.get("occurred_at") or item.get("recorded_at") or "", reverse=True)
+            rows = [item for item in rows if stamp_of(item) >= stamp]
+        if until is not None:
+            stamp = until.isoformat()
+            rows = [item for item in rows if stamp_of(item) <= stamp]
+        rows.sort(key=stamp_of, reverse=True)
+        return rows[:limit]
+
+    def list_diagnoses(self, service_id: str, start: datetime, end: datetime,
+                       limit: int = 20) -> list[dict]:
+        nodes = []
+        for episode in self.episodes:
+            if episode.get("service_id") != service_id:
+                continue
+            started = episode.get("started_at")
+            if not started:
+                continue
+            try:
+                stamp = datetime.fromisoformat(str(started))
+            except ValueError:
+                continue
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            if not (start <= stamp <= end):
+                continue
+            nodes.append(episode_to_node(episode).model_dump(mode="json"))
+        return nodes[:limit]
+
+    def list_corrections(self, service_id: str, start: datetime, end: datetime,
+                         limit: int = 20) -> list[dict]:
+        rows = []
+        for row in self.corrections:
+            episode_id = str(row.get("episode_id") or "")
+            owner = next((e for e in self.episodes if str(e.get("id")) == episode_id), None)
+            if owner is None or owner.get("service_id") != service_id:
+                continue
+            started = owner.get("started_at")
+            if started:
+                try:
+                    stamp = datetime.fromisoformat(str(started))
+                except ValueError:
+                    stamp = None
+                if stamp is not None:
+                    if stamp.tzinfo is None:
+                        stamp = stamp.replace(tzinfo=timezone.utc)
+                    if not (start <= stamp <= end):
+                        continue
+            rows.append({"id": row.get("id") or episode_id, **row})
         return rows[:limit]
 
     def timeline_nodes(self, service_id: str, days: int, limit: int = 50) -> list[TimelineNode]:

@@ -48,3 +48,39 @@ class FakeAlertFlow:
             ],
             "nextBefore": None,
         }
+
+    def timeline(self, service_id: str, start=None, end=None, sources=None, limit: int = 50) -> dict:
+        return {
+            "events": [
+                {
+                    "id": 21, "eventKey": "kubernetes.pod.changed:api-1",
+                    "source": "kubernetes", "eventType": "kubernetes.pod.changed",
+                    "occurredAt": "2026-10-11T09:58:00Z", "observedAt": "2026-10-11T09:58:05Z",
+                    "recordedAt": "2026-10-11T09:58:05Z", "title": "Pod api-1 restarted",
+                    "kind": "pod", "severity": "warning",
+                    "clusterId": "lab", "namespace": "default",
+                    "resourceKind": "Pod", "resourceName": "api-1", "resourceUid": "uid-api-1",
+                    "details": {"reason": "OOMKilled"},
+                },
+                {
+                    "id": 22, "eventKey": "incident:1",
+                    "source": "incident", "eventType": "incident.opened",
+                    "occurredAt": "2026-10-11T09:59:30Z", "observedAt": "2026-10-11T09:59:30Z",
+                    "recordedAt": "2026-10-11T09:59:31Z", "title": "Incident opened",
+                    "clusterId": "lab",
+                },
+            ],
+            "hasNext": False, "from": start, "to": end, "retentionDays": 7,
+            "coverage": {"from": start, "to": end},
+        }
+
+    def kubernetes_state(self, service_id: str) -> dict:
+        return {
+            "objects": [
+                {
+                    "uid": "uid-api-1", "kind": "Pod", "name": "api-1", "namespace": "default",
+                    "clusterId": "lab", "active": True, "summary": "Pod api-1 running",
+                    "lastSeenAt": "2026-10-11T09:58:05Z", "fingerprint": "fp-1",
+                }
+            ]
+        }

@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 
 from ..schemas.context import (
     AlertFlowQueryRequest,
@@ -41,11 +42,26 @@ log = logging.getLogger("alertflow_agent")
 _RESOURCE_MAP = {
     "checks": ("checks", "check"),
     "incident": ("diagnostic", "timeline_event"),
+    "related_incidents": ("diagnostic", "incident_reference"),
     "diagnostics": ("diagnostic", "check"),
     "service_timeline": ("timeline", "timeline_event"),
     "kubernetes_state": ("kubernetes", "kubernetes_object_state"),
     "aggregated_metrics": ("go_metric", "prometheus_sample"),
 }
+# Go metrics 端点支持的固定跨度（秒）。窗口派生时取"能覆盖窗口的最小跨度"，
+# 覆盖不了就取最大并标记 window_clipped——不假装拿到了窗口内的全部样本。
+_METRIC_RANGES = (("1h", 3600), ("6h", 21600), ("24h", 86400), ("7d", 604800), ("30d", 2592000))
+_TIMELINE_NODE_TYPE = {
+    "kubernetes": "kubernetes_change",
+    "incident": "incident_transition",
+    "agent": "runtime_event",
+}
+
+
+def _memory_sort_key(item) -> tuple:
+    """时间线排序：事件时间优先，缺失时退回记录时间（都是 UTC，可直接比较）。"""
+    stamp = item.occurred_at or item.recorded_at or item.observed_at
+    return (stamp.timestamp() if stamp is not None else 0.0, str(item.source_record_id or ""))
 # MCPError.kind -> SourceError.category（前者用于 gap 码，后者受 schema 约束）
 _MCP_CATEGORY = {
     "timeout": "timeout",
@@ -226,13 +242,45 @@ class ContextManager:
                                               "name": obj.get("name")},
                     content_digest=_digest(obj),
                 ) for obj in objects]
+            elif resource == "related_incidents":
+                page = self.alertflow.incidents(source.service_id, source.page_size) or {}
+                rows = page.get("incidents") or []
+                items = [RetrievedItem(
+                    source_record_id=str(inc.get("id")), record_type=record_type,
+                    service_id=source.service_id, occurred_at=parse_time(inc.get("startedAt")),
+                    observed_at=parse_time(inc.get("startedAt")),
+                    recorded_at=parse_time(inc.get("resolvedAt") or inc.get("updatedAt") or inc.get("startedAt")),
+                    summary=str(inc.get("title") or inc.get("status") or ""), data=inc,
+                    source_locator={"table": "incidents", "id": inc.get("id")},
+                    content_digest=_digest(inc),
+                ) for inc in rows[: source.page_size]]
+                if page.get("coverage"):
+                    meta["coverage"] = page["coverage"]
             elif resource == "aggregated_metrics":
-                series = self.alertflow.metrics(source.service_id, range_="24h").get("series") or []
+                span, span_seconds, clipped = self._metric_span(source, start, end)
+                body = self.alertflow.metrics(source.service_id, range_=span) or {}
+                series = body.get("series") or []
+                # metrics 端点按固定跨度取数且不返回 from/to，这里把跨度和"是否覆盖了请求窗口"
+                # 一并交给调用方，避免上层把 24h 数字当成任意窗口的样本。
+                meta.update({
+                    "metrics_range": span,
+                    "metrics_range_seconds": span_seconds,
+                    "window_seconds": int((end - start).total_seconds()),
+                    "window_clipped": clipped,
+                    "check": body.get("check"),
+                    "interval": body.get("interval"),
+                    "tls": body.get("tls"),
+                    "from": body.get("from"),
+                    "to": body.get("to"),
+                    "bucket_seconds": body.get("bucketSeconds"),
+                })
                 items = [RetrievedItem(
                     source_record_id=str(point.get("ts")), record_type=record_type,
                     service_id=source.service_id, occurred_at=parse_time(point.get("ts")),
-                    observed_at=parse_time(point.get("ts")), summary=f"avg_latency={point.get('avg_latency')}",
-                    data=point, source_locator={"table": "metrics"}, content_digest=_digest(point),
+                    observed_at=parse_time(point.get("ts")),
+                    summary=f"avg_latency={point.get('avgLatency')}",
+                    data=point, source_locator={"table": "metrics", "range": span},
+                    content_digest=_digest(point),
                 ) for point in series[: source.page_size]]
             else:  # diagnostics 随触发上下文送达，不单列 gRPC 查询
                 return self._result(request, source_type, "alertflow_grpc", status="unavailable",
@@ -250,6 +298,21 @@ class ContextManager:
         return self._result(request, source_type, "alertflow_grpc", status=status, items=items,
                             gaps=gaps, truncation=truncation,
                             observed_range=TimeRange(start=start, end=end), metadata=meta)
+
+    @staticmethod
+    def _metric_span(source, start, end) -> tuple[str, int, bool]:
+        """窗口 -> Go metrics 的固定跨度。返回 (span, span_seconds, window_clipped)。"""
+        window_seconds = max(1, int((end - start).total_seconds()))
+        if source.metrics_range:
+            for name, seconds in _METRIC_RANGES:
+                if name == source.metrics_range:
+                    return name, seconds, seconds < window_seconds
+            return str(source.metrics_range), window_seconds, False
+        for name, seconds in _METRIC_RANGES:
+            if seconds >= window_seconds:
+                return name, seconds, False
+        name, seconds = _METRIC_RANGES[-1]
+        return name, seconds, True
 
     async def _mcp_passthrough(self, request, source_type, source_system, tool, args) -> RetrievalResult:
         """MCP 原生工具调用：工具层整形，ContextManager 统一调用/超时/错误语义。"""
@@ -358,46 +421,230 @@ class ContextManager:
 
     # ---- Memory timeline ----
     def _memory_recall(self, request, source: TimelineRecallRequest) -> RetrievalResult:
-        if self.memory is None:
-            return self._disabled(request, "memory_reference", "agent_memory", "memory is not configured")
+        window_start = parse_time(source.time_start) or request.scope.window.window_start
+        window_end = parse_time(source.time_end) or request.scope.window.window_end
+        if window_end < window_start:
+            return self._result(request, "memory_reference", "agent_memory", status="invalid_request",
+                                gaps=[CoverageGap(code="WINDOW_GAP", source_type="memory_reference",
+                                                  detail="time_end is before time_start")])
+        if self.memory is None and self.alertflow is None:
+            return self._disabled(request, "memory_reference", "agent_memory",
+                                  "memory and alertflow clients are not configured")
+        gaps: list[CoverageGap] = []
+        nodes = self._runtime_timeline_nodes(source, window_start, window_end, gaps)
+        nodes += self._diagnosis_timeline_nodes(source, window_start, window_end, gaps)
+        attachments = (self._memory_attachments(source, window_start, window_end, gaps)
+                       if source.include_attachments else [])
+        corrections = (self._memory_corrections(source, window_start, window_end, gaps)
+                       if source.include_corrected_history else [])
+        wanted = {value.strip().lower() for value in (source.event_types or []) if value.strip()}
+        if wanted:
+            nodes = [node for node in nodes if self._node_matches(node, wanted)]
+            corrections = [row for row in corrections if self._correction_matches(row, wanted)]
+
+        items = [self._node_item(source, node) for node in nodes]
+        items += [self._attachment_item(source, row) for row in attachments]
+        items += [self._correction_item(source, row) for row in corrections]
+        items.sort(key=_memory_sort_key, reverse=True)
+        items = items[: source.top_k]
+        status = "ok" if items else "empty"
+        if not items:
+            gaps.append(CoverageGap(code="NO_MATCHING_DATA", source_type="memory_reference",
+                                    detail="no timeline node or attachment in window"))
+        return self._result(request, "memory_reference", "agent_memory", status=status, items=items,
+                            observed_range=TimeRange(start=window_start, end=window_end),
+                            metadata={
+                                "time_order": "desc",
+                                "semantic_rank_used": False,
+                                "runtime_nodes": sum(1 for node in nodes if node["source_system"] != "agent_memory"),
+                                "diagnosis_nodes": sum(1 for node in nodes if node["source_system"] == "agent_memory"),
+                                "attachments": len(attachments),
+                                "corrections": len(corrections),
+                                "event_types": sorted(wanted),
+                                "include_attachments": source.include_attachments,
+                                "include_corrected_history": source.include_corrected_history,
+                            },
+                            gaps=gaps)
+
+    def _runtime_timeline_nodes(self, source, start, end, gaps) -> list[dict]:
+        """Go Runtime Timeline 是本 run 的运行时事实主线（只投影，不复制原始行）。"""
+        if self.alertflow is None:
+            return []
         try:
-            nodes = self.memory.timeline_nodes(source.service_id, 365, source.top_k) \
-                if hasattr(self.memory, "timeline_nodes") else []
-            attachments = self.memory.list_attachments(source.service_id, limit=source.top_k) \
-                if hasattr(self.memory, "list_attachments") else []
+            page = self.alertflow.timeline(source.service_id, int(start.timestamp()), int(end.timestamp()),
+                                           _TIMELINE_SOURCES, max(source.top_k, 20))
         except Exception as exc:
-            return self._failed(request, "memory_reference", "agent_memory", "unknown", str(exc))
-        items = []
-        for node in nodes:
-            data = node.model_dump(mode="json") if hasattr(node, "model_dump") else dict(node)
-            items.append(RetrievedItem(
-                source_record_id=data.get("node_id"), record_type="memory_attachment",
-                service_id=source.service_id, occurred_at=parse_time(data.get("occurred_at")),
-                observed_at=parse_time(data.get("observed_at")),
-                recorded_at=parse_time(data.get("recorded_at")),
-                summary=str(data.get("summary") or "")[:400], data=data,
-                source_locator=data.get("source_locator") or {}, content_digest=_digest(data),
-            ))
-        if source.include_attachments:
-            for item in attachments:
-                items.append(RetrievedItem(
-                    source_record_id=str(item.get("attachment_id")), record_type="memory_attachment",
-                    service_id=source.service_id, occurred_at=parse_time(item.get("occurred_at")),
-                    recorded_at=parse_time(item.get("recorded_at")),
-                    summary=str(item.get("summary") or "")[:400], data=item,
-                    source_locator={"anchor_type": item.get("anchor_type"),
-                                    "anchor_id": item.get("anchor_id")},
-                    content_digest=str(item.get("content_digest") or _digest(item)),
-                ))
-        start = parse_time(source.time_start) or request.scope.window.window_start
-        end = parse_time(source.time_end) or request.scope.window.window_end
-        return self._result(request, "memory_reference", "agent_memory",
-                            status="ok" if items else "empty", items=items[: source.top_k],
-                            observed_range=TimeRange(start=start, end=end),
-                            metadata={"time_order": "desc", "semantic_rank_used": False},
-                            gaps=[] if items else [CoverageGap(code="NO_MATCHING_DATA",
-                                                              source_type="memory_reference",
-                                                              detail="no memory in window")])
+            gaps.append(CoverageGap(code="SOURCE_UNAVAILABLE", source_type="memory_reference",
+                                    detail=f"go runtime timeline read failed: {exc}"))
+            return []
+        nodes = []
+        for event in page.get("events") or []:
+            event_type = str(event.get("eventType") or event.get("event_type") or "")
+            event_source = str(event.get("source") or "")
+            key = str(event.get("eventKey") or event.get("id") or "")
+            if not key:
+                continue
+            # 窗口必须对结果生效：即使上游按窗口下推，也不接受越界事件。
+            occurred = parse_time(event.get("occurredAt") or event.get("occurred_at"))
+            if occurred is not None and not (start <= occurred <= end):
+                continue
+            nodes.append({
+                "node_id": f"rt:{key}",
+                "service_id": source.service_id,
+                "incident_id": source.incident_id,
+                "node_type": _TIMELINE_NODE_TYPE.get(event_source, "diagnostic"),
+                "source_system": event_source or "go_runtime",
+                "source_record_id": key,
+                "occurred_at": occurred,
+                "observed_at": event.get("observedAt") or event.get("observed_at"),
+                "recorded_at": event.get("recordedAt") or event.get("recorded_at"),
+                "time_accuracy": "exact" if (event.get("occurredAt") or event.get("occurred_at")) else "derived",
+                "summary": str(event.get("title") or event.get("summary") or "")[:400],
+                "facts": [{"source_type": "go_runtime", "source_record_id": key}],
+                "attachments": [],
+                "source_locator": {"table": "timeline", "event_key": key, "event_type": event_type,
+                                   "source": event_source,
+                                   "kind": event.get("kind"), "severity": event.get("severity")},
+            })
+        return nodes
+
+    def _diagnosis_timeline_nodes(self, source, start, end, gaps) -> list[dict]:
+        """旧 Episode 作为历史诊断记录继续存在，但不再是时间线的唯一来源。"""
+        if self.memory is None:
+            return []
+        try:
+            rows = None
+            if hasattr(self.memory, "list_diagnoses"):
+                rows = self.memory.list_diagnoses(source.service_id, start, end, source.top_k)
+            elif hasattr(self.memory, "timeline_nodes"):
+                days = max(1, math.ceil(max(1.0, (end - start).total_seconds()) / 86400))
+                legacy = self.memory.timeline_nodes(source.service_id, days, source.top_k)
+                rows = [node.model_dump(mode="json") if hasattr(node, "model_dump") else dict(node)
+                        for node in legacy]
+        except Exception as exc:
+            gaps.append(CoverageGap(code="SOURCE_UNAVAILABLE", source_type="memory_reference",
+                                    detail=f"agent memory read failed: {exc}"))
+            return []
+        nodes = []
+        for row in rows or []:
+            node = row.model_dump(mode="json") if hasattr(row, "model_dump") else dict(row)
+            occurred = parse_time(node.get("occurred_at"))
+            if occurred is not None and not (start <= occurred <= end):
+                continue
+            nodes.append({
+                "node_id": node.get("node_id"),
+                "service_id": source.service_id,
+                "incident_id": node.get("incident_id"),
+                "node_type": node.get("node_type") or "agent_diagnosis",
+                "source_system": node.get("source_system") or "agent_memory",
+                "source_record_id": str(node.get("source_record_id") or ""),
+                "occurred_at": node.get("occurred_at"),
+                "observed_at": node.get("observed_at"),
+                "recorded_at": node.get("recorded_at"),
+                "time_accuracy": node.get("time_accuracy") or "derived",
+                "summary": str(node.get("summary") or "")[:400],
+                "facts": node.get("facts") or [],
+                "attachments": node.get("attachments") or [],
+                "source_locator": node.get("source_locator") or {},
+            })
+        return nodes
+
+    def _memory_attachments(self, source, start, end, gaps) -> list[dict]:
+        if self.memory is None or not hasattr(self.memory, "list_attachments"):
+            return []
+        try:
+            rows = self.memory.list_attachments(source.service_id, limit=max(source.top_k * 2, 20),
+                                                since=start, until=end)
+        except TypeError:
+            try:
+                rows = self.memory.list_attachments(source.service_id, limit=max(source.top_k * 2, 20))
+            except Exception as exc:
+                gaps.append(CoverageGap(code="SOURCE_UNAVAILABLE", source_type="memory_reference",
+                                        detail=f"attachment read failed: {exc}"))
+                return []
+        except Exception as exc:
+            gaps.append(CoverageGap(code="SOURCE_UNAVAILABLE", source_type="memory_reference",
+                                    detail=f"attachment read failed: {exc}"))
+            return []
+        kept = []
+        for row in rows or []:
+            item = row.model_dump(mode="json") if hasattr(row, "model_dump") else dict(row)
+            stamp = parse_time(item.get("occurred_at")) or parse_time(item.get("recorded_at"))
+            if stamp is not None and not (start <= stamp <= end):
+                # 附件若锚定在本 incident 上，即使时间戳在窗口外也保留（身份关联优先于时间）。
+                if not (source.incident_id is not None
+                        and str(item.get("incident_id")) == str(source.incident_id)):
+                    continue
+            kept.append(item)
+        return kept
+
+    def _memory_corrections(self, source, start, end, gaps) -> list[dict]:
+        if self.memory is None or not hasattr(self.memory, "list_corrections"):
+            return []
+        try:
+            rows = self.memory.list_corrections(source.service_id, start, end, limit=source.top_k)
+        except Exception as exc:
+            gaps.append(CoverageGap(code="SOURCE_UNAVAILABLE", source_type="memory_reference",
+                                    detail=f"correction read failed: {exc}"))
+            return []
+        return [row.model_dump(mode="json") if hasattr(row, "model_dump") else dict(row) for row in rows or []]
+
+    @staticmethod
+    def _node_matches(node: dict, wanted: set[str]) -> bool:
+        locator = node.get("source_locator") or {}
+        candidates = {
+            str(node.get("node_type") or "").lower(),
+            str(node.get("source_system") or "").lower(),
+            str(locator.get("event_type") or "").lower(),
+        }
+        return bool(candidates & wanted)
+
+    @staticmethod
+    def _correction_matches(row: dict, wanted: set[str]) -> bool:
+        return str(row.get("field") or "").lower() in wanted or "correction" in wanted
+
+    @staticmethod
+    def _node_item(source, node: dict) -> RetrievedItem:
+        return RetrievedItem(
+            source_record_id=str(node.get("node_id") or ""),
+            record_type="timeline_node",
+            service_id=source.service_id,
+            occurred_at=parse_time(node.get("occurred_at")),
+            observed_at=parse_time(node.get("observed_at")),
+            recorded_at=parse_time(node.get("recorded_at")),
+            summary=str(node.get("summary") or "")[:400],
+            data=node,
+            source_locator=node.get("source_locator") or {},
+            content_digest=_digest(node),
+        )
+
+    @staticmethod
+    def _attachment_item(source, row: dict) -> RetrievedItem:
+        return RetrievedItem(
+            source_record_id=str(row.get("attachment_id")),
+            record_type="memory_attachment",
+            service_id=source.service_id,
+            occurred_at=parse_time(row.get("occurred_at")),
+            recorded_at=parse_time(row.get("recorded_at")),
+            summary=str(row.get("summary") or "")[:400],
+            data=row,
+            source_locator={"anchor_type": row.get("anchor_type"), "anchor_id": row.get("anchor_id")},
+            content_digest=str(row.get("content_digest") or _digest(row)),
+        )
+
+    @staticmethod
+    def _correction_item(source, row: dict) -> RetrievedItem:
+        return RetrievedItem(
+            source_record_id=str(row.get("id") or ""),
+            record_type="memory_correction",
+            service_id=source.service_id,
+            occurred_at=parse_time(row.get("created_at")),
+            recorded_at=parse_time(row.get("created_at")),
+            summary=str(row.get("reason") or row.get("field") or "")[:400],
+            data=row,
+            source_locator={"episode_id": row.get("episode_id"), "field": row.get("field")},
+            content_digest=_digest(row),
+        )
 
     @staticmethod
     def _coverage(results) -> str:

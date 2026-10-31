@@ -133,12 +133,16 @@ class InvestigationScope(_Model):
 
 AlertFlowResource = Literal[
     "incident",
+    "related_incidents",
     "checks",
     "diagnostics",
     "service_timeline",
     "kubernetes_state",
     "aggregated_metrics",
 ]
+
+# Go 的 metrics 端点只接受固定跨度，请求窗口只能映射到其中一个。
+MetricRange = Literal["1h", "6h", "24h", "7d", "30d"]
 
 
 class AlertFlowQueryRequest(_Model):
@@ -152,11 +156,20 @@ class AlertFlowQueryRequest(_Model):
     page_size: int = Field(default=50, gt=0)
     page_token: Optional[str] = None
     include_inactive: bool = False
+    # 留空表示由窗口派生（见 ContextManager._metric_range）；派生结果与实际调用都写进
+    # ``query_metadata``，窗口与跨度不一致时可核对。
+    metrics_range: Optional[MetricRange] = None
 
     @field_validator("window_start", "window_end")
     @classmethod
     def _aware(cls, value: datetime) -> datetime:
         return ensure_utc(value)
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "AlertFlowQueryRequest":
+        if self.window_end < self.window_start:
+            raise ValueError("window_end is before window_start")
+        return self
 
 
 class PrometheusQueryRequest(_Model):
@@ -286,6 +299,11 @@ RecordType = Literal[
     "prometheus_sample",
     "loki_log_line",
     "memory_attachment",
+    # P2：Go Runtime Timeline 统一为时间轴后，节点与人工纠正也需要自己的记录类型。
+    "timeline_node",
+    "memory_correction",
+    # P1：同服务的其它 Incident（历史对比用），与当前 Incident 本身区分开。
+    "incident_reference",
 ]
 
 CoverageGapCode = Literal[

@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import TypedDict
 
@@ -27,10 +28,11 @@ from alertflow_agent.runtime.verify import build_catalog, cited
 from alertflow_agent.runtime.window import (
     build_investigation_window,
     scope_from_event,
+    window_between,
     window_from_context,
     window_from_state,
 )
-from alertflow_agent.schemas.context import InvestigationWindow
+from alertflow_agent.schemas.context import AlertFlowQueryRequest, InvestigationWindow, RetrievalRequest
 
 log = logging.getLogger("alertflow_agent")
 
@@ -115,6 +117,59 @@ def _evidence(state, ident, source, kind, summary, data, limitations=None):
         "data": data,
         "limitations": limitations or [],
     }
+
+
+def _optional_int(value):
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _items_data(result) -> list[dict]:
+    if result is None:
+        return []
+    return [item.data for item in result.items if isinstance(item.data, dict)]
+
+
+def _first_item(result):
+    items = _items_data(result)
+    return items[0] if items else None
+
+
+def _metric_payload(result):
+    """把 aggregated_metrics 的检索结果还原成旧 metrics payload 形状。"""
+    if result is None:
+        return None
+    meta = result.query_metadata or {}
+    series = _items_data(result)
+    if not series and not meta.get("check"):
+        return None
+    return {
+        "series": series,
+        "check": meta.get("check"),
+        "interval": meta.get("interval"),
+        "tls": meta.get("tls"),
+        "from": meta.get("from"),
+        "to": meta.get("to"),
+        "bucketSeconds": meta.get("bucket_seconds"),
+        "metrics_range": meta.get("metrics_range"),
+        "window_clipped": meta.get("window_clipped"),
+    }
+
+
+def _scope_from_event_window(state, event, window, settings):
+    """把父级窗口包成 InvestigationScope（唯一时间来源）。"""
+    return scope_from_event(event or {}, str(state.get("run_id") or "run"), window=window, settings=settings)
+
+
+def _live_status(status: str) -> str:
+    """RetrievalResult.status -> 旧的 source_status 词汇（ok/empty/unavailable）。"""
+    if status in {"ok", "truncated"}:
+        return "ok"
+    if status == "empty":
+        return "empty"
+    return "unavailable"
 
 
 class Runner:
@@ -409,16 +464,43 @@ class Runner:
         return self._collect_live(state)
 
     def _collect_live(self, state):
-        """没有下推上下文时的实时读取（v1 事件、或上下文不可用）。"""
+        """没有下推上下文时的实时读取（v1 事件、或上下文不可用）。
+
+        这里是 ContextManager 的**唯一合理例外**：它只在下推上下文缺失/不可用时执行，
+        用来补出与下推上下文同形状的初始事实快照；所有 Go 读取仍经统一入口，
+        证据 id 也保持 ``svc:``/``met:24h``/``inc:``/``chk:`` 的既有形状。
+        """
         event = state["event"]
+        service_id = event["service_id"]
         gaps = list(state["coverage"].get("gaps") or [])
-        status = {}
-        detail = self._source(status, "incident", lambda: self.alertflow.incident(event["incident_id"]) if event.get("incident_id") else None)
-        listing = self._source(status, "incidents", lambda: self.alertflow.incidents(event["service_id"], 10))
-        metrics = self._source(status, "metrics", lambda: self.alertflow.metrics(event["service_id"], "24h"))
-        rows = self._source(status, "checks", lambda: collect_checks(
-            self.alertflow, event["service_id"], state["coverage"]["from"], state["coverage"]["to"], self.settings.check_max_rows,
-        ))
+        status: dict[str, str] = {}
+        scope = self._live_scope(state)
+        resources = ["checks", "aggregated_metrics", "related_incidents"]
+        if event.get("incident_id"):
+            resources.insert(0, "incident")
+        source = AlertFlowQueryRequest(
+            request_id=f"live:{scope.run_id}",
+            run_id=scope.run_id, service_id=service_id,
+            incident_id=_optional_int(event.get("incident_id")),
+            resources=resources, metrics_range="24h", page_size=self.settings.check_max_rows,
+            # 请求窗口必须与 scope.window 完全一致（adapter 不重算时间窗）。
+            window_start=scope.window.window_start,
+            window_end=scope.window.window_end,
+        )
+        batch = self._retrieve(state, scope, [source])
+        buckets = self._bucket_results(batch)
+        detail = _first_item(buckets.get("incident"))
+        listing = _items_data(buckets.get("related_incidents"))
+        metric_result = buckets.get("aggregated_metrics")
+        checks_result = buckets.get("checks")
+        for name, result in (("incident", buckets.get("incident")),
+                             ("incidents", buckets.get("related_incidents")),
+                             ("metrics", metric_result), ("checks", checks_result)):
+            status[name] = "empty" if result is None else _live_status(result.status)
+        if not event.get("incident_id"):
+            status["incident"] = "empty"
+        rows = _items_data(checks_result) or None
+        metrics = _metric_payload(metric_result)
         state["source_status"] = status
         if rows is None and detail is None:
             state["failure_reason"] = "collect_failed"
@@ -429,24 +511,72 @@ class Runner:
             gaps.append("ALERTFLOW_PARTIAL")
         state["raw_checks"] = rows or []
         if metrics:
-            state["series"] = [{"ts": point.get("ts"), "avg_latency": point.get("avgLatency")} for point in (metrics.get("series") or [])]
+            state["series"] = [{"ts": point.get("ts"), "avg_latency": point.get("avgLatency")}
+                               for point in (metrics.get("series") or [])]
             state["interval"] = ((metrics.get("check") or {}).get("interval"))
             if metrics.get("tls"):
-                _evidence(state, f"tls:{event['service_id']}", "alertflow_tls", "tls", metrics["tls"].get("error") or "tls snapshot", metrics["tls"], ["TLS_SNAPSHOT_ONLY"])
+                _evidence(state, f"tls:{service_id}", "alertflow_tls", "tls",
+                          metrics["tls"].get("error") or "tls snapshot", metrics["tls"], ["TLS_SNAPSHOT_ONLY"])
                 gaps.append("TLS_SNAPSHOT_ONLY")
-            _evidence(state, f"svc:{event['service_id']}", "alertflow_service", "service", "check configuration from the metrics payload", metrics.get("check") or {})
-            _evidence(state, "met:24h", "alertflow_metric", "metric_series", "24h series", {"series": state["series"][:200]})
+            _evidence(state, f"svc:{service_id}", "alertflow_service", "service",
+                      "check configuration from the metrics payload", metrics.get("check") or {})
+            _evidence(state, "met:24h", "alertflow_metric", "metric_series", "24h series",
+                      {"series": state["series"][:200]})
         if detail:
-            _evidence(state, f"inc:{detail['id']}", "alertflow_incident", "incident", detail.get("title") or detail.get("status") or "incident", {"status": detail.get("status"), "severity": detail.get("severity")})
+            _evidence(state, f"inc:{detail['id']}", "alertflow_incident", "incident",
+                      detail.get("title") or detail.get("status") or "incident",
+                      {"status": detail.get("status"), "severity": detail.get("severity")})
             for comment in detail.get("comments") or []:
-                _evidence(state, f"cmt:{detail['id']}:{comment['id']}", "alertflow_comment", "comment", comment.get("body") or "", {"body": comment.get("body")})
-        if listing:
-            for inc in listing.get("incidents") or []:
-                _evidence(state, f"inc:{inc['id']}", "alertflow_incident", "incident", inc.get("title") or inc.get("status") or "incident", {"status": inc.get("status"), "severity": inc.get("severity")})
+                _evidence(state, f"cmt:{detail['id']}:{comment['id']}", "alertflow_comment", "comment",
+                          comment.get("body") or "", {"body": comment.get("body")})
+        for inc in listing:
+            _evidence(state, f"inc:{inc['id']}", "alertflow_incident", "incident",
+                      inc.get("title") or inc.get("status") or "incident",
+                      {"status": inc.get("status"), "severity": inc.get("severity")})
         for row in key_checks(state["raw_checks"]):
             _evidence(state, f"chk:{row['id']}", "alertflow_check", "http_check", row.get("error") or row["status"], row)
         state["coverage"]["gaps"] = gaps
         return state
+
+    def _live_scope(self, state):
+        """实时读取用的 scope：窗口仍来自父级 InvestigationWindow。"""
+        event = state.get("event") or {}
+        coverage = state.get("coverage") or {}
+        start = int(coverage.get("from") or 0)
+        end = int(coverage.get("to") or 0)
+        now = int(datetime.now(timezone.utc).timestamp())
+        start = start or max(0, now - self.settings.check_lookback_minutes * 60)
+        end = end or now
+        window = window_between(window_from_state(state, self.settings), start, end, kind="root_cause")
+        coverage = state.setdefault("coverage", {})
+        if not coverage.get("from"):
+            coverage["from"] = int(window.window_start.timestamp())
+        if not coverage.get("to"):
+            coverage["to"] = int(window.window_end.timestamp())
+        return scope_from_event(event, str(state.get("run_id") or "run"), window=window, settings=self.settings)
+
+    def _retrieve(self, state, scope, sources):
+        """唯一检索入口；失败记进 retrieval_errors，由调用方降级为 gap。"""
+        try:
+            request = RetrievalRequest(
+                request_id=f"graph:{scope.run_id}:{time.time_ns()}",
+                scope=scope, purpose="initial_context", source_requests=list(sources),
+            )
+            return self.context_manager.retrieve_now(request)
+        except Exception as exc:
+            state.setdefault("retrieval_errors", []).append(str(exc))
+            return None
+
+    @staticmethod
+    def _bucket_results(batch) -> dict:
+        if batch is None:
+            return {}
+        buckets: dict[str, object] = {}
+        for result in batch.results:
+            resource = str((result.query_metadata or {}).get("resource") or "")
+            if resource:
+                buckets[resource] = result
+        return buckets
 
     def _seed_from_context(self, state, context):
         """用下推的默认上下文建立 Evidence Registry。
@@ -548,17 +678,26 @@ class Runner:
             return
         event = state.get("event") or {}
         service_id = event.get("service_id") or ""
-        try:
-            # 不再自己算 occurred-3600：直接用父级窗口
-            window = window_from_state(state, self.settings)
-            page = client.timeline(
-                service_id, window.start_epoch(), window.end_epoch(),
-                ["application_diagnostics", "kubernetes", "incident", "agent"], 50,
-            )
-        except Exception:
-            log.warning("timeline read failed")
-            page = {"events": []}
-        for item in page.get("events") or []:
+        # 不再自己算 occurred-3600：直接用父级窗口，并走统一检索入口。
+        window = window_from_state(state, self.settings)
+        scope = _scope_from_event_window(state, event, window, self.settings)
+        source = AlertFlowQueryRequest(
+            request_id=f"timeline:{scope.run_id}",
+            run_id=scope.run_id, service_id=service_id,
+            incident_id=_optional_int(event.get("incident_id")),
+            resources=["service_timeline", "kubernetes_state"], page_size=50,
+            window_start=datetime.fromtimestamp(window.start_epoch(), timezone.utc),
+            window_end=datetime.fromtimestamp(window.end_epoch(), timezone.utc),
+        )
+        batch = self._retrieve(state, scope, [source])
+        buckets = self._bucket_results(batch)
+        for resource in ("service_timeline", "kubernetes_state"):
+            result = buckets.get(resource)
+            if result is not None and result.status in {"failed", "unavailable", "timeout"}:
+                log.warning("%s read failed", resource)
+        events = _items_data(buckets.get("service_timeline"))
+        objects = _items_data(buckets.get("kubernetes_state"))
+        for item in events:
             ident = item.get("eventKey") or f"tl:{item.get('id')}"
             _add(state, ident, item.get("source") or "timeline", ident, item.get("eventType") or "event",
                  item.get("summary") or item.get("title") or "", {
@@ -574,11 +713,6 @@ class Runner:
                      "resource_uid": item.get("resourceUid"),
                      "details": item.get("details") or {},
                  })
-        try:
-            objects = client.kubernetes_state(service_id).get("objects") or []
-        except Exception:
-            log.warning("kubernetes state read failed")
-            objects = []
         for obj in objects:
             ident = "k8s:" + str(obj.get("uid") or obj.get("name") or "")
             _add(state, ident, "kubernetes", ident, obj.get("kind") or "object",
@@ -593,7 +727,7 @@ class Runner:
                      "fingerprint": obj.get("fingerprint"),
                      "summary": obj.get("summary") or obj.get("status"),
                  })
-        if not page.get("events") and not objects:
+        if not events and not objects:
             state.setdefault("coverage", {}).setdefault("gaps", []).append("TIMELINE_EMPTY")
 
     def collect_diagnostics(self, state):

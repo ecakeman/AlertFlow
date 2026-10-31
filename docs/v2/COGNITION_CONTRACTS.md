@@ -377,3 +377,76 @@ Go 侧下推的 JSON 数字可能被反序列化为 float（如 `statusCode 503.
   queries:["probe_success{service_id=\"fault-lab\"}"]}` / `["{service_id=\"fault-lab\"}"]`。
 - 单测：`tests/test_mcp.py` 覆盖基线取证与模型查询的调用序列、queries 留痕、
   `NOT_QUERIED` 在基线取证后不再出现。
+
+---
+
+## C9 — 认知侧收尾（P1–P4，本轮落地）
+
+本轮只做"职责收敛"，不新增服务/Agent，不重写主图；改动集中在 `agent/src/alertflow_agent/`。
+
+### C9.1 单一检索入口的落地边界
+
+| 位置 | 之前 | 现在 |
+|---|---|---|
+| `runtime/tools.py::_metrics` | 直接 `clients["alertflow"].metrics(sid, span)` | 组 `AlertFlowQueryRequest(resources=["aggregated_metrics"], metrics_range=span)` → `ContextManager.retrieve_now()`；跨度由模型显式请求，窗口仍派生自父级 `InvestigationWindow`，越过父窗口时标记 `historical_recall` |
+| `runtime/tools.py::_incident` | 直接 `clients["alertflow"].incident(id)` | `resources=["incident"]` 经 Manager；"必须是 registry 里已登记的事件"这一前置校验保留 |
+| `runtime/graph.py::_collect_live` | 四处直接调用 Go（incident/incidents/metrics/checks） | 一次 `resources=["incident","related_incidents","aggregated_metrics","checks"]` 批量检索，再按资源分桶还原旧证据形状（`svc:`/`met:24h`/`inc:`/`cmt:`/`chk:`/`tls:`） |
+| `runtime/graph.py::_collect_timeline` | 直接 `client.timeline()` + `client.kubernetes_state()` | `resources=["service_timeline","kubernetes_state"]` 经 Manager；单资源失败只置该资源 unavailable |
+
+**唯一合理例外**：`Runner._refresh_runtime_config()` 仍直接读 Go 的 `runtime_config()`
+（模型端点/密钥/记忆开关）。理由：那不是"业务事实检索"，而是本 run 的运行配置；
+它不产生证据、不进 Fact Catalog、失败即静默沿用本地 env。已在代码注释与本节写明，
+不宣称"全部调用都经 Manager"。
+
+`_collect_live` 的既有职责（把下推快照缺失时的初始事实补齐）**保留**，而不是删除：
+它是 v1 事件与下推上下文不可用时的唯一来源；改造后它内部同样经 Manager，
+所以不存在"一边绕过、一边宣称统一"的情况。
+
+### C9.2 父子窗口一致性
+
+- `AlertFlowQueryRequest` 新增 `metrics_range`（`Literal["1h","6h","24h","7d","30d"]`）与
+  `window_end >= window_start` 校验；留空表示由窗口派生。
+- `ContextManager.aggregated_metrics` 不再固定 `24h`：先按父窗口时长选最小可覆盖跨度，
+  覆盖不了就用最大跨度并把 `window_clipped=true`、`metrics_range`、`check/tls/interval/from/to/
+  bucket_seconds` 一并写进 `query_metadata`，供模型与验收核对（此前跨度是写死的，长度对不上）。
+- 所有请求的 `window_start/window_end` 必须与 `scope.window` 一致，否则 Manager 返回
+  `WINDOW_MISMATCH`——因此调用方**不得**自行重算时间窗（本轮修过 `graph._collect_live` 一处）。
+
+### C9.3 Memory Timeline 成为历史主轴
+
+- `ContextManager._memory_recall` 现在返回三类节点，同一窗口内按事件时间倒序：
+  1. `runtime_nodes`：Go `GetTimeline` 的运行时事件 → `TimelineNode` 视图
+     （`node_type` 由 `source` 映射：kubernetes→`kubernetes_change`、incident→`incident_transition`、
+     agent→`runtime_event`、其余→`diagnostic`），原始 `event_type` 存在
+     `source_locator.event_type` 以便过滤；**只投影、不复制原始行**。
+  2. `diagnosis_nodes`：旧 `episodes` 投影（`agent_diagnosis`），继续作为历史诊断记录与
+     向量召回来源，但不再是唯一轴。
+  3. `memory_attachment` / `memory_correction`：`timeline_attachments` 与
+     `episode_corrections`，只在开关打开时出现。
+- `TimelineRecallRequest` 的四个字段**现在都真实生效**：`time_start`/`time_end`（缺省继承父窗口）、
+  `event_types`（对节点 `event_type` 与纠正字段做交集过滤，过不到数据时返回 `empty` 而非静默全量）、
+  `include_attachments`、`include_corrected_history`。此前它们被签名接受但实现忽略。
+- `MemoryRepo` 新增 `list_diagnoses` / `list_attachments(until=)` / `list_corrections`；
+  `timeline_nodes()` 保留为**兼容投影**（既有测试与旧调用方仍可用）。
+- 纠错的窗口归属按**被纠正诊断**的 `started_at`（纠正动作可以晚于事件窗口发生），
+  否则窗口一收紧就查不到任何纠正。
+
+### C9.4 Fact Catalog 来源级提取（P3）
+
+- 事实提取统一走 `runtime/verify.py::fact_rows(source_type, payload)`：每个来源一张白名单，
+  Loki 只在结构化字段里取（时间戳/级别/错误码/受限状态），**日志正文与 samples 原文不再
+  递归成标量事实**；模型要看日志正文，引用 `evidence_id` 读原文。
+- `FactCatalogEntry` 的 `occurred_at/observed_at/recorded_at` 继承来源事实自带时间
+  （`_payload_time`），缺失或解析失败才回退到采集时间 `collected_at`。
+- `verification.passed` 的语义不变：只表示结构、身份、引用路径校验通过，不代表因果成立。
+
+### C9.5 Chat 与 Lead 共用六区块（P4）
+
+- `runtime/context.py` 新增 `build_chat_blocks()` / `build_chat_bundle()`：Chat 走**同一套**
+  块、层级、降级与六区块装配，只是叶子块换成 `system`/`chat.md`/`event`/`question`/`report`/
+  `evidence:*`/`prior`/`messages`。
+- `runtime/chat.py` 不再自拼字符串；`_SYSTEM` 删除，改由 `prompts/chat.md` 承担节点提示词。
+- `section_of()` 新增两条映射：`report`→`current_evidence`、`messages`→`current_task`，
+  使 Chat 与 Lead 的区块归属一致（Chat 里"我们刚聊了什么"属于当前任务）。
+- 验收：`tests/test_chat_context.py`（7 例）断言区块顺序与 Lead 相同、chat 提示词生效、
+  历史与问题进 `current_task`、无运行记录时不崩、引用 ID 来自已存报告。
