@@ -16,7 +16,7 @@ import json
 from datetime import datetime
 from typing import Iterable, Optional
 
-from alertflow_agent.runtime.verify import _scalars, build_catalog, verify as _verify_report
+from alertflow_agent.runtime.verify import build_catalog, fact_rows, verify as _verify_report
 from alertflow_agent.schemas.context import (
     CoverageGap,
     InvestigationScope,
@@ -24,6 +24,7 @@ from alertflow_agent.schemas.context import (
     SourceSystem,
     SourceType,
     TrustLevel,
+    ensure_utc,
 )
 from alertflow_agent.schemas.evidence import (
     EvidenceCandidate,
@@ -313,6 +314,7 @@ def _entry(fact_id: str, row: dict) -> FactCatalogEntry:
     else:
         value_type = "string"
     record: EvidenceRecord = row["record"]
+    # P3：事实自带的三个时间优先；缺失或解析失败才回退到记录采集时间。
     return FactCatalogEntry(
         fact_id=fact_id,
         evidence_id=row["evidence_id"],
@@ -320,12 +322,32 @@ def _entry(fact_id: str, row: dict) -> FactCatalogEntry:
         value=value,
         value_type=value_type,
         fact_kind=_fact_kind(record.source_type),
-        occurred_at=None,
-        observed_at=record.collected_at,
-        recorded_at=record.collected_at,
+        occurred_at=_payload_time(record.payload, "occurred_at") or record.collected_at,
+        observed_at=_payload_time(record.payload, "observed_at") or record.collected_at,
+        recorded_at=_payload_time(record.payload, "recorded_at") or record.collected_at,
         service_id=record.service_id,
         trust_level=record.trust_level,
     )
+
+
+def _payload_time(payload: dict, key: str) -> Optional[datetime]:
+    """payload 里的 ISO 时间；解析不了就返回 None，由调用方回退（绝不抛异常）。"""
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get(key)
+    if isinstance(raw, datetime):
+        value = raw
+    elif isinstance(raw, str) and raw.strip():
+        try:
+            value = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    try:
+        return ensure_utc(value)
+    except ValueError:
+        return None
 
 
 def _fact_kind(source_type: str) -> str:
@@ -340,48 +362,6 @@ def _fact_kind(source_type: str) -> str:
         "runbook": "expert_advice",
         "memory_reference": "metadata",
     }.get(source_type, "metadata")
-
-
-def _fact_payload(record: EvidenceRecord) -> dict:
-    """按来源类型归一化出可派生标量的 payload（不复制原文列表）。"""
-    data = dict(record.payload)
-    if record.source_type in ("prometheus", "loki"):
-        payload = {"query": data.get("query"), "limit": data.get("limit")}
-        for key in ("start", "end", "timestamp", "query_type", "lookback_seconds",
-                    "budget_seconds", "window_truncated", "value"):
-            if data.get(key) is not None:
-                payload[key] = data[key]
-        if isinstance(data.get("samples"), list):
-            payload["samples"] = data["samples"]
-        if isinstance(data.get("lines"), list):
-            payload["lines"] = data["lines"]
-        return payload
-    if record.source_type == "runbook":
-        payload = {
-            "schema": data.get("schema") or data.get("schema_version"),
-            "content": data.get("content") or data.get("summary"),
-            "citations_available": bool(data.get("citations_available")),
-            "source": data.get("source"),
-        }
-        if data.get("citations_available"):
-            payload["citations"] = data.get("citations") or []
-        return payload
-    if record.source_type == "kubernetes":
-        return {
-            key: data.get(key) for key in (
-                "cluster_id", "namespace", "kind", "name", "uid", "active",
-                "status", "resource_version", "fingerprint", "summary",
-            ) if data.get(key) is not None
-        }
-    if record.source_type == "timeline":
-        return {
-            key: data.get(key) for key in (
-                "source", "event_type", "severity", "title", "summary", "occurred_at",
-                "observed_at", "recorded_at", "cluster_id", "namespace",
-                "resource_kind", "resource_name", "resource_uid", "details",
-            ) if data.get(key) is not None
-        }
-    return data
 
 
 def _select_with_quota(rows: list[dict], max_facts: int) -> tuple[list[dict], dict[str, int], dict[str, int]]:
@@ -435,9 +415,9 @@ def _select_with_quota(rows: list[dict], max_facts: int) -> tuple[list[dict], di
 
 
 def _fact_rows(record: EvidenceRecord) -> list[tuple[str, object]]:
+    """按来源白名单提取事实；与 build_catalog 共用 fact_rows，两条路径同一套规则。"""
     try:
-        payload = _fact_payload(record)
-        return list(_scalars(payload))
+        return list(fact_rows(record.source_type, record.payload))
     except Exception:
         return []
 

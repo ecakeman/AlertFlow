@@ -7,21 +7,221 @@ _MAX_DEPTH = 4
 _MAX_LIST = 8
 _MAX_TEXT = 200
 
+# ---- P3：来源级事实提取 ------------------------------------------------------
+# fact 只允许来自 _FACT_FIELDS 显式列出的字段。payload 里的任意字符串不再被递归成
+# 事实：日志原文、模型摘要、HTML 之类的自由文本没有进入 catalog 的入口。
+# 白名单字段的值如果是 dict/list，仍用 _scalars 做有界展开（如 detail.pool_depth），
+# 但只有白名单字段可以被展开。
+
+# Loki 日志行允许提取的结构化键；顺序即事实顺序，保证确定性。
+_LOG_LINE_FIELDS = (
+    "ts", "time", "timestamp",
+    "level", "severity",
+    "status", "statusCode", "status_code",
+    "code", "error_code",
+    "method", "path", "uri",
+    "duration_ms", "latency_ms",
+    "pod", "namespace", "container",
+)
+# 这些字段里如果装的是 JSON 对象字符串（结构化日志行），解析后按上面的白名单提取。
+_LOG_TEXT_KEYS = ("line", "message", "msg", "log")
+_LOG_JSON_MAX_CHARS = 4096
+_LOG_LINE_MAX_KEYS = 5   # 单行最多 5 条事实
+_LOG_MAX_LINES = 20      # 最多检查前 20 行
+_LOG_MAX_FACTS = 30      # 单条 evidence 的日志事实总上限
+
+_FACT_FIELDS: dict[str, tuple[str, ...]] = {
+    # 单条 check 行；evt:resolve 复用 alertflow_incident，因此带上 resolve 字段。
+    "checks": (
+        "id", "kind", "name", "status", "statusCode", "status_code",
+        "error", "error_code", "latencyMs", "latency_ms", "duration_ms", "attempts",
+        "severity", "title", "ts", "occurred_at", "observed_at", "recorded_at",
+        "resolved_at", "duration_s",
+    ),
+    # 内部诊断 / analysis 聚合 / subagent review。
+    "diagnostic": (
+        "id", "kind", "name", "status", "status_code", "error", "error_code",
+        "severity", "summary", "suggestion",
+        "occurred_at", "observed_at", "recorded_at", "duration_s", "resolved_at",
+        "version", "env", "instance", "region", "uptime_s",
+        "detail", "attributes",
+        "window", "total", "online", "warning", "offline",
+        "recent", "baseline", "median_ratio", "warning_rows", "low_samples",
+        "no_baseline", "basis",
+        "classes", "top_errors", "status_codes", "attempts_hist",
+        "segments", "longest_offline_s", "transitions",
+        "last_success_before", "first_failure", "first_success_after",
+        "from", "to", "first_ts", "last_ts", "returned", "expected", "gaps",
+    ),
+    # Go 指标：series 永远不进 catalog，只暴露聚合 stats 与窗口。
+    "go_metric": (
+        "range", "samples", "from", "to",
+        "min_avg_latency", "max_avg_latency", "last_avg_latency", "stats",
+    ),
+    "timeline": (
+        "id", "kind", "name", "uid", "source", "event_type", "eventType",
+        "severity", "title", "summary", "status", "duration_s", "resolved_at",
+        "occurred_at", "observed_at", "recorded_at",
+        "cluster_id", "namespace", "resource_kind", "resource_name", "resource_uid",
+        "details", "sources", "query_from", "query_to",
+    ),
+    "kubernetes": (
+        "kind", "name", "namespace", "uid", "cluster_id", "status", "active",
+        "restarts", "ready", "resource_version", "fingerprint", "summary",
+        "labels", "annotations", "occurred_at", "observed_at", "recorded_at",
+    ),
+    # Prometheus：查询与窗口必须可回溯，值只取明确字段。
+    "prometheus": (
+        "query", "selector", "limit", "start", "end", "timestamp",
+        "query_type", "lookback_seconds", "budget_seconds", "window_truncated",
+        "value", "samples", "metric", "labels", "truncated",
+    ),
+    # Loki：value 是日志原文，绝不进 catalog；lines 只按 _LOG_LINE_FIELDS 提取。
+    "loki": (
+        "query", "selector", "limit", "start", "end", "timestamp",
+        "query_type", "lookback_seconds", "budget_seconds", "window_truncated",
+        "samples", "metric", "labels", "truncated", "lines",
+    ),
+    "runbook": (
+        "schema", "schema_version", "content", "summary",
+        "citations_available", "source", "citations",
+    ),
+    "memory_reference": (
+        "id", "service_id", "incident_id", "started_at", "ended_at",
+        "card", "status", "summary", "occurred_at", "observed_at", "recorded_at",
+    ),
+}
+
+# 没有 source_type 的旧 evidence 用 kind 兜底；未知来源不产生事实（不猜）。
+_KIND_SOURCES: dict[str, str] = {
+    "check": "checks",
+    "http_check": "checks",
+    "analysis": "diagnostic",
+    "comment": "diagnostic",
+    "service_info": "diagnostic",
+    "history_review": "diagnostic",
+    "tls": "diagnostic",
+    "coverage": "timeline",
+    "event": "timeline",
+    "incident": "timeline",
+    "resolve": "timeline",
+    "metric_series": "go_metric",
+    "runbook": "runbook",
+    "episode": "memory_reference",
+}
+
 
 def build_catalog(evidence: dict) -> list[dict]:
     """Scalar facts the model may cite. The model does not choose path or value."""
     rows = []
     for ident, item in evidence.items():
-        payload = _catalog_payload(ident, item or {})
-        if payload is None:
-            continue
-        for path, value in _scalars(payload):
+        item = item or {}
+        for path, value in fact_rows(item.get("source_type"), item.get("data"), item.get("kind")):
             rows.append({"evidence_id": ident, "path": path, "value": value})
     rows.sort(key=lambda row: (_priority(row["evidence_id"], evidence), row["evidence_id"], row["path"]))
     catalog = []
     for index, row in enumerate(rows[:_MAX_FACTS], start=1):
         catalog.append({"fact_id": f"f{index}", **row})
     return catalog
+
+
+def canonical_source(source_type: object, kind: object = None) -> str | None:
+    """把旧 source_type / kind 归一到 _FACT_FIELDS 的 key；认不出来就返回 None。"""
+    source = str(source_type or "")
+    if source in _FACT_FIELDS:
+        return source
+    if source:
+        # 旧 registry 的 source_type → SourceType 映射只在 evidence.SOURCE_MAP 里维护
+        # 一份，这里延迟导入避免 evidence.py ↔ verify.py 的循环依赖。
+        from alertflow_agent.runtime.evidence import SOURCE_MAP
+
+        mapped = SOURCE_MAP.get(source)
+        if mapped is not None and mapped[0] in _FACT_FIELDS:
+            return mapped[0]
+    fallback = _KIND_SOURCES.get(str(kind or ""))
+    return fallback if fallback in _FACT_FIELDS else None
+
+
+def fact_rows(source_type: object, payload: object, kind: object = None) -> list[tuple[str, object]]:
+    """单一事实提取入口：EvidenceManager 与 build_catalog 共用，避免两条路径松紧不一。"""
+    source = canonical_source(source_type, kind)
+    if source is None or not isinstance(payload, dict):
+        return []
+    rows: list[tuple[str, object]] = []
+    for field in _FACT_FIELDS[source]:
+        if field not in payload:
+            continue
+        value = payload[field]
+        if source == "loki" and field == "lines":
+            rows.extend(_log_rows(value))
+        elif isinstance(value, (dict, list)):
+            rows.extend(_scalars({field: value}))
+        elif _is_fact_scalar(value):
+            rows.append((field, value))
+    return rows
+
+
+def _is_fact_scalar(value: object) -> bool:
+    if isinstance(value, (bool, int)):
+        return True
+    if isinstance(value, float):
+        return value == value  # NaN 不是事实
+    if isinstance(value, str):
+        return 0 < len(value) <= _MAX_TEXT
+    return False
+
+
+def _log_rows(lines: object) -> list[tuple[str, object]]:
+    """日志只提结构化字段；普通文本行不提事实（原文仍可通过 evidence_id 引用）。"""
+    if not isinstance(lines, list):
+        # MCP 摘要里 lines 是命中行数，保留成一条计数事实。
+        return [("lines", lines)] if _is_fact_scalar(lines) else []
+    rows: list[tuple[str, object]] = []
+    budget = _LOG_MAX_FACTS
+    for index, entry in enumerate(lines):
+        if index >= _LOG_MAX_LINES or budget <= 0:
+            break
+        fields = _structured_log_fields(entry)
+        taken = 0
+        for key in _LOG_LINE_FIELDS:
+            if taken >= _LOG_LINE_MAX_KEYS or budget <= 0:
+                break
+            if key not in fields or not _is_fact_scalar(fields[key]):
+                continue
+            rows.append((f"lines.{index}.{key}", fields[key]))
+            taken += 1
+            budget -= 1
+    return rows
+
+
+def _structured_log_fields(entry: object) -> dict:
+    """提取一行日志里白名单内的结构化键；普通文本行返回空 dict。"""
+    if isinstance(entry, str):
+        return _json_fields(entry)
+    if not isinstance(entry, dict):
+        return {}
+    fields = {key: entry[key] for key in _LOG_LINE_FIELDS if key in entry}
+    for text_key in _LOG_TEXT_KEYS:
+        text = entry.get(text_key)
+        if not isinstance(text, str):
+            continue
+        for key, value in _json_fields(text).items():
+            fields.setdefault(key, value)
+        break
+    return fields
+
+
+def _json_fields(text: str) -> dict:
+    snippet = text.strip()
+    if not snippet.startswith("{") or len(snippet) > _LOG_JSON_MAX_CHARS:
+        return {}
+    try:
+        parsed = json.loads(snippet)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {key: parsed[key] for key in _LOG_LINE_FIELDS if key in parsed}
 
 
 def _priority(ident: str, evidence: dict) -> int:
@@ -88,50 +288,8 @@ def cited(report: dict) -> set[str]:
     return ids
 
 
-def _catalog_payload(ident: str, item: dict):
-    kind = item.get("kind")
-    data = item.get("data") or {}
-    if ident == "evt:resolve" or kind == "resolve":
-        return data
-    if kind in {"http_check", "analysis", "tls", "service_info"}:
-        return data
-    if item.get("source_type") == "runbook":
-        payload = {
-            "schema": data.get("schema"),
-            "content": data.get("content"),
-            "citations_available": bool(data.get("citations_available")),
-            "source": data.get("source"),
-        }
-        if data.get("citations_available"):
-            payload["citations"] = data.get("citations") or []
-        return payload
-    if item.get("source_type") in {"prometheus", "loki"}:
-        payload = {
-            "query": data.get("query"),
-            "limit": data.get("limit"),
-        }
-        for key in ("start", "end", "timestamp", "query_type", "lookback_seconds", "budget_seconds", "window_truncated"):
-            if data.get(key) is not None:
-                payload[key] = data[key]
-        if "samples" in data:
-            payload["samples"] = data["samples"]
-        if "lines" in data:
-            payload["lines"] = data["lines"]
-        if data.get("value") is not None:
-            payload["value"] = data["value"]
-        return payload
-    if item.get("source_type") == "project_diagnostic":
-        # Internal evidence (v2): identity and state plus the structured detail,
-        # so pool depths, dependency latencies, error counts, etc. become citable.
-        payload = {"name": data.get("name"), "status": data.get("status")}
-        detail = data.get("detail")
-        if isinstance(detail, dict):
-            payload.update(detail)
-        return payload
-    return None
-
-
 def _scalars(data, prefix: str = "", depth: int = 0) -> list[tuple[str, object]]:
+    """有界展开单个白名单字段；调用方已经决定哪些字段可以进来。"""
     if depth > _MAX_DEPTH:
         return []
     if isinstance(data, dict):
@@ -150,13 +308,8 @@ def _scalars(data, prefix: str = "", depth: int = 0) -> list[tuple[str, object]]
             path = f"{prefix}.{index}" if prefix else str(index)
             found.extend(_scalars(value, path, depth + 1))
         return found
-    if isinstance(data, bool) or isinstance(data, (int, float, str)):
-        if isinstance(data, float) and data != data:
-            return []
-        if isinstance(data, str) and len(data) > _MAX_TEXT:
-            return []
-        if prefix:
-            return [(prefix, data)]
+    if prefix and _is_fact_scalar(data):
+        return [(prefix, data)]
     return []
 
 

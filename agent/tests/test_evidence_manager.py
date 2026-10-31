@@ -107,12 +107,12 @@ def test_candidate_cannot_report_its_own_evidence_id():
 
 @pytest.mark.parametrize("source_type,source_system,payload,path", [
     ("checks", "alertflow_grpc", {"status": "failing", "latency_ms": 1200}, "latency_ms"),
-    ("diagnostic", "alertflow_grpc", {"status": "ok", "name": "pool", "pool_depth": 4}, "pool_depth"),
+    ("diagnostic", "alertflow_grpc", {"status": "ok", "name": "pool", "detail": {"pool_depth": 4}}, "detail.pool_depth"),
     ("timeline", "alertflow_grpc", {"event_type": "PodRestart", "summary": "restarted"}, "event_type"),
     ("kubernetes", "alertflow_grpc", {"kind": "Pod", "name": "api-1", "active": True}, "active"),
     ("go_metric", "alertflow_grpc", {"stats": {"p95": 900}}, "stats.p95"),
     ("prometheus", "prometheus_mcp", {"query": "up", "value": "0"}, "value"),
-    ("loki", "loki_mcp", {"query": "{app=\"api\"}", "lines": [{"line": "boom"}]}, "lines.0.line"),
+    ("loki", "loki_mcp", {"query": "{app=\"api\"}", "lines": [{"ts": 1, "line": "boom"}]}, "lines.0.ts"),
     ("runbook", "ragflow_a2a", {"schema": "runbook-research.v1", "content": "restart",
                                 "citations_available": False, "source": "ragflow"}, "content"),
 ])
