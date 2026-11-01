@@ -1,0 +1,177 @@
+syntax = "proto3";
+
+package alertflow.agent.v1;
+
+option go_package = "github.com/ecakeman/alertflow/gen/agent/v1;agentv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+service AgentExecutionService {
+  // Go 提交一个已经持久化的 AgentTask。
+  rpc SubmitTask(SubmitTaskRequest) returns (SubmitTaskResponse);
+  // Go 的管理查询接口需要读取产物全文时，代理调用 Python。
+  rpc GetArtifact(GetArtifactRequest) returns (GetArtifactResponse);
+}
+
+service SystemGatewayService {
+  // Python 获取任务对应的固定输入版本快照与批次通知。
+  rpc GetEpisodeInput(GetEpisodeInputRequest) returns (GetEpisodeInputResponse);
+
+  // query_timeline 工具调用此接口，读取固定版本边界内的数据。
+  rpc QueryTimeline(QueryTimelineRequest) returns (QueryTimelineResponse);
+
+  // Python 保存产物内容后，将引用和版本元数据登记到 Go。
+  rpc RegisterArtifact(RegisterArtifactRequest) returns (RegisterArtifactResponse);
+
+  // Agent 任务执行状态回报。
+  rpc ReportTaskStarted(ReportTaskStartedRequest) returns (TaskAck);
+  rpc HeartbeatTask(HeartbeatTaskRequest) returns (TaskAck);
+  rpc CompleteTask(CompleteTaskRequest) returns (TaskAck);
+}
+
+enum AgentTaskType {
+  AGENT_TASK_TYPE_UNSPECIFIED = 0;
+  AGENT_TASK_TYPE_DIAGNOSIS = 1;
+  AGENT_TASK_TYPE_ARCHIVE = 2;
+}
+
+enum ArtifactType {
+  ARTIFACT_TYPE_UNSPECIFIED = 0;
+  ARTIFACT_TYPE_INVESTIGATION = 1;
+  ARTIFACT_TYPE_DIAGNOSIS_REPORT = 2;
+}
+
+message InputVersionNotice {
+  int64 input_version = 1;
+  string input_hash = 2;
+  repeated string changed_monitor_point_ids = 3;
+  repeated string changed_app_event_ids = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+message SubmitTaskRequest {
+  string task_id = 1;
+  string episode_id = 2;
+  AgentTaskType task_type = 3;
+  int64 input_version_from = 4;
+  int64 input_version_to = 5;
+  int64 final_input_version = 6;
+  int64 execution_generation = 7;
+  int32 schema_version = 8;
+  repeated InputVersionNotice notifications = 9;
+}
+
+message SubmitTaskResponse {
+  bool accepted = 1;
+  bool duplicate = 2;
+  string task_id = 3;
+  string receipt_status = 4;
+  string message = 5;
+}
+
+message GetEpisodeInputRequest {
+  string task_id = 1;
+  string episode_id = 2;
+  int64 target_input_version = 3;
+  int64 execution_generation = 4;
+}
+
+message GetEpisodeInputResponse {
+  string episode_id = 1;
+  string service_id = 2;
+  string service_name = 3;
+  int64 input_version = 4;
+  string input_hash = 5;
+  google.protobuf.Struct monitor_projection = 6;
+  int64 monitor_point_watermark = 7;
+  int64 app_event_watermark = 8;
+  google.protobuf.Timestamp episode_started_at = 9;
+}
+
+message QueryTimelineRequest {
+  string task_id = 1;
+  string episode_id = 2;
+  int64 target_input_version = 3;
+  int64 execution_generation = 4;
+  google.protobuf.Timestamp start_time = 5;
+  google.protobuf.Timestamp end_time = 6;
+  repeated string monitor_point_ids = 7;
+  repeated string app_event_ids = 8;
+}
+
+message TimelineRecord {
+  string record_type = 1;
+  string record_id = 2;
+  google.protobuf.Timestamp event_time = 3;
+  google.protobuf.Timestamp received_at = 4;
+  string source = 5;
+  google.protobuf.Struct content = 6;
+}
+
+message QueryTimelineResponse {
+  string episode_id = 1;
+  int64 target_input_version = 2;
+  repeated TimelineRecord records = 3;
+}
+
+message GetArtifactRequest {
+  string episode_id = 1;
+  ArtifactType artifact_type = 2;
+  int64 expected_version = 3;
+}
+
+message GetArtifactResponse {
+  ArtifactType artifact_type = 1;
+  int64 version = 2;
+  string content_type = 3;
+  string content_text = 4;
+  google.protobuf.Struct content_json = 5;
+  string content_hash = 6;
+}
+
+message RegisterArtifactRequest {
+  string task_id = 1;
+  string episode_id = 2;
+  ArtifactType artifact_type = 3;
+  int64 execution_generation = 4;
+  int64 artifact_version = 5;
+  string storage_key = 6;
+  string content_type = 7;
+  string content_hash = 8;
+}
+
+message RegisterArtifactResponse {
+  bool registered = 1;
+  int64 artifact_version = 2;
+}
+
+message ReportTaskStartedRequest {
+  string task_id = 1;
+  string episode_id = 2;
+  int64 execution_generation = 3;
+}
+
+message HeartbeatTaskRequest {
+  string task_id = 1;
+  string episode_id = 2;
+  int64 execution_generation = 3;
+}
+
+message CompleteTaskRequest {
+  string task_id = 1;
+  string episode_id = 2;
+  AgentTaskType task_type = 3;
+  int64 execution_generation = 4;
+  string outcome = 5;
+  int64 processed_input_version = 6;
+  string fd_id = 7;
+  string error_code = 8;
+  string error_message = 9;
+}
+
+message TaskAck {
+  bool accepted = 1;
+  string task_id = 2;
+  string message = 3;
+}

@@ -1,0 +1,14 @@
+FROM golang:1.25.7-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+ENV GOPROXY=https://goproxy.cn,direct
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/alertflow ./backend/cmd/alertflow
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/alertflow /usr/local/bin/alertflow
+EXPOSE 8080 9090
+HEALTHCHECK --interval=2s --timeout=3s --retries=30 CMD curl -fsS http://127.0.0.1:8080/healthz
+ENTRYPOINT ["alertflow"]

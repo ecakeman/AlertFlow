@@ -1,0 +1,73 @@
+name: alertflow-plus
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: alertflow
+      POSTGRES_PASSWORD: alertflow
+      POSTGRES_DB: alertflow
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alertflow"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  kafka:
+    image: apache/kafka:3.9.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+
+  redis:
+    image: redis:7.4.2
+
+  fault:
+    image: python:3.12-slim-bookworm
+    command: ["python", "/fault.py"]
+    volumes:
+      - ./fault.py:/fault.py:ro
+
+  alertflow:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    environment:
+      ALERTFLOW_DATABASE_URL: postgres://alertflow:alertflow@postgres:5432/alertflow?sslmode=disable
+      ALERTFLOW_HTTP_ADDR: :8080
+      ALERTFLOW_GRPC_ADDR: :9090
+      ALERTFLOW_KAFKA_BROKERS: kafka:9092
+      ALERTFLOW_KAFKA_TOPIC: alertflow.agent-task-ready.v1
+      ALERTFLOW_AGENT_GRPC_TARGET: agent:9000
+      ALERTFLOW_REDIS_URL: redis://redis:6379/0
+    ports:
+      - "18080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  agent:
+    build:
+      context: ../agent
+      dockerfile: ../deploy/Dockerfile.agent
+    environment:
+      ALERTFLOW_DATABASE_URL: postgres://alertflow:alertflow@postgres:5432/alertflow?sslmode=disable
+      ALERTFLOW_GRPC_TARGET: alertflow:9090
+      AGENT_GRPC_ADDR: 0.0.0.0:9000
+      PYTHONPATH: /app/src
+      PYTHONUNBUFFERED: "1"
+    depends_on:
+      alertflow:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy

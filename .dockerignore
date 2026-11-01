@@ -1,0 +1,6 @@
+agent/.venv
+agent/dist
+**/.pytest_cache
+**/__pycache__
+**/*.pyc
+.git
