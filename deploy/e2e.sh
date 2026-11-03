@@ -11,6 +11,18 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 curl --noproxy '*' -sf http://127.0.0.1:18080/healthz >/dev/null
+for _ in $(seq 1 30); do
+  if docker compose exec -T agent python -c 'import sys, urllib.request
+try:
+    urllib.request.urlopen("http://127.0.0.1:8000/health/live", timeout=2).read()
+    urllib.request.urlopen("http://127.0.0.1:8000/health/ready", timeout=2).read()
+except Exception:
+    sys.exit(1)'; then
+    break
+  fi
+  sleep 2
+done
+docker compose exec -T agent python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health/live", timeout=2).read(); urllib.request.urlopen("http://127.0.0.1:8000/health/ready", timeout=2).read()'
 
 KEY="orders-$(date +%s)"
 BODY=$(curl --noproxy '*' -sf -X POST http://127.0.0.1:18080/api/v1/services \
@@ -60,12 +72,21 @@ if [[ "$STATUS" != "ARCHIVED" ]]; then
 fi
 
 docker compose exec -T agent python - <<PY
+import asyncio
 import os
 from alertflow_agent.fd import connect, search_faults
-conn = connect(os.environ["ALERTFLOW_DATABASE_URL"])
-hits = search_faults(conn, "${SID}", "pool exhausted")
-assert hits, "fd was not retrieved"
-assert hits[0]["service_id"] == "${SID}"
-print(hits[0]["fd_id"])
+
+async def main():
+    conn = await connect(os.environ["ALERTFLOW_DATABASE_URL"])
+    try:
+        hits = await search_faults(conn, "${SID}", "pool exhausted")
+    finally:
+        await conn.close()
+    assert hits, "fd was not retrieved"
+    matched = [hit for hit in hits if hit["service_id"] == "${SID}"]
+    assert matched, hits
+    print(matched[0]["fd_id"])
+
+asyncio.run(main())
 PY
 echo "e2e archived ${EP}"

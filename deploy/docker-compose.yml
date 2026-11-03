@@ -64,6 +64,7 @@ services:
       ALERTFLOW_DATABASE_URL: postgres://alertflow:alertflow@postgres:5432/alertflow?sslmode=disable
       ALERTFLOW_GRPC_TARGET: alertflow:9090
       AGENT_GRPC_ADDR: 0.0.0.0:9000
+      AGENT_HTTP_ADDR: 0.0.0.0:8000
       PYTHONPATH: /app/src
       PYTHONUNBUFFERED: "1"
     depends_on:

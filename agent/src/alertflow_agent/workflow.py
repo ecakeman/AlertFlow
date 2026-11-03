@@ -1,17 +1,15 @@
+import inspect
 import json
 import os
-import urllib.request
 from datetime import datetime, timedelta, timezone
-from typing import Any
 
+import httpx
 from langgraph.graph import END, StateGraph
 
 from alertflow_agent.artifacts import read_artifact, render_investigation, write_artifact
 from alertflow_agent.schemas import DiagnosisReport, FaultSearchIndex, QueryTimelineInput, SearchFaultsInput
 
-
-class DiagnosisState(dict):
-    pass
+RPC_TIMEOUT = 60
 
 
 class ScriptedModel:
@@ -40,36 +38,30 @@ class ScriptedModel:
 
 
 class OpenAICompatibleModel:
-    def __init__(self, base_url: str, api_key: str, model: str):
+    def __init__(self, base_url: str, api_key: str, model: str, client: httpx.AsyncClient | None = None):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
+        self.client = client
 
-    def next_action(self, state: dict) -> dict:
+    async def next_action(self, state: dict) -> dict:
         prompt = {
             "instruction": "只输出 JSON。action 取 query_timeline、search_faults 或 finish。finish 时 report 必须含 summary、observations、hypotheses、unknowns、next_steps。",
             "state": {k: state.get(k) for k in ("episode_id", "service_name", "input_version_from", "input_version_to", "timeline_called", "search_called", "timeline_records", "search_hits")},
         }
-        body = json.dumps({
+        body = {
             "model": self.model,
             "messages": [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False, default=str)}],
             "response_format": {"type": "json_object"},
-        }).encode()
-        req = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
-            data=body,
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            payload = json.loads(resp.read().decode())
-        content = payload["choices"][0]["message"]["content"]
-        action = json.loads(content)
+        }
+        payload = await _post_json(self.client, f"{self.base_url}/chat/completions", body, self.api_key)
+        action = json.loads(payload["choices"][0]["message"]["content"])
         if action.get("type") == "finish":
             DiagnosisReport.model_validate(action["report"])
         return action
 
 
-def model_from_env():
+def model_from_env(client: httpx.AsyncClient | None = None):
     key = os.environ.get("ALERTFLOW_LLM_API_KEY", "")
     if not key:
         return ScriptedModel()
@@ -77,23 +69,31 @@ def model_from_env():
         os.environ.get("ALERTFLOW_LLM_BASE_URL", "https://api.openai.com/v1"),
         key,
         os.environ.get("ALERTFLOW_LLM_MODEL", "gpt-4o-mini"),
+        client,
     )
+
+
+async def _call_action(model, state: dict) -> dict:
+    action = model.next_action(state)
+    if inspect.isawaitable(action):
+        action = await action
+    return action
 
 
 def build_diagnosis_graph(model, gateway, checkpointer=None):
     graph = StateGraph(dict)
 
-    def load(state: dict):
-        existing = read_artifact(gateway.db, state["episode_id"], "INVESTIGATION")
+    async def load(state: dict):
+        existing = await read_artifact(gateway.db, state["episode_id"], "INVESTIGATION")
         state["investigation_revision"] = 0 if existing is None else existing["version"]
         state["current_stage"] = "decide"
         return state
 
-    def decide(state: dict):
+    async def decide(state: dict):
         if state.get("tool_rounds", 0) >= 4:
             action = ScriptedModel().next_action({**state, "timeline_called": True, "search_called": True})
         else:
-            action = model.next_action(state)
+            action = await _call_action(model, state)
         state["action"] = action
         state["current_stage"] = action["type"]
         return state
@@ -101,7 +101,7 @@ def build_diagnosis_graph(model, gateway, checkpointer=None):
     def route(state: dict) -> str:
         return state["action"]["type"]
 
-    def query_node(state: dict):
+    async def query_node(state: dict):
         started = state.get("episode_started_at") or datetime.now(timezone.utc).isoformat()
         start = datetime.fromisoformat(started)
         if start.tzinfo is None:
@@ -112,43 +112,44 @@ def build_diagnosis_graph(model, gateway, checkpointer=None):
             monitor_point_ids=state.get("monitor_point_ids") or [],
             app_event_ids=state.get("app_event_ids") or [],
         )
-        records = gateway.query_timeline(state, parsed)
+        records = await gateway.query_timeline(state, parsed)
         state["timeline_records"] = records
         state["timeline_called"] = True
         state["tool_rounds"] = state.get("tool_rounds", 0) + 1
         state["current_stage"] = "decide"
         return state
 
-    def search_node(state: dict):
+    async def search_node(state: dict):
         query = SearchFaultsInput(query=state["action"].get("query") or "abnormal")
-        state["search_hits"] = gateway.search_faults(state, query.query)
+        state["search_hits"] = await gateway.search_faults(state, query.query)
         state["search_called"] = True
         state["tool_rounds"] = state.get("tool_rounds", 0) + 1
         state["current_stage"] = "decide"
         return state
 
-    def write_node(state: dict):
+    async def write_node(state: dict):
         report = DiagnosisReport.model_validate(state["action"]["report"])
         findings = json.dumps(state.get("timeline_records") or [], ensure_ascii=False, default=str)[:4000]
+        existing = await read_artifact(gateway.db, state["episode_id"], "INVESTIGATION")
         text = render_investigation(
             state.get("service_name") or "",
             state.get("episode_started_at") or "",
-            (read_artifact(gateway.db, state["episode_id"], "INVESTIGATION") or {}).get("content_text"),
+            (existing or {}).get("content_text"),
             state["task_id"], state["execution_generation"], findings,
             report.summary, "\n".join(f"- {item}" for item in report.unknowns) or "无",
         )
-        current = read_artifact(gateway.db, state["episode_id"], "INVESTIGATION")
+        current = await read_artifact(gateway.db, state["episode_id"], "INVESTIGATION")
         expected = None if current is None else current["version"]
-        saved = write_artifact(gateway.db, state["episode_id"], "INVESTIGATION", "MARKDOWN", text, None,
-                               state["task_id"], state["execution_generation"], expected)
-        gateway.register_artifact(state, "INVESTIGATION", saved["version"], "MARKDOWN", saved["content_hash"])
-        report_current = read_artifact(gateway.db, state["episode_id"], "DIAGNOSIS_REPORT")
+        saved = await write_artifact(gateway.db, state["episode_id"], "INVESTIGATION", "MARKDOWN", text, None,
+                                     state["task_id"], state["execution_generation"], expected)
+        await gateway.register_artifact(state, "INVESTIGATION", saved["version"], "MARKDOWN", saved["content_hash"])
+        report_current = await read_artifact(gateway.db, state["episode_id"], "DIAGNOSIS_REPORT")
         report_expected = None if report_current is None else report_current["version"]
-        report_saved = write_artifact(
+        report_saved = await write_artifact(
             gateway.db, state["episode_id"], "DIAGNOSIS_REPORT", "JSON", None, report.model_dump(),
             state["task_id"], state["execution_generation"], report_expected,
         )
-        gateway.register_artifact(state, "DIAGNOSIS_REPORT", report_saved["version"], "JSON", report_saved["content_hash"])
+        await gateway.register_artifact(state, "DIAGNOSIS_REPORT", report_saved["version"], "JSON", report_saved["content_hash"])
         state["investigation_revision"] = saved["version"]
         state["report_revision"] = report_saved["version"]
         state["current_stage"] = "done"
@@ -168,7 +169,7 @@ def build_diagnosis_graph(model, gateway, checkpointer=None):
     return graph.compile(checkpointer=checkpointer)
 
 
-def run_diagnosis(model, gateway, task: dict, checkpointer=None) -> dict:
+async def run_diagnosis(model, gateway, task: dict, checkpointer=None) -> dict:
     app = build_diagnosis_graph(model, gateway, checkpointer)
     state = {
         "episode_id": task["episode_id"],
@@ -184,19 +185,24 @@ def run_diagnosis(model, gateway, task: dict, checkpointer=None) -> dict:
         "tool_rounds": 0,
         "current_stage": "load",
     }
-    return app.invoke(state, config={"configurable": {"thread_id": task["thread_id"]}})
+    return await app.ainvoke(state, config={"configurable": {"thread_id": task["thread_id"]}})
 
 
-def run_archive(model, gateway, task: dict) -> str:
-    investigation = read_artifact(gateway.db, task["episode_id"], "INVESTIGATION") or {}
-    report_row = read_artifact(gateway.db, task["episode_id"], "DIAGNOSIS_REPORT") or {}
+async def run_archive(model, gateway, task: dict) -> str:
+    investigation = await read_artifact(gateway.db, task["episode_id"], "INVESTIGATION") or {}
+    report_row = await read_artifact(gateway.db, task["episode_id"], "DIAGNOSIS_REPORT") or {}
     report = report_row.get("content_json") or {}
     index = model.extract_index(investigation.get("content_text") or "", report)
-    return gateway.save_fault(task, investigation.get("content_text") or "", report, index)
+    if inspect.isawaitable(index):
+        index = await index
+    return await gateway.save_fault(task, investigation.get("content_text") or "", report, index)
 
 
 class ArchiveModel:
-    def extract_index(self, investigation: str, report: dict) -> FaultSearchIndex:
+    def __init__(self, client: httpx.AsyncClient | None = None):
+        self.client = client
+
+    def extract_index(self, investigation: str, report: dict):
         if os.environ.get("ALERTFLOW_LLM_API_KEY"):
             return self._remote(investigation, report)
         return FaultSearchIndex(
@@ -206,13 +212,14 @@ class ArchiveModel:
             diagnosis=list(report.get("hypotheses") or []),
         )
 
-    def _remote(self, investigation: str, report: dict) -> FaultSearchIndex:
+    async def _remote(self, investigation: str, report: dict) -> FaultSearchIndex:
         model = OpenAICompatibleModel(
             os.environ.get("ALERTFLOW_LLM_BASE_URL", "https://api.openai.com/v1"),
             os.environ["ALERTFLOW_LLM_API_KEY"],
             os.environ.get("ALERTFLOW_LLM_MODEL", "gpt-4o-mini"),
+            self.client,
         )
-        body = json.dumps({
+        body = {
             "model": model.model,
             "messages": [{"role": "user", "content": json.dumps({
                 "instruction": "只根据材料提取 FaultSearchIndex，字段 summary,symptoms,observations,diagnosis。不要新增分类字段。",
@@ -220,11 +227,17 @@ class ArchiveModel:
                 "diagnosis_report": report,
             }, ensure_ascii=False)}],
             "response_format": {"type": "json_object"},
-        }).encode()
-        req = urllib.request.Request(
-            f"{model.base_url}/chat/completions", data=body,
-            headers={"Authorization": f"Bearer {model.api_key}", "Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            payload = json.loads(resp.read().decode())
+        }
+        payload = await _post_json(model.client, f"{model.base_url}/chat/completions", body, model.api_key)
         return FaultSearchIndex.model_validate(json.loads(payload["choices"][0]["message"]["content"]))
+
+
+async def _post_json(client: httpx.AsyncClient | None, url: str, body: dict, api_key: str) -> dict:
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    if client is None:
+        async with httpx.AsyncClient(timeout=RPC_TIMEOUT) as owned:
+            response = await owned.post(url, json=body, headers=headers)
+    else:
+        response = await client.post(url, json=body, headers=headers)
+    response.raise_for_status()
+    return response.json()

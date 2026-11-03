@@ -1,4 +1,4 @@
-from alertflow_agent.runtime import serve
+from alertflow_agent.runtime import main
 
 if __name__ == "__main__":
-    serve()
+    main()

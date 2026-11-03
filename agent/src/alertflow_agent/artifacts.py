@@ -8,9 +8,17 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-def read_artifact(conn, episode_id: str, artifact_type: str) -> dict | None:
-    with conn.cursor() as cur:
-        cur.execute(
+def _json(value):
+    import psycopg
+
+    if value is None:
+        return None
+    return psycopg.types.json.Json(value)
+
+
+async def read_artifact(conn, episode_id: str, artifact_type: str) -> dict | None:
+    async with conn.cursor() as cur:
+        await cur.execute(
             """
             SELECT version, content_type, content_text, content_json, content_hash, execution_generation
             FROM cognitive.episode_artifacts
@@ -18,7 +26,7 @@ def read_artifact(conn, episode_id: str, artifact_type: str) -> dict | None:
             """,
             (episode_id, artifact_type),
         )
-        row = cur.fetchone()
+        row = await cur.fetchone()
     if row is None:
         return None
     return {
@@ -31,11 +39,11 @@ def read_artifact(conn, episode_id: str, artifact_type: str) -> dict | None:
     }
 
 
-def write_artifact(conn, episode_id: str, artifact_type: str, content_type: str, content_text: str | None,
-                   content_json, task_id: str, generation: int, expected_version: int | None) -> dict:
+async def write_artifact(conn, episode_id: str, artifact_type: str, content_type: str, content_text: str | None,
+                         content_json, task_id: str, generation: int, expected_version: int | None) -> dict:
     digest_source = content_text if content_text is not None else str(content_json)
     digest = content_hash(digest_source)
-    current = read_artifact(conn, episode_id, artifact_type)
+    current = await read_artifact(conn, episode_id, artifact_type)
     now = _now()
     if current and current["content_hash"] == digest and current["version"] == (expected_version or current["version"]):
         return current
@@ -43,8 +51,8 @@ def write_artifact(conn, episode_id: str, artifact_type: str, content_type: str,
         version = 1
         if expected_version not in (None, 0):
             raise ValueError("artifact version conflict")
-        with conn.cursor() as cur:
-            cur.execute(
+        async with conn.cursor() as cur:
+            await cur.execute(
                 """
                 INSERT INTO cognitive.episode_artifacts
                 (episode_id, artifact_type, version, content_type, content_text, content_json, content_hash,
@@ -57,8 +65,8 @@ def write_artifact(conn, episode_id: str, artifact_type: str, content_type: str,
         if expected_version is not None and current["version"] != expected_version:
             raise ValueError("artifact version conflict")
         version = current["version"] + 1
-        with conn.cursor() as cur:
-            cur.execute(
+        async with conn.cursor() as cur:
+            await cur.execute(
                 """
                 UPDATE cognitive.episode_artifacts
                 SET version=%s, content_type=%s, content_text=%s, content_json=%s::jsonb, content_hash=%s,
@@ -70,16 +78,11 @@ def write_artifact(conn, episode_id: str, artifact_type: str, content_type: str,
             )
             if cur.rowcount != 1:
                 raise ValueError("artifact version conflict")
-    conn.commit()
-    return read_artifact(conn, episode_id, artifact_type)
-
-
-def _json(value):
-    import psycopg
-
-    if value is None:
-        return None
-    return psycopg.types.json.Json(value)
+    await conn.commit()
+    saved = await read_artifact(conn, episode_id, artifact_type)
+    if saved is None:
+        raise RuntimeError("artifact write was not visible")
+    return saved
 
 
 def investigation_round_marker(task_id: str, generation: int) -> str:

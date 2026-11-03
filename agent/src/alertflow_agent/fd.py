@@ -2,18 +2,10 @@ import os
 from datetime import datetime, timezone
 
 import psycopg
-from pgvector.psycopg import register_vector
+from pgvector.psycopg import register_vector_async
 
 from alertflow_agent.schemas import FaultSearchIndex
 from alertflow_agent.textutil import embed, rrf, search_text, segment, token_overlap
-
-FD_NAMESPACE = "6f0c1a4e-1b3a-4b8e-9c1a-alertflowfd"[:36]
-
-
-def connect(dsn: str | None = None):
-    conn = psycopg.connect(dsn or os.environ["ALERTFLOW_DATABASE_URL"])
-    register_vector(conn)
-    return conn
 
 
 def stable_fd_id(episode_id: str) -> str:
@@ -22,13 +14,19 @@ def stable_fd_id(episode_id: str) -> str:
     return str(uuid.uuid5(uuid.UUID("6f0c1a4e-1b3a-4b8e-9c1a-0000000000fd"), episode_id))
 
 
-def save_fault_document(conn, episode_id: str, service_id: str, investigation: str, report: dict, index: FaultSearchIndex) -> str:
+async def connect(dsn: str | None = None):
+    conn = await psycopg.AsyncConnection.connect(dsn or os.environ["ALERTFLOW_DATABASE_URL"])
+    await register_vector_async(conn)
+    return conn
+
+
+async def save_fault_document(conn, episode_id: str, service_id: str, investigation: str, report: dict, index: FaultSearchIndex) -> str:
     fd_id = stable_fd_id(episode_id)
     text = search_text(index.summary, index.symptoms, index.observations, index.diagnosis)
     vector = embed(text)
     now = datetime.now(timezone.utc)
-    with conn.cursor() as cur:
-        cur.execute(
+    async with conn.cursor() as cur:
+        await cur.execute(
             """
             INSERT INTO cognitive.fault_documents
             (fd_id, episode_id, service_id, archived_at, investigation_content, diagnosis_report,
@@ -51,8 +49,8 @@ def save_fault_document(conn, episode_id: str, service_id: str, investigation: s
              psycopg.types.json.Json(index.model_dump()), text, segment(text), vector,
              "deterministic-v1", now, now),
         )
-        stored = cur.fetchone()[0]
-        cur.execute(
+        stored = (await cur.fetchone())[0]
+        await cur.execute(
             """
             UPDATE cognitive.fault_documents
             SET index_status='READY', updated_at=%s
@@ -60,35 +58,36 @@ def save_fault_document(conn, episode_id: str, service_id: str, investigation: s
             """,
             (now, stored),
         )
-    conn.commit()
+    await conn.commit()
     return str(stored)
 
 
-def _ranked(conn, sql: str, params: tuple) -> list[str]:
-    with conn.cursor() as cur:
-        cur.execute(sql, params)
-        return [str(row[0]) for row in cur.fetchall()]
+async def _ranked(conn, sql: str, params: tuple) -> list[str]:
+    async with conn.cursor() as cur:
+        await cur.execute(sql, params)
+        rows = await cur.fetchall()
+    return [str(row[0]) for row in rows]
 
 
-def search_faults(conn, service_id: str, query: str, top_k: int = 5) -> list[dict]:
+async def search_faults(conn, service_id: str, query: str, top_k: int = 5) -> list[dict]:
     q = segment(query)
     vector = embed(query)
-    same_bm25 = _ranked(conn, """
+    same_bm25 = await _ranked(conn, """
         SELECT fd_id FROM cognitive.fault_documents
         WHERE service_id=%s AND index_status='READY' AND search_vector @@ plainto_tsquery('simple', %s)
         ORDER BY ts_rank_cd(search_vector, plainto_tsquery('simple', %s)) DESC LIMIT 20
     """, (service_id, q, q))
-    other_bm25 = _ranked(conn, """
+    other_bm25 = await _ranked(conn, """
         SELECT fd_id FROM cognitive.fault_documents
         WHERE service_id<>%s AND index_status='READY' AND search_vector @@ plainto_tsquery('simple', %s)
         ORDER BY ts_rank_cd(search_vector, plainto_tsquery('simple', %s)) DESC LIMIT 20
     """, (service_id, q, q))
-    same_vec = _ranked(conn, """
+    same_vec = await _ranked(conn, """
         SELECT fd_id FROM cognitive.fault_documents
         WHERE service_id=%s AND index_status='READY' AND embedding IS NOT NULL
         ORDER BY embedding <=> %s::vector LIMIT 20
     """, (service_id, vector))
-    other_vec = _ranked(conn, """
+    other_vec = await _ranked(conn, """
         SELECT fd_id FROM cognitive.fault_documents
         WHERE service_id<>%s AND index_status='READY' AND embedding IS NOT NULL
         ORDER BY embedding <=> %s::vector LIMIT 20
@@ -97,15 +96,15 @@ def search_faults(conn, service_id: str, query: str, top_k: int = 5) -> list[dic
     if not fused:
         return []
     ids = list(fused)
-    with conn.cursor() as cur:
-        cur.execute(
+    async with conn.cursor() as cur:
+        await cur.execute(
             """
             SELECT fd_id, service_id, search_index, search_text, investigation_content, diagnosis_report
             FROM cognitive.fault_documents WHERE fd_id = ANY(%s)
             """,
             (ids,),
         )
-        rows = cur.fetchall()
+        rows = await cur.fetchall()
     ranked = []
     for fd_id, svc, index, text, investigation, report in rows:
         ranked.append({
