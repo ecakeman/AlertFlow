@@ -14,13 +14,12 @@ def invocation_id_for(task_id: str) -> str:
 
 def knowledge_query(state: dict) -> str:
     service = str(state.get("service_name") or "").strip()
-    summary = f"输入版本 {state.get('input_version_from')}-{state.get('input_version_to')}"
     facts = []
     for item in (state.get("timeline_records") or [])[:4]:
         content = str(item.get("content") or "").strip()
         if content:
             facts.append(content[:300])
-    parts = [part for part in [service, summary, *facts] if part]
+    parts = [part for part in [service, *facts] if part]
     return "\n".join(parts) or "故障现象"
 
 
@@ -38,7 +37,7 @@ class AgentInvocationClient:
             "query": knowledge_query(state),
             "context": {
                 "serviceName": state.get("service_name") or "",
-                "episodeSummary": f"输入版本 {state.get('input_version_from')}-{state.get('input_version_to')}",
+                "episodeSummary": "",
                 "knownFacts": [str(item.get("content"))[:300] for item in (state.get("timeline_records") or [])[:4]],
             },
             "constraints": {"topK": 8, "requireCitations": True},
