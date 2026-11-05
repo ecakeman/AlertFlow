@@ -19,11 +19,22 @@ import org.a2aproject.sdk.spec.AgentCard;
 import org.a2aproject.sdk.spec.AgentSkill;
 import org.a2aproject.sdk.spec.DataPart;
 import org.a2aproject.sdk.spec.Message;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 @Component
 public class A2AKnowledgeClient implements KnowledgeClient {
     private final ObjectMapper json = new ObjectMapper();
+    private final String token;
+
+    @Autowired
+    public A2AKnowledgeClient() {
+        this(System.getenv("KNOWLEDGE_A2A_TOKEN"));
+    }
+
+    A2AKnowledgeClient(String token) {
+        this.token = token == null ? "" : token;
+    }
 
     @Override
     public String send(String cardUrl, Map<String, Object> input, Duration timeout) throws Exception {
@@ -77,10 +88,9 @@ public class A2AKnowledgeClient implements KnowledgeClient {
         return json.writeValueAsString(data.get());
     }
 
-    private static ClientCallContext callContext() {
-        String token = System.getenv("KNOWLEDGE_A2A_TOKEN");
-        if (token == null || token.isBlank()) {
-            return new ClientCallContext(Map.of(), Map.of());
+    private ClientCallContext callContext() {
+        if (token.isBlank()) {
+            throw new IllegalStateException("KNOWLEDGE_A2A_TOKEN is required");
         }
         return new ClientCallContext(Map.of(), Map.of("Authorization", "Bearer " + token));
     }

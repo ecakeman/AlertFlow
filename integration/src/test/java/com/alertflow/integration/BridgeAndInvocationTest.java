@@ -163,7 +163,7 @@ class BridgeAndInvocationTest {
         });
         http.start();
         try {
-            String result = new A2AKnowledgeClient().send("http://127.0.0.1:" + port, java.util.Map.of("query", "pool"), java.time.Duration.ofSeconds(5));
+            String result = new A2AKnowledgeClient("test-token").send("http://127.0.0.1:" + port, java.util.Map.of("query", "pool"), java.time.Duration.ofSeconds(5));
             assertTrue(result.contains("knowledge-retrieval-result-v1"));
         } finally {
             http.stop(0);

@@ -12,6 +12,18 @@ def invocation_id_for(task_id: str) -> str:
     return str(uuid.uuid5(NAMESPACE, task_id))
 
 
+def knowledge_query(state: dict) -> str:
+    service = str(state.get("service_name") or "").strip()
+    summary = f"输入版本 {state.get('input_version_from')}-{state.get('input_version_to')}"
+    facts = []
+    for item in (state.get("timeline_records") or [])[:4]:
+        content = str(item.get("content") or "").strip()
+        if content:
+            facts.append(content[:300])
+    parts = [part for part in [service, summary, *facts] if part]
+    return "\n".join(parts) or "故障现象"
+
+
 class AgentInvocationClient:
     def __init__(self, channel):
         self.stub = invocation_pb2_grpc.AgentInvocationServiceStub(channel)
@@ -23,13 +35,13 @@ class AgentInvocationClient:
             "invocationId": invocation_id_for(state["task_id"]),
             "skill": "knowledge-retrieval",
             "knowledgeSpaceIds": ["operations-manual"],
-            "query": state.get("service_name") or "故障现象",
+            "query": knowledge_query(state),
             "context": {
                 "serviceName": state.get("service_name") or "",
                 "episodeSummary": f"输入版本 {state.get('input_version_from')}-{state.get('input_version_to')}",
                 "knownFacts": [str(item.get("content"))[:300] for item in (state.get("timeline_records") or [])[:4]],
             },
-            "constraints": {"maxHops": 3, "topK": 8, "requireCitations": True},
+            "constraints": {"topK": 8, "requireCitations": True},
         })
         response = await self.stub.InvokeAgent(invocation_pb2.InvokeAgentRequest(
             invocation_id=invocation_id_for(state["task_id"]),
