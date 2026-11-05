@@ -4,6 +4,11 @@ import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -38,6 +43,44 @@ public class A2AKnowledgeClient implements KnowledgeClient {
 
     @Override
     public String send(String cardUrl, Map<String, Object> input, Duration timeout) throws Exception {
+        Duration deadline = timeout == null ? Duration.ofSeconds(30) : timeout;
+        AtomicReference<String> result = new AtomicReference<>();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        ExecutorService caller = Executors.newSingleThreadExecutor(task -> {
+            Thread thread = new Thread(task, "a2a-knowledge");
+            thread.setDaemon(true);
+            return thread;
+        });
+        try {
+            caller.submit(() -> {
+                try {
+                    result.set(sendWithinCaller(cardUrl, input, deadline, failure));
+                } catch (Exception error) {
+                    failure.set(error);
+                }
+            }).get(deadline.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException error) {
+            throw new IllegalStateException("timed out", error);
+        } catch (ExecutionException error) {
+            Throwable cause = error.getCause() == null ? error : error.getCause();
+            throw new IllegalStateException(cause.getMessage(), cause);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("timed out", error);
+        } finally {
+            caller.shutdownNow();
+        }
+        if (failure.get() != null) {
+            throw new IllegalStateException(failure.get().getMessage(), failure.get());
+        }
+        if (result.get() == null) {
+            throw new IllegalStateException("unknown: A2A response had no data part");
+        }
+        return result.get();
+    }
+
+    private String sendWithinCaller(String cardUrl, Map<String, Object> input, Duration deadline,
+                                    AtomicReference<Throwable> failure) throws Exception {
         AgentCard card = A2A.getAgentCard(cardUrl);
         boolean skill = false;
         for (AgentSkill item : card.skills()) {
@@ -52,7 +95,6 @@ public class A2AKnowledgeClient implements KnowledgeClient {
             throw new IllegalStateException("knowledge agent must not advertise streaming");
         }
         AtomicReference<Object> data = new AtomicReference<>();
-        AtomicReference<Throwable> failure = new AtomicReference<>();
         ClientConfig config = new ClientConfig.Builder().setStreaming(false).build();
         Message message = Message.builder()
                 .role(Message.Role.ROLE_USER)
@@ -61,7 +103,7 @@ public class A2AKnowledgeClient implements KnowledgeClient {
                 .build();
         HttpClient http = HttpClient.newBuilder()
                 .version(HttpClient.Version.HTTP_1_1)
-                .connectTimeout(timeout == null ? Duration.ofSeconds(30) : timeout)
+                .connectTimeout(deadline)
                 .build();
         try (Client client = Client.builder(card)
                 .clientConfig(config)
@@ -77,7 +119,7 @@ public class A2AKnowledgeClient implements KnowledgeClient {
                 })
                 .streamingErrorHandler(failure::set)
                 .build()) {
-            client.sendMessage(message, callContext());
+            client.sendMessage(message, callContext(deadline));
         }
         if (failure.get() != null) {
             throw new IllegalStateException(failure.get().getMessage(), failure.get());
@@ -88,10 +130,13 @@ public class A2AKnowledgeClient implements KnowledgeClient {
         return json.writeValueAsString(data.get());
     }
 
-    private ClientCallContext callContext() {
+    private ClientCallContext callContext(Duration timeout) {
         if (token.isBlank()) {
             throw new IllegalStateException("KNOWLEDGE_A2A_TOKEN is required");
         }
-        return new ClientCallContext(Map.of(), Map.of("Authorization", "Bearer " + token));
+        long millis = timeout == null ? 30_000 : timeout.toMillis();
+        return new ClientCallContext(Map.of(), Map.of(
+                "Authorization", "Bearer " + token,
+                "X-Knowledge-Timeout-Ms", Long.toString(millis)));
     }
 }

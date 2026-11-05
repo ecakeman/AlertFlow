@@ -4,6 +4,8 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.HexFormat;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
@@ -42,7 +44,7 @@ public class InvocationService {
         if (!"knowledge-agent".equals(request.getTargetAgentId())) {
             return failed(request, "UNKNOWN_AGENT", "target is not on the allow list");
         }
-        String inputJson = JsonFormat.printer().omittingInsignificantWhitespace().print(request.getInput());
+        String inputJson = canonicalJson(request.getInput());
         String hash = sha256(inputJson);
         long timeout = request.getTimeoutMs() > 0 ? request.getTimeoutMs() : 30_000;
         int leaseSeconds = (int) Math.max(45, timeout / 1000 + 15);
@@ -144,5 +146,27 @@ public class InvocationService {
 
     public static Map<String, Object> sorted(Map<String, Object> input) {
         return new TreeMap<>(input);
+    }
+
+    static String canonicalJson(com.google.protobuf.Struct input) throws Exception {
+        String raw = JsonFormat.printer().omittingInsignificantWhitespace().print(input);
+        Object parsed = new ObjectMapper().readValue(raw, Object.class);
+        return new ObjectMapper().writeValueAsString(sortValue(parsed));
+    }
+
+    private static Object sortValue(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            TreeMap<String, Object> sorted = new TreeMap<>();
+            map.forEach((key, item) -> sorted.put(String.valueOf(key), sortValue(item)));
+            return sorted;
+        }
+        if (value instanceof List<?> list) {
+            List<Object> sorted = new ArrayList<>();
+            for (Object item : list) {
+                sorted.add(sortValue(item));
+            }
+            return sorted;
+        }
+        return value;
     }
 }
