@@ -34,4 +34,4 @@
 
 Go 源码里 `cognitive.fault_documents` 只出现在 `apply_test.go` 的清表列表。仓库没有 RAGFlow 配置。
 
-演练开始时会把已有监控目标 `enabled=false`。探测 worker 只有 4 个，历史目标把通道占满后，新服务的恢复探测不会被执行，episode 会停在 `ACTIVE`。
+`deploy/e2e.sh` 里的 `UPDATE system.service_monitor_targets SET enabled=false` 会关闭这张表里的全部监控目标，不只是本次演练创建的数据。这是破坏性操作。探测 worker 只有 4 个，历史目标把通道占满后，新服务的恢复探测不会被执行，episode 会停在 `ACTIVE`。

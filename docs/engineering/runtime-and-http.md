@@ -99,4 +99,6 @@ docker compose -f deploy/docker-compose.yml config
 deploy/e2e.sh
 ```
 
-`deploy/e2e.sh` 在闭环之外，会在 agent 容器内请求 `/health/live` 和 `/health/ready`，并确认 `search_faults` 能召回本次服务的 FD。
+`deploy/e2e.sh` 在闭环之外，会在 agent 容器内请求 `/health/live` 和 `/health/ready`，并确认 `search_faults` 能召回本次服务的 FD。脚本中的 `UPDATE system.service_monitor_targets SET enabled=false` 会关闭全表监控目标，不只影响本次数据。
+
+Knowledge Agent 的上传上限默认 32MiB（`KNOWLEDGE_UPLOAD_MAX_BYTES`），摄取最多尝试 5 次（`KNOWLEDGE_INGEST_MAX_ATTEMPTS`）。Compose 不覆盖这两个变量。索引刷新失败不会把已经 READY 的摄取任务改回 PENDING。本轮没有运行测试、构建或 Compose。

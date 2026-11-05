@@ -29,3 +29,5 @@ Java 把本次调用的超时毫秒放进 `X-Knowledge-Timeout-Ms`。Knowledge A
 Compose 里的 Knowledge Agent 固定到 rag `dc929b6a7b11edd7b567b06529c1da49560f0a68`，容器内存上限是 768m，并设置 `KNOWLEDGE_AGENT_MODE=true`。升级时同时修改 image 和 Git context 的提交号。
 
 这些模式拆分、版本上传、任务 fencing、请求截止时间和镜像固定都没有在本轮运行。不能把它们看成已经通过测试。`retrieve_documents` 不带知识空间时返回空结果，A4 评测不再做全库检索。旧 `/ingest` 仍按 `doc_id` 写入，不接收版本号。
+
+后续 rag 提交把上传改为 1MiB 分块，默认上限 32MiB，摄取最多尝试 5 次，并且 BM25 刷新失败不再把 READY Job 改回 PENDING。Compose 仍固定 `dc929b6a7b11edd7b567b06529c1da49560f0a68`，这次修复不会进入当前镜像。这次也没有运行测试或 Compose。
