@@ -80,7 +80,9 @@ Checkpoint 不是调查文档或 FD 的权威存储。
 | `INTEGRATION_HTTP_ADDR` | `:8081` | Java HTTP，不映射到宿主机 |
 | `ALERTFLOW_KNOWLEDGE_ENABLED` | `false` | 为 `true` 时诊断图调用 Knowledge Agent。Compose 里还要加 `--profile knowledge` |
 | `KNOWLEDGE_A2A_TOKEN` | 空 | Java 和 Knowledge Agent 的 Bearer token。空值会拒绝 A2A 调用 |
-| `JAVA_TOOL_OPTIONS` | `-Xms128m -Xmx512m` | Integration 的 JVM 参数。Kafka 堆是 512m，Nacos 堆是 512m，三者容器上限都是 768m。Knowledge Agent 也是 768m，镜像固定到 rag `dc929b6a7b11edd7b567b06529c1da49560f0a68` |
+| `JAVA_TOOL_OPTIONS` | `-Xms128m -Xmx512m` | Integration 的 JVM 参数。Kafka 堆是 512m，Nacos 堆是 512m，三者容器上限都是 768m。Knowledge Agent 也是 768m，镜像固定到 rag `72a715f17fe723b2457b24d8981ce2b083671be7` |
+| `KNOWLEDGE_UPLOAD_MAX_BYTES` | `33554432` | 传给 Knowledge Agent 的单文件上限 |
+| `KNOWLEDGE_INGEST_MAX_ATTEMPTS` | `5` | 传给 Knowledge Agent 的摄取尝试上限 |
 | `KNOWLEDGE_AGENT_MODE` | `false` | Knowledge Agent 容器内设为 `true`。Legacy RAG 不设置 |
 | `ALERTFLOW_MCP_ENDPOINT` | 空 | Java MCP Gateway |
 | `ALERTFLOW_DATABASE_URL` | 本地 5432 | 两侧共用一个实例、两个 schema |
@@ -101,4 +103,4 @@ deploy/e2e.sh
 
 `deploy/e2e.sh` 在闭环之外，会在 agent 容器内请求 `/health/live` 和 `/health/ready`，并确认 `search_faults` 能召回本次服务的 FD。脚本中的 `UPDATE system.service_monitor_targets SET enabled=false` 会关闭全表监控目标，不只影响本次数据。
 
-Knowledge Agent 的上传上限默认 32MiB（`KNOWLEDGE_UPLOAD_MAX_BYTES`），摄取最多尝试 5 次（`KNOWLEDGE_INGEST_MAX_ATTEMPTS`）。Compose 不覆盖这两个变量。索引刷新失败不会把已经 READY 的摄取任务改回 PENDING。本轮没有运行测试、构建或 Compose。
+Knowledge Agent 的上传上限和摄取尝试次数由 Compose 传入，默认 32MiB 和 5 次。索引刷新失败不会把已经 READY 的摄取任务改回 PENDING。`deploy/e2e.sh` 仍会关闭全表监控目标，本轮没有执行它，也没有运行测试、构建或 Compose。

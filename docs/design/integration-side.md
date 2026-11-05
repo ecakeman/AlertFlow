@@ -7,7 +7,7 @@ AlertFlow 的整体在 `advence` 分支维护。Java 进程只做转发、发现
 - `gateway` schema 由 Flyway 创建，账号是 `gateway_app`。
 - `SubmitTask` 只有在 Python 返回后才回给 Go。Python 失败时 Java 把 gRPC 错误原样返回。
 - 归档完成只看 `system.episode_fault_document_refs`。Go 不再查询 `cognitive.fault_documents`。
-- Knowledge Agent 镜像固定为 `knowledge-agent:dc929b6a7b11edd7b567b06529c1da49560f0a68`。构建 context 是 `https://github.com/ecakeman/rag.git#dc929b6a7b11edd7b567b06529c1da49560f0a68:ai`。容器内存上限是 768m。
+- Knowledge Agent 镜像固定为 `knowledge-agent:72a715f17fe723b2457b24d8981ce2b083671be7`。构建 context 是 `https://github.com/ecakeman/rag.git#72a715f17fe723b2457b24d8981ce2b083671be7:ai`。容器内存上限是 768m。上传上限和摄取重试次数由 `KNOWLEDGE_UPLOAD_MAX_BYTES`、`KNOWLEDGE_INGEST_MAX_ATTEMPTS` 传入，默认 33554432 和 5。
 - Nacos 客户端是 `nacos-client` 3.3.0。Compose 里的服务端镜像是 `nacos/nacos-server:v2.5.1`，因为本环境用它的 naming 接口做 Agent Card 地址发现。没有新快照时调用失败关闭。
 - 当前 gRPC 没有 TLS。这只是本地开发配置，不是生产环境的服务认证。
 - Java 调用 Knowledge Agent 时必须带 `KNOWLEDGE_A2A_TOKEN`。token 来自环境变量，不写进代码或镜像。

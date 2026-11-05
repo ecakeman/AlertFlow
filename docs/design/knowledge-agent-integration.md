@@ -26,8 +26,8 @@ Java 把本次调用的超时毫秒放进 `X-Knowledge-Timeout-Ms`。Knowledge A
 
 `KNOWLEDGE_A2A_TOKEN` 未设置或不匹配时，Knowledge Agent 拒绝 `message/send` 和管理接口。Agent Card 的 GET 不要求这个 token。`x-caller-agent` 只标识调用方。当前 gRPC 没有 TLS，只用于本地开发。
 
-Compose 里的 Knowledge Agent 固定到 rag `dc929b6a7b11edd7b567b06529c1da49560f0a68`，容器内存上限是 768m，并设置 `KNOWLEDGE_AGENT_MODE=true`。升级时同时修改 image 和 Git context 的提交号。
+Compose 里的 Knowledge Agent 固定到 rag `72a715f17fe723b2457b24d8981ce2b083671be7`，image 和 Git context 使用同一个提交。容器内存上限是 768m，并设置 `KNOWLEDGE_AGENT_MODE=true`。升级时同时修改这两处。
 
-这些模式拆分、版本上传、任务 fencing、请求截止时间和镜像固定都没有在本轮运行。不能把它们看成已经通过测试。`retrieve_documents` 不带知识空间时返回空结果，A4 评测不再做全库检索。旧 `/ingest` 仍按 `doc_id` 写入，不接收版本号。
+`KNOWLEDGE_UPLOAD_MAX_BYTES` 默认 33554432，`KNOWLEDGE_INGEST_MAX_ATTEMPTS` 默认 5。Compose 把这两个变量传给 Knowledge Agent，未设置时使用上述默认值。上传按 1MiB 分块。摄取达到尝试上限后不再重试。BM25 刷新失败不把已经 READY 的 Job 改回 PENDING。
 
-后续 rag 提交把上传改为 1MiB 分块，默认上限 32MiB，摄取最多尝试 5 次，并且 BM25 刷新失败不再把 READY Job 改回 PENDING。Compose 仍固定 `dc929b6a7b11edd7b567b06529c1da49560f0a68`，这次修复不会进入当前镜像。这次也没有运行测试或 Compose。
+这些模式拆分、版本上传、任务 fencing、请求截止时间和镜像固定都没有在本轮运行。不能把它们看成已经通过测试。`retrieve_documents` 不带知识空间时返回空结果，A4 评测不再做全库检索。旧 `/ingest` 仍按 `doc_id` 写入，不接收版本号。这次没有运行测试、构建或 Compose。
