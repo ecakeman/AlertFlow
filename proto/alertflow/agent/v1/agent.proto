@@ -3,6 +3,9 @@ syntax = "proto3";
 package alertflow.agent.v1;
 
 option go_package = "github.com/ecakeman/alertflow/gen/agent/v1;agentv1";
+option java_multiple_files = true;
+option java_package = "com.alertflow.gen.agent.v1";
+option java_outer_classname = "AgentProto";
 
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/struct.proto";
@@ -28,6 +31,9 @@ service SystemGatewayService {
   rpc ReportTaskStarted(ReportTaskStartedRequest) returns (TaskAck);
   rpc HeartbeatTask(HeartbeatTaskRequest) returns (TaskAck);
   rpc CompleteTask(CompleteTaskRequest) returns (TaskAck);
+
+  // 归档任务在 FD READY 后登记回执。Go 只写自己的表。
+  rpc RegisterFaultDocument(RegisterFaultDocumentRequest) returns (RegisterFaultDocumentResponse);
 }
 
 enum AgentTaskType {
@@ -174,4 +180,17 @@ message TaskAck {
   bool accepted = 1;
   string task_id = 2;
   string message = 3;
+}
+
+message RegisterFaultDocumentRequest {
+  string task_id = 1;
+  string episode_id = 2;
+  int64 execution_generation = 3;
+  string fd_id = 4;
+  string content_hash = 5;
+}
+
+message RegisterFaultDocumentResponse {
+  bool registered = 1;
+  string message = 2;
 }
