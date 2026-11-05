@@ -130,6 +130,17 @@ func (s *SystemServer) HeartbeatTask(ctx context.Context, req *agentv1.Heartbeat
 	return s.ack(s.Store.HeartbeatTask(ctx, mustID(req.GetTaskId()), mustID(req.GetEpisodeId()), req.GetExecutionGeneration()))
 }
 
+func (s *SystemServer) RegisterFaultDocument(ctx context.Context, req *agentv1.RegisterFaultDocumentRequest) (*agentv1.RegisterFaultDocumentResponse, error) {
+	ok, message, err := s.Store.RegisterFaultDocument(ctx, system.RegisterFaultDocumentInput{
+		TaskID: mustID(req.GetTaskId()), EpisodeID: mustID(req.GetEpisodeId()),
+		Generation: req.GetExecutionGeneration(), FDID: req.GetFdId(), ContentHash: req.GetContentHash(),
+	})
+	if err != nil {
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
+	return &agentv1.RegisterFaultDocumentResponse{Registered: ok, Message: message}, nil
+}
+
 func (s *SystemServer) CompleteTask(ctx context.Context, req *agentv1.CompleteTaskRequest) (*agentv1.TaskAck, error) {
 	ack, err := s.Store.CompleteTask(ctx, system.CompleteInput{
 		TaskID: mustID(req.GetTaskId()), EpisodeID: mustID(req.GetEpisodeId()),
