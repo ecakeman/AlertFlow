@@ -40,8 +40,33 @@ for _ in $(seq 1 60); do
 done
 docker compose exec -T integration bash -c 'echo >/dev/tcp/127.0.0.1/8081'
 docker compose exec -T knowledge-agent python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=2).read()'
-# 历史演练留下的目标会占满 4 个探测 worker，新目标的恢复探测进不了队列。
-docker compose exec -T postgres psql -U alertflow -d alertflow -c "UPDATE system.service_monitor_targets SET enabled=false;"
+# 只暂停脚本开始前已经启用的目标，避免旧目标占满 4 个探测 worker。
+# 本次新建的目标不在这份名单里。进程正常退出时按原 target_id 恢复。SIGKILL 不会执行恢复。
+PRIOR_TARGETS="$(docker compose exec -T postgres psql -U alertflow -d alertflow -At -c "SELECT target_id FROM system.service_monitor_targets WHERE enabled")"
+prior_target_list() {
+  local id list=""
+  while IFS= read -r id; do
+    id="${id//$'\r'/}"
+    [[ -z "$id" ]] && continue
+    [[ "$id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || {
+      echo "unexpected monitor target id: $id" >&2
+      exit 1
+    }
+    list+="'${id}',"
+  done <<< "$PRIOR_TARGETS"
+  printf '%s' "${list%,}"
+}
+restore_prior_targets() {
+  local list
+  list="$(prior_target_list)"
+  [[ -z "$list" ]] && return 0
+  docker compose exec -T postgres psql -U alertflow -d alertflow -c "UPDATE system.service_monitor_targets SET enabled=true WHERE target_id IN (${list})" >/dev/null
+}
+trap restore_prior_targets EXIT
+PRIOR_LIST="$(prior_target_list)"
+if [[ -n "$PRIOR_LIST" ]]; then
+  docker compose exec -T postgres psql -U alertflow -d alertflow -c "UPDATE system.service_monitor_targets SET enabled=false WHERE target_id IN (${PRIOR_LIST})"
+fi
 
 KEY="orders-$(date +%s)"
 BODY=$(curl --noproxy '*' -sf -X POST http://127.0.0.1:18080/api/v1/services \

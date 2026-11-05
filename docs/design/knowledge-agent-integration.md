@@ -26,7 +26,7 @@ Java 把本次调用的超时毫秒放进 `X-Knowledge-Timeout-Ms`。Knowledge A
 
 `KNOWLEDGE_A2A_TOKEN` 未设置或不匹配时，Knowledge Agent 拒绝 `message/send` 和管理接口。Agent Card 的 GET 不要求这个 token。`x-caller-agent` 只标识调用方。当前 gRPC 没有 TLS，只用于本地开发。
 
-Compose 里的 Knowledge Agent 固定到 rag `72a715f17fe723b2457b24d8981ce2b083671be7`，image 和 Git context 使用同一个提交。容器内存上限是 768m，并设置 `KNOWLEDGE_AGENT_MODE=true`。升级时同时修改这两处。
+Compose 里的 Knowledge Agent 固定到 rag `a41981c6265018e5a203e9340b3800686a31a37b`，image 和 Git context 使用同一个提交。容器内存上限是 768m，并设置 `KNOWLEDGE_AGENT_MODE=true`。升级时同时修改这两处。
 
 `KNOWLEDGE_UPLOAD_MAX_BYTES` 默认 33554432，`KNOWLEDGE_INGEST_MAX_ATTEMPTS` 默认 5。Compose 把这两个变量传给 Knowledge Agent，未设置时使用上述默认值。上传按 1MiB 分块。摄取达到尝试上限后不再重试。BM25 刷新失败不把已经 READY 的 Job 改回 PENDING。
 

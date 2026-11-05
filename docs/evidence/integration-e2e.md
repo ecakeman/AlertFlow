@@ -1,5 +1,7 @@
 # 集成侧证据
 
+这是 2026-11-05 的历史快照，不是当前部署配置。下面记录的基线、镜像标签和脚本行为都属于这次快照。当前镜像和构建上下文以 `deploy/docker-compose.yml` 为准。
+
 日期：2026-11-05。AlertFlow 分支 `advence`（基线 `e175b63`）。Knowledge Agent 在 `ecakeman/rag` 的 `long`（基线 `450e454`），Compose 只引用镜像 `knowledge-agent:dev`。没有做文档 4.2 的旧库迁移。
 
 ## 锁定的版本
@@ -34,4 +36,4 @@
 
 Go 源码里 `cognitive.fault_documents` 只出现在 `apply_test.go` 的清表列表。仓库没有 RAGFlow 配置。
 
-`deploy/e2e.sh` 里的 `UPDATE system.service_monitor_targets SET enabled=false` 会关闭这张表里的全部监控目标，不只是本次演练创建的数据。这是破坏性操作。探测 worker 只有 4 个，历史目标把通道占满后，新服务的恢复探测不会被执行，episode 会停在 `ACTIVE`。
+当时的 `deploy/e2e.sh` 执行 `UPDATE system.service_monitor_targets SET enabled=false`，会关闭这张表里的全部监控目标，不只是本次演练创建的数据。这是该次快照里的脚本行为。探测 worker 只有 4 个，历史目标把通道占满后，新服务的恢复探测不会被执行，episode 会停在 `ACTIVE`。
