@@ -9,7 +9,6 @@ export KNOWLEDGE_A2A_TOKEN="${KNOWLEDGE_A2A_TOKEN:-knowledge-a2a-token}"
 if [[ "${ALERTFLOW_SKIP_IMAGE_BUILD:-}" == "1" ]]; then
   docker compose up -d --no-build
 else
-  docker build -t knowledge-agent:dev "$SCRIPT_DIR/../../enterprise-doc-qa/ai"
   docker compose up -d --build
 fi
 docker compose exec -T fault python -c 'import os; os.path.exists("/tmp/alertflow-healthy") and os.remove("/tmp/alertflow-healthy")'

@@ -133,9 +133,14 @@ services:
 
   knowledge-agent:
     profiles: ["knowledge"]
-    image: knowledge-agent:dev
+    image: knowledge-agent:dc929b6a7b11edd7b567b06529c1da49560f0a68
+    mem_limit: 768m
+    build:
+      context: https://github.com/ecakeman/rag.git#dc929b6a7b11edd7b567b06529c1da49560f0a68:ai
+      dockerfile: Dockerfile
     environment:
       DATABASE_URL: postgresql+psycopg://knowledge_app:knowledge@postgres:5432/knowledge
+      KNOWLEDGE_AGENT_MODE: "true"
       KNOWLEDGE_STORAGE_ROOT: /data/knowledge
       KNOWLEDGE_A2A_TOKEN: ${KNOWLEDGE_A2A_TOKEN:-}
       KNOWLEDGE_MCP_ENDPOINT: http://integration:8081/mcp
