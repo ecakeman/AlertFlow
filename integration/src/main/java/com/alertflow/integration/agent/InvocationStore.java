@@ -1,14 +1,9 @@
 package com.alertflow.integration.agent;
 
-import java.util.Optional;
-
 public interface InvocationStore {
-    record Row(String caller, String invocationId, String target, String skill, String requestHash,
-               String status, String resultJson, String errorCode, String safeMessage) {}
+    record Claim(String outcome, long fencingToken, String leaseOwner, String resultJson, String errorCode, String safeMessage) {}
 
-    Optional<Row> find(String caller, String invocationId);
+    Claim claim(String caller, String invocationId, String target, String skill, String requestHash, int leaseSeconds);
 
-    void insert(Row row);
-
-    void finish(String caller, String invocationId, String status, String resultJson, String errorCode, String safeMessage);
+    boolean finish(String caller, String invocationId, long fencingToken, String status, String resultJson, String errorCode, String safeMessage);
 }

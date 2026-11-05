@@ -5,7 +5,6 @@ import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.HexFormat;
 import java.util.Map;
-import java.util.Optional;
 import java.util.TreeMap;
 
 import com.alertflow.gen.integration.v1.InvokeAgentRequest;
@@ -45,41 +44,48 @@ public class InvocationService {
         }
         String inputJson = JsonFormat.printer().omittingInsignificantWhitespace().print(request.getInput());
         String hash = sha256(inputJson);
-        Optional<InvocationStore.Row> existing = store.find(caller, request.getInvocationId());
-        if (existing.isPresent()) {
-            InvocationStore.Row row = existing.get();
-            if (!row.requestHash().equals(hash)) {
+        long timeout = request.getTimeoutMs() > 0 ? request.getTimeoutMs() : 30_000;
+        int leaseSeconds = (int) Math.max(45, timeout / 1000 + 15);
+        InvocationStore.Claim claim = store.claim(caller, request.getInvocationId(), request.getTargetAgentId(), SKILL, hash, leaseSeconds);
+        switch (claim.outcome()) {
+            case "CONFLICT" -> {
                 return failed(request, "IDEMPOTENCY_CONFLICT", "invocation_id was used with different input");
             }
-            if ("COMPLETED".equals(row.status())) {
-                return completed(request, row.resultJson());
+            case "COMPLETED" -> {
+                return completed(request, claim.resultJson());
             }
-            if ("RUNNING".equals(row.status()) || "CREATED".equals(row.status())) {
-                return InvokeAgentResponse.newBuilder()
-                        .setInvocationId(request.getInvocationId())
-                        .setStatus("IN_PROGRESS")
-                        .setSafeMessage("the same invocation is still running")
-                        .build();
+            case "RUN" -> {
+                // 本次领取到了租约，继续执行。
             }
-            return failed(request, row.errorCode() == null ? row.status() : row.errorCode(), row.safeMessage());
+            default -> {
+                return inProgress(request);
+            }
         }
-        store.insert(new InvocationStore.Row(caller, request.getInvocationId(), request.getTargetAgentId(), SKILL, hash, "RUNNING", null, null, null));
         try {
             String card = registry.cardUrl(request.getTargetAgentId());
             Map<String, Object> input = json.readValue(inputJson, new TypeReference<>() {});
-            long timeout = request.getTimeoutMs() > 0 ? request.getTimeoutMs() : 30_000;
             String result = governance.call(() -> knowledge.send(card, input, Duration.ofMillis(timeout)));
-            store.finish(caller, request.getInvocationId(), "COMPLETED", result, null, null);
+            if (!store.finish(caller, request.getInvocationId(), claim.fencingToken(), "COMPLETED", result, null, null)) {
+                return inProgress(request);
+            }
             log.info("invocation_id={} traceparent={} status=COMPLETED", request.getInvocationId(), traceparent());
             return completed(request, result);
         } catch (Exception error) {
             String status = timedOut(error) ? "TIMED_OUT" : unknown(error) ? "UNKNOWN" : "FAILED";
             String code = status.equals("FAILED") ? "UPSTREAM" : status;
             String message = error.getMessage() == null ? status : error.getMessage();
-            store.finish(caller, request.getInvocationId(), status, null, code, message);
+            store.finish(caller, request.getInvocationId(), claim.fencingToken(), status, null, code, message);
             log.info("invocation_id={} traceparent={} status={}", request.getInvocationId(), traceparent(), status);
             return failed(request, code, message);
         }
+    }
+
+    private static InvokeAgentResponse inProgress(InvokeAgentRequest request) {
+        return InvokeAgentResponse.newBuilder()
+                .setInvocationId(request.getInvocationId())
+                .setStatus("IN_PROGRESS")
+                .setSafeMessage("the same invocation is still running")
+                .build();
     }
 
     private InvokeAgentResponse completed(InvokeAgentRequest request, String result) throws Exception {
