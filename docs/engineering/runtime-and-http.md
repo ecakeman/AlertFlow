@@ -30,7 +30,9 @@ Python HTTP 只在 `agent/src/alertflow_agent/http_app.py`。
 
 ## gRPC 边界
 
-Go 调用 Python 的 `AgentExecutionService`（`SubmitTask`、`GetArtifact`）。Python 调用 Go 的 `SystemGatewayService`（输入、时间轴、产物登记、开始、心跳、完成）。字段和 proto 没有改。Python 侧 server 和 client 都是 `grpc.aio`，内部调用的 deadline 是 30 秒。模型 HTTP 使用 runtime 持有的 `httpx.AsyncClient`，超时 60 秒。
+Go 的 `SubmitTask` 和 `GetArtifact` 发到 Java `:9091`，再转到 Python。Python 的系统 RPC 发到同一个 Java 端口，再转到 Go `:9090`。字段没有改。Python 侧仍是 `grpc.aio`，内部 deadline 是 30 秒。模型 HTTP 使用 runtime 持有的 `httpx.AsyncClient`，超时 60 秒。
+
+`InvokeAgent` 也在 Java `:9091`。Java 再用 A2A `message/send` 调用 Knowledge Agent。MCP 入口是 Java `http://integration:8081/mcp`。
 
 ## 启动和关闭
 
@@ -72,8 +74,12 @@ Checkpoint 不是调查文档或 FD 的权威存储。
 | `ALERTFLOW_GRPC_ADDR` | `:9090` | Go gRPC，仅 Compose 网络内 |
 | `AGENT_GRPC_ADDR` | `0.0.0.0:9000` | Python gRPC，不映射到宿主机 |
 | `AGENT_HTTP_ADDR` | `0.0.0.0:8000` | Python FastAPI，不映射到宿主机 |
-| `ALERTFLOW_GRPC_TARGET` | `127.0.0.1:9090` | Python 访问 Go gRPC |
-| `ALERTFLOW_AGENT_GRPC_TARGET` | 空则产物接口 503 | Go 访问 Python gRPC |
+| `ALERTFLOW_GRPC_TARGET` | `127.0.0.1:9090` | Python 访问 Java gRPC。Java 再转发到 Go |
+| `ALERTFLOW_AGENT_GRPC_TARGET` | 空则产物接口 503 | Go 访问 Java gRPC，Java 再访问 Python |
+| `INTEGRATION_GRPC_ADDR` | `:9091` | Java gRPC |
+| `INTEGRATION_HTTP_ADDR` | `:8081` | Java HTTP，不映射到宿主机 |
+| `ALERTFLOW_KNOWLEDGE_ENABLED` | 空 | 为 `true` 时诊断图调用 Knowledge Agent |
+| `ALERTFLOW_MCP_ENDPOINT` | 空 | Java MCP Gateway |
 | `ALERTFLOW_DATABASE_URL` | 本地 5432 | 两侧共用一个实例、两个 schema |
 | `AGENT_SHUTDOWN_TIMEOUT` | `20` | 等待正在执行的任务的秒数 |
 
