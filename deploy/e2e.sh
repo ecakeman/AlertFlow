@@ -3,6 +3,9 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+export COMPOSE_PROFILES="${COMPOSE_PROFILES:-knowledge}"
+export ALERTFLOW_KNOWLEDGE_ENABLED="${ALERTFLOW_KNOWLEDGE_ENABLED:-true}"
+export KNOWLEDGE_A2A_TOKEN="${KNOWLEDGE_A2A_TOKEN:-knowledge-a2a-token}"
 if [[ "${ALERTFLOW_SKIP_IMAGE_BUILD:-}" == "1" ]]; then
   docker compose up -d --no-build
 else

@@ -30,7 +30,7 @@ Python HTTP 只在 `agent/src/alertflow_agent/http_app.py`。
 
 ## gRPC 边界
 
-Go 的 `SubmitTask` 和 `GetArtifact` 发到 Java `:9091`，再转到 Python。Python 的系统 RPC 发到同一个 Java 端口，再转到 Go `:9090`。字段没有改。Python 侧仍是 `grpc.aio`，内部 deadline 是 30 秒。模型 HTTP 使用 runtime 持有的 `httpx.AsyncClient`，超时 60 秒。
+Go 的 `SubmitTask` 和 `GetArtifact` 发到 Java `:9091`，再转到 Python。Python 的系统 RPC 发到同一个 Java 端口，再转到 Go `:9090`。字段没有改。Python 侧仍是 `grpc.aio`，内部 deadline 是 30 秒。模型 HTTP 使用 runtime 持有的 `httpx.AsyncClient`，超时 60 秒。这些 gRPC 通道没有 TLS，只作为本地开发配置。
 
 `InvokeAgent` 也在 Java `:9091`。Java 再用 A2A `message/send` 调用 Knowledge Agent。MCP 入口是 Java `http://integration:8081/mcp`。
 
@@ -78,7 +78,9 @@ Checkpoint 不是调查文档或 FD 的权威存储。
 | `ALERTFLOW_AGENT_GRPC_TARGET` | 空则产物接口 503 | Go 访问 Java gRPC，Java 再访问 Python |
 | `INTEGRATION_GRPC_ADDR` | `:9091` | Java gRPC |
 | `INTEGRATION_HTTP_ADDR` | `:8081` | Java HTTP，不映射到宿主机 |
-| `ALERTFLOW_KNOWLEDGE_ENABLED` | 空 | 为 `true` 时诊断图调用 Knowledge Agent |
+| `ALERTFLOW_KNOWLEDGE_ENABLED` | `false` | 为 `true` 时诊断图调用 Knowledge Agent。Compose 里还要加 `--profile knowledge` |
+| `KNOWLEDGE_A2A_TOKEN` | 空 | Java 和 Knowledge Agent 的 Bearer token。空值会拒绝 A2A 调用 |
+| `JAVA_TOOL_OPTIONS` | `-Xms128m -Xmx512m` | Integration 的 JVM 参数。Kafka 堆是 512m，Nacos 堆是 512m，三者容器上限都是 768m |
 | `ALERTFLOW_MCP_ENDPOINT` | 空 | Java MCP Gateway |
 | `ALERTFLOW_DATABASE_URL` | 本地 5432 | 两侧共用一个实例、两个 schema |
 | `AGENT_SHUTDOWN_TIMEOUT` | `20` | 等待正在执行的任务的秒数 |

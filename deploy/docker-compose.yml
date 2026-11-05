@@ -28,6 +28,8 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx512m"
+    mem_limit: 768m
 
   redis:
     image: redis:7.4.2
@@ -63,7 +65,7 @@ services:
     environment:
       ALERTFLOW_DATABASE_URL: postgres://alertflow:alertflow@postgres:5432/alertflow?sslmode=disable
       ALERTFLOW_GRPC_TARGET: integration:9091
-      ALERTFLOW_KNOWLEDGE_ENABLED: "true"
+      ALERTFLOW_KNOWLEDGE_ENABLED: ${ALERTFLOW_KNOWLEDGE_ENABLED:-false}
       ALERTFLOW_MCP_ENDPOINT: http://integration:8081/mcp
       ALERTFLOW_MCP_TOKEN: main-agent-token
       AGENT_GRPC_ADDR: 0.0.0.0:9000
@@ -94,6 +96,10 @@ services:
     environment:
       MODE: standalone
       NACOS_AUTH_ENABLE: "false"
+      JVM_XMS: 256m
+      JVM_XMX: 512m
+      JVM_XMN: 128m
+    mem_limit: 768m
 
   integration:
     build:
@@ -111,8 +117,10 @@ services:
       INTEGRATION_AGENT_CARDS: knowledge-agent=http://knowledge-agent:8000
       ALERTFLOW_MAIN_MCP_TOKEN: main-agent-token
       KNOWLEDGE_AGENT_MCP_TOKEN: knowledge-agent-token
-      KNOWLEDGE_A2A_TOKEN: knowledge-a2a-token
+      KNOWLEDGE_A2A_TOKEN: ${KNOWLEDGE_A2A_TOKEN:-}
       INTEGRATION_REGISTRY_STALE_SECONDS: "300"
+      JAVA_TOOL_OPTIONS: "-Xms128m -Xmx512m"
+    mem_limit: 768m
     depends_on:
       db-init:
         condition: service_completed_successfully
@@ -124,11 +132,12 @@ services:
         condition: service_started
 
   knowledge-agent:
+    profiles: ["knowledge"]
     image: knowledge-agent:dev
     environment:
       DATABASE_URL: postgresql+psycopg://knowledge_app:knowledge@postgres:5432/knowledge
       KNOWLEDGE_STORAGE_ROOT: /data/knowledge
-      KNOWLEDGE_A2A_TOKEN: knowledge-a2a-token
+      KNOWLEDGE_A2A_TOKEN: ${KNOWLEDGE_A2A_TOKEN:-}
       KNOWLEDGE_MCP_ENDPOINT: http://integration:8081/mcp
       KNOWLEDGE_MCP_TOKEN: knowledge-agent-token
       KNOWLEDGE_MAX_HOPS: "3"
