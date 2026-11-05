@@ -11,9 +11,11 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from alertflow_agent.artifacts import read_artifact
-from alertflow_agent.fd import connect, save_fault_document, search_faults
+from alertflow_agent.fd import connect, fault_content_hash, save_fault_document, search_faults
 from alertflow_agent.gen.alertflow.agent.v1 import agent_pb2, agent_pb2_grpc
 from alertflow_agent.http_app import create_app
+from alertflow_agent.invocation import AgentInvocationClient
+from alertflow_agent.mcp_client import McpClient
 from alertflow_agent.receipts import accept_task, advisory_lock, advisory_unlock, mark_finished, mark_running, unfinished
 from alertflow_agent.workflow import ArchiveModel, model_from_env, run_archive, run_diagnosis
 
@@ -40,6 +42,20 @@ class SystemClient:
     def __init__(self, stub, db):
         self.stub = stub
         self.db = db
+        self.fault_hash = ""
+        self.invocation = None
+        self.mcp = None
+
+    async def invoke_knowledge(self, state):
+        if self.invocation is None:
+            raise RuntimeError("knowledge agent is not configured")
+        return await self.invocation.invoke(state)
+
+    async def call_mcp(self, state, action):
+        if self.mcp is None:
+            raise RuntimeError("mcp gateway is not configured")
+        text = await self.mcp.call_tool(action.get("name") or "", {"episode_id": state.get("episode_id")})
+        return {"name": action.get("name"), "text": text}
 
     async def get_input(self, task: dict):
         return await self.stub.GetEpisodeInput(agent_pb2.GetEpisodeInputRequest(
@@ -80,7 +96,16 @@ class SystemClient:
             raise RuntimeError("artifact registration rejected")
 
     async def save_fault(self, task, investigation, report, index):
+        self.fault_hash = fault_content_hash(investigation, report)
         return await save_fault_document(self.db, task["episode_id"], task["service_id"], investigation, report, index)
+
+    async def register_fault_document(self, task, fd_id: str, content_hash: str):
+        response = await self.stub.RegisterFaultDocument(agent_pb2.RegisterFaultDocumentRequest(
+            task_id=task["task_id"], episode_id=task["episode_id"],
+            execution_generation=int(task["execution_generation"]), fd_id=fd_id, content_hash=content_hash,
+        ), timeout=RPC_TIMEOUT)
+        if not response.registered:
+            raise RuntimeError(response.message or "fault document registration rejected")
 
     async def started(self, task):
         await self.stub.ReportTaskStarted(agent_pb2.ReportTaskStartedRequest(
@@ -149,6 +174,11 @@ class AgentRuntime:
         await self._open_checkpointer()
         self.queue = asyncio.Queue(maxsize=self.queue_capacity)
         self.channel = grpc.aio.insecure_channel(self.go_target)
+        self.knowledge_enabled = os.environ.get("ALERTFLOW_KNOWLEDGE_ENABLED", "") == "true"
+        self.invocation_client = AgentInvocationClient(self.channel) if self.knowledge_enabled else None
+        mcp_endpoint = os.environ.get("ALERTFLOW_MCP_ENDPOINT", "")
+        mcp_token = os.environ.get("ALERTFLOW_MCP_TOKEN", "")
+        self.mcp_client = McpClient(mcp_endpoint, mcp_token, self.http_client) if mcp_endpoint and mcp_token else None
         for _ in range(self.max_concurrent):
             self.workers.append(asyncio.create_task(self._worker()))
         self.workers_started = True
@@ -236,6 +266,8 @@ class AgentRuntime:
         thread_id = task.get("thread_id") or f"diagnosis:{task['episode_id']}"
         key = None
         client = SystemClient(agent_pb2_grpc.SystemGatewayServiceStub(self.channel), conn)
+        client.invocation = self.invocation_client
+        client.mcp = self.mcp_client
         try:
             key = await advisory_lock(conn, thread_id)
             await mark_running(conn, task["task_id"])
@@ -245,12 +277,15 @@ class AgentRuntime:
                 snap = await client.get_input(task)
                 task["service_id"] = snap.service_id
                 fd_id = await run_archive(self.archive_model, client, task)
+                await client.register_fault_document(task, fd_id, client.fault_hash)
                 await client.complete(task, "SUCCEEDED", fd_id=fd_id)
             else:
                 snap = await client.get_input(task)
                 task["service_name"] = snap.service_name
                 task["service_id"] = snap.service_id
                 task["episode_started_at"] = snap.episode_started_at.ToDatetime(timezone.utc).isoformat()
+                task["knowledge_enabled"] = self.knowledge_enabled
+                task["mcp_tools"] = await self.mcp_client.list_tools() if self.mcp_client is not None else []
                 await run_diagnosis(self.model, client, task, self.checkpointer)
                 await client.complete(task, "SUCCEEDED", processed=int(task.get("input_version_to") or 0))
             await mark_finished(conn, task["task_id"], "COMPLETED", {"outcome": "SUCCEEDED"}, "CONFIRMED")
