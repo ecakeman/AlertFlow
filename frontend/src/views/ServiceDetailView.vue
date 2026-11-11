@@ -2,52 +2,69 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { deleteService, fetchService } from '../api/services'
+import {
+  deleteService,
+  deleteTarget,
+  fetchService,
+  fetchServiceTimeline,
+  patchTarget
+} from '../api/services'
 import { fetchEpisodes } from '../api/episodes'
 import { errorMessage } from '../api/client'
-import type { EpisodeSummary, ServiceView, Target } from '../api/types'
-import ErrorRetry from '../components/ErrorRetry.vue'
-import ServiceFormDialog from '../components/ServiceFormDialog.vue'
+import type { EpisodeSummary, ServiceTimelineRecord, ServiceView, Target } from '../api/types'
+import PageHeader from '../components/PageHeader.vue'
+import StateBlock from '../components/StateBlock.vue'
 import StatusTag from '../components/StatusTag.vue'
-import TargetFormDialog from '../components/TargetFormDialog.vue'
-import { useSessionStore } from '../stores/session'
-import { formatDateTime } from '../utils/time'
-import { statusLabel, targetSummary, targetTypeLabel, targetTypeTagType } from '../utils/status'
+import DualStatus from '../components/DualStatus.vue'
+import TargetFormDrawer from '../components/TargetFormDrawer.vue'
+import ServiceFormDialog from '../components/ServiceFormDialog.vue'
+import {
+  aggregationLabel,
+  checkStatusLabel,
+  diagnosisState,
+  evidenceSummary,
+  targetTypeLabel
+} from '../utils/status'
+import {
+  formatDateTime,
+  formatDuration,
+  formatLastObservation,
+  tooltipDateTime
+} from '../utils/time'
 
 const route = useRoute()
 const router = useRouter()
-const session = useSessionStore()
 
 const serviceId = computed(() => String(route.params.serviceId ?? ''))
+
 const service = ref<ServiceView | null>(null)
-const activeEpisodes = ref<EpisodeSummary[]>([])
+const episodes = ref<EpisodeSummary[]>([])
 const loading = ref(false)
 const error = ref('')
-const deleting = ref(false)
+const activeTab = ref<'overview' | 'monitors' | 'events'>('overview')
 
-const serviceDialogVisible = ref(false)
-const targetDialogVisible = ref(false)
+const timeline = ref<ServiceTimelineRecord[]>([])
+const timelineLoading = ref(false)
+const timelineError = ref('')
+const timelineLoaded = ref(false)
+
+const targetDrawerVisible = ref(false)
 const editingTarget = ref<Target | null>(null)
+const serviceDialogVisible = ref(false)
+const deletingTargetId = ref('')
 
-const targets = computed<Target[]>(() => service.value?.targets ?? [])
-const aggregationLabel = computed(() => {
-  const mode = service.value?.monitor_aggregation_mode
-  if (mode === 'ANY_REQUIRED') return 'ANY_REQUIRED（任一必需目标异常即异常）'
-  return mode || '—'
-})
+const activeEpisodes = computed(() => episodes.value.filter((episode) => episode.status === 'ACTIVE'))
 
-async function load(): Promise<void> {
-  if (!serviceId.value) return
+async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [view, episodePage] = await Promise.all([
+    const [view, page] = await Promise.all([
       fetchService(serviceId.value),
-      fetchEpisodes({ service_id: serviceId.value, status: 'ACTIVE', limit: 20, offset: 0 })
+      fetchEpisodes({ service_id: serviceId.value, limit: 20 })
     ])
     service.value = view
-    activeEpisodes.value = episodePage.episodes ?? []
-    session.visitService(view.service_id, view.name)
+    episodes.value = page.episodes
   } catch (err) {
     error.value = errorMessage(err)
   } finally {
@@ -55,255 +72,368 @@ async function load(): Promise<void> {
   }
 }
 
-function onServiceSaved(): void {
-  serviceDialogVisible.value = false
-  load()
+async function loadTimeline() {
+  if (timelineLoaded.value) return
+  timelineLoading.value = true
+  timelineError.value = ''
+  try {
+    const data = await fetchServiceTimeline(serviceId.value, 100)
+    timeline.value = data.records
+    timelineLoaded.value = true
+  } catch (err) {
+    timelineError.value = errorMessage(err)
+  } finally {
+    timelineLoading.value = false
+  }
 }
 
-function openTargetEdit(row: Target): void {
-  editingTarget.value = row
-  targetDialogVisible.value = true
+watch(activeTab, (tab) => {
+  if (tab === 'events') loadTimeline()
+})
+
+function openCreateTarget() {
+  editingTarget.value = null
+  targetDrawerVisible.value = true
 }
 
-function onTargetSaved(): void {
-  targetDialogVisible.value = false
-  load()
+function openEditTarget(target: Target) {
+  editingTarget.value = target
+  targetDrawerVisible.value = true
 }
 
-function openEpisode(row: EpisodeSummary): void {
-  router.push({ name: 'episode-detail', params: { episodeId: row.episode_id } })
+async function toggleTarget(target: Target, enabled: boolean) {
+  try {
+    await patchTarget(target.target_id, { enabled })
+    ElMessage.success(enabled ? '监控源已启用' : '监控源已停用')
+    load()
+  } catch (err) {
+    ElMessage.error(errorMessage(err))
+  }
 }
 
-function openEpisodeById(episodeId?: string | null): void {
-  if (!episodeId) return
-  router.push({ name: 'episode-detail', params: { episodeId } })
-}
-
-function openTargetsPage(): void {
-  router.push({ name: 'targets', query: { service_id: serviceId.value } })
-}
-
-async function removeService(): Promise<void> {
-  const current = service.value
-  if (!current) return
+async function removeTarget(target: Target) {
   try {
     await ElMessageBox.confirm(
-      `确认删除服务「${current.name}」？删除后服务与监控目标将被软删除并停止采样，历史故障 Episode、采样点与诊断产物会保留。`,
-      '删除服务',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+      '删除后该监控源不再采样；历史采样点与故障 Episode 会保留。',
+      `删除监控源「${target.target_name}」`,
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
     )
   } catch {
     return
   }
-  deleting.value = true
+  deletingTargetId.value = target.target_id
   try {
-    await deleteService(current.service_id)
-    ElMessage.success('服务已删除（历史故障与诊断产物保留）')
-    router.push({ name: 'services' })
+    await deleteTarget(target.target_id)
+    ElMessage.success('监控源已删除')
+    load()
   } catch (err) {
     ElMessage.error(errorMessage(err))
   } finally {
-    deleting.value = false
+    deletingTargetId.value = ''
   }
 }
 
+async function removeService() {
+  if (!service.value) return
+  try {
+    await ElMessageBox.confirm(
+      '删除后，该服务不再出现在目录中；历史故障 Episode、采样点与诊断产物都会保留，便于回溯。',
+      `删除服务「${service.value.name}」`,
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  try {
+    await deleteService(service.value.service_id)
+    ElMessage.success('服务已删除')
+    router.push('/services')
+  } catch (err) {
+    ElMessage.error(errorMessage(err))
+  }
+}
+
+function serviceDeleted(serviceIdValue: string | number | object) {
+  if (serviceIdValue === 'delete') removeService()
+}
+
+function episodeDuration(episode: EpisodeSummary): string {
+  if (episode.resolved_at) return `持续 ${formatDuration(episode.started_at, episode.resolved_at)}`
+  return `进行中 · ${formatDuration(episode.started_at)}`
+}
+
 onMounted(load)
-watch(serviceId, load)
 </script>
 
 <template>
   <div>
-    <div class="page-toolbar">
-      <el-button link type="primary" @click="router.push({ name: 'services' })">← 返回服务列表</el-button>
-      <div class="toolbar-right">
-        <el-button :loading="loading" @click="load">刷新</el-button>
-        <el-button type="primary" plain :disabled="!service" @click="serviceDialogVisible = true">编辑服务</el-button>
-        <el-button type="danger" plain :loading="deleting" :disabled="!service" @click="removeService">删除服务</el-button>
-      </div>
-    </div>
-
-    <ErrorRetry v-if="error" :message="error" :loading="loading" class="section-gap" @retry="load" />
-
-    <div v-loading="loading">
-      <template v-if="service">
-        <el-card shadow="never" class="section-gap">
-          <template #header>
-            <div class="card-header">
-              <span class="card-header-title">
-                {{ service.name }}
-                <span class="mono text-muted">{{ service.service_key }}</span>
-              </span>
-              <div class="header-tags">
-                <StatusTag :status="service.monitor_status" />
-                <el-tag v-if="!service.enabled" size="small" type="info" effect="plain">已禁用</el-tag>
-                <el-tag v-if="service.active_episode_id" size="small" type="danger" effect="plain" class="clickable-tag" @click="openEpisodeById(service.active_episode_id)">
-                  活动故障 {{ service.active_episode_id.slice(0, 8) }}
-                </el-tag>
-              </div>
-            </div>
-          </template>
-
-          <el-descriptions :column="2" border size="small">
-            <el-descriptions-item label="服务 ID">
-              <span class="mono">{{ service.service_id }}</span>
-            </el-descriptions-item>
-            <el-descriptions-item label="服务标识">
-              <span class="mono">{{ service.service_key }}</span>
-            </el-descriptions-item>
-            <el-descriptions-item label="监控状态">
-              <StatusTag :status="service.monitor_status" />
-              <span class="text-muted desc-inline">{{ statusLabel(service.monitor_status) }}</span>
-            </el-descriptions-item>
-            <el-descriptions-item label="应用状态">
-              <StatusTag :status="service.app_status" />
-            </el-descriptions-item>
-            <el-descriptions-item label="聚合模式">{{ aggregationLabel }}</el-descriptions-item>
-            <el-descriptions-item label="权威应用">
-              <span class="mono">{{ service.authority_producer_id || '—' }}</span>
-            </el-descriptions-item>
-            <el-descriptions-item label="启用状态">
-              {{ service.enabled ? '启用' : '禁用' }}
-            </el-descriptions-item>
-            <el-descriptions-item label="描述">{{ service.description || '—' }}</el-descriptions-item>
-          </el-descriptions>
-        </el-card>
-
-        <el-card shadow="never" class="section-gap">
-          <template #header>
-            <div class="card-header">
-              <span class="card-header-title">
-                监控目标
-                <span class="card-header-sub">共 {{ targets.length }} 个</span>
-              </span>
-              <div>
-                <el-button size="small" :disabled="!service" @click="openTargetsPage">管理目标</el-button>
-              </div>
-            </div>
-          </template>
-
-          <el-table :data="targets" size="small" row-key="target_id">
-            <el-table-column label="目标标识" min-width="140">
-              <template #default="{ row }">
-                <span class="mono">{{ row.target_key }}</span>
-                <div class="text-muted">{{ row.target_name }}</div>
-              </template>
-            </el-table-column>
-            <el-table-column label="类型" width="110">
-              <template #default="{ row }">
-                <el-tag size="small" :type="targetTypeTagType(row.target_type)" effect="plain">
-                  {{ targetTypeLabel(row.target_type) }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="摘要" min-width="220" show-overflow-tooltip>
-              <template #default="{ row }">
-                <span class="mono">{{ targetSummary(row) }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="状态" width="90">
-              <template #default="{ row }"><StatusTag :status="row.status" /></template>
-            </el-table-column>
-            <el-table-column prop="consecutive_failures" label="连续失败" width="90" align="right" />
-            <el-table-column prop="consecutive_successes" label="连续成功" width="90" align="right" />
-            <el-table-column label="最近观测时间" width="170">
-              <template #default="{ row }">{{ formatDateTime(row.last_check_at) }}</template>
-            </el-table-column>
-            <el-table-column label="操作" width="90" fixed="right">
-              <template #default="{ row }">
-                <el-button link type="primary" size="small" @click="openTargetEdit(row)">编辑</el-button>
-              </template>
-            </el-table-column>
-            <template #empty>
-              <el-empty description="暂无监控目标" :image-size="64" class="empty-compact">
-                <el-button size="small" type="primary" @click="openTargetsPage">前往新增</el-button>
-              </el-empty>
-            </template>
-          </el-table>
-        </el-card>
-
-        <el-card shadow="never">
-          <template #header>
-            <div class="card-header">
-              <span class="card-header-title">
-                关联活动 Episode
-                <span class="card-header-sub">仅显示 ACTIVE 状态，最多 20 条</span>
-              </span>
-              <el-button size="small" @click="router.push({ name: 'episodes', query: { service_id: service.service_id } })">
-                查看全部
-              </el-button>
-            </div>
-          </template>
-
-          <el-table
-            v-if="activeEpisodes.length > 0"
-            :data="activeEpisodes"
-            size="small"
-            row-class-name="clickable-row"
-            @row-click="openEpisode"
-          >
-            <el-table-column label="Episode" width="120">
-              <template #default="{ row }"><span class="mono">{{ row.episode_id.slice(0, 8) }}</span></template>
-            </el-table-column>
-            <el-table-column label="状态" width="90">
-              <template #default="{ row }"><StatusTag :status="row.status" /></template>
-            </el-table-column>
-            <el-table-column label="开始时间" width="170">
-              <template #default="{ row }">{{ formatDateTime(row.started_at) }}</template>
-            </el-table-column>
-            <el-table-column label="恢复时间" width="170">
-              <template #default="{ row }">{{ formatDateTime(row.resolved_at) }}</template>
-            </el-table-column>
-            <el-table-column label="输入版本" width="150">
-              <template #default="{ row }">
-                <span class="mono">{{ row.input_version }} / {{ row.processed_input_version }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="更新时间" width="170">
-              <template #default="{ row }">{{ formatDateTime(row.updated_at) }}</template>
-            </el-table-column>
-          </el-table>
-          <el-empty v-else description="当前没有活动故障" :image-size="64" class="empty-compact" />
-        </el-card>
+    <PageHeader
+      :title="service?.name ?? '服务详情'"
+      :subtitle="service ? `服务标识 ${service.service_key}` : undefined"
+      back-to="/services"
+      back-text="返回服务列表"
+    >
+      <template #title-extra>
+        <StatusTag v-if="service && !service.enabled" status="DISABLED" />
       </template>
-    </div>
+      <template #meta>
+        <div v-if="service" class="page-meta">
+          <DualStatus :monitor-status="service.monitor_status" :app-status="service.app_status" inline />
+          <span :title="tooltipDateTime(service.last_check_at)">
+            最近观测 {{ formatLastObservation(service.last_check_at) }}
+          </span>
+          <span class="mono">{{ service.targets.length }} 个监控源</span>
+        </div>
+      </template>
+      <template #actions>
+        <el-button :loading="loading" @click="load">
+          <el-icon><Refresh /></el-icon>
+          <span>刷新</span>
+        </el-button>
+        <el-button :disabled="!service" @click="serviceDialogVisible = true">编辑</el-button>
+        <el-dropdown v-if="service" trigger="click" @command="serviceDeleted">
+          <el-button>
+            更多<el-icon><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="delete">删除服务</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+      </template>
+    </PageHeader>
 
-    <ServiceFormDialog
-      v-model="serviceDialogVisible"
-      mode="edit"
-      :service="service"
-      @saved="onServiceSaved"
-    />
+    <StateBlock v-if="loading && !service" mode="loading" />
+    <StateBlock v-else-if="error && !service" mode="error" :message="error" @retry="load" />
 
-    <TargetFormDialog
-      v-model="targetDialogVisible"
+    <template v-else-if="service">
+      <el-tabs v-model="activeTab">
+        <el-tab-pane label="概览" name="overview">
+          <div class="overview-grid">
+            <section class="af-panel">
+              <div class="af-panel-head">
+                <div class="af-panel-title">当前健康</div>
+              </div>
+              <div class="kv-list">
+                <div class="kv-row">
+                  <div class="kv-key">监控状态</div>
+                  <div class="kv-value"><StatusTag :status="service.monitor_status" /></div>
+                </div>
+                <div class="kv-row">
+                  <div class="kv-key">应用状态</div>
+                  <div class="kv-value">
+                    <StatusTag :status="service.app_status" />
+                    <div class="form-hint">应用状态由应用侧事件上报决定，与监控采样相互独立。</div>
+                  </div>
+                </div>
+                <div class="kv-row">
+                  <div class="kv-key">最近观测</div>
+                  <div class="kv-value num" :title="tooltipDateTime(service.last_check_at)">
+                    {{ formatLastObservation(service.last_check_at) }}
+                  </div>
+                </div>
+                <div class="kv-row">
+                  <div class="kv-key">聚合方式</div>
+                  <div class="kv-value">{{ aggregationLabel(service.monitor_aggregation_mode) }}</div>
+                </div>
+                <div class="kv-row">
+                  <div class="kv-key">应用生产者</div>
+                  <div class="kv-value mono">{{ service.authority_producer_id || '—' }}</div>
+                </div>
+              </div>
+            </section>
+
+            <section class="af-panel">
+              <div class="af-panel-head">
+                <div class="af-panel-title">
+                  活动故障
+                  <span class="af-panel-sub">当前尚未恢复的 Episode</span>
+                </div>
+              </div>
+              <StateBlock v-if="activeEpisodes.length === 0" mode="empty" message="当前没有进行中的故障" compact />
+              <div v-else class="recent-list">
+                <div v-for="episode in activeEpisodes" :key="episode.episode_id" class="recent-row">
+                  <div class="recent-main">
+                    <div class="recent-name">
+                      <router-link :to="`/episodes/${episode.episode_id}`">查看故障详情</router-link>
+                      <StatusTag :status="episode.status" size="small" />
+                    </div>
+                    <div class="recent-meta">
+                      <span>开始于 {{ formatDateTime(episode.started_at) }}</span>
+                      <span>{{ diagnosisState(episode.active_task_status, episode.active_task_type).label }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="af-panel overview-grid-span">
+              <div class="af-panel-head">
+                <div class="af-panel-title">服务说明</div>
+              </div>
+              <div class="af-panel-body">
+                <p v-if="service.description" class="description-text">{{ service.description }}</p>
+                <span v-else class="text-muted">未填写服务说明。</span>
+              </div>
+            </section>
+          </div>
+        </el-tab-pane>
+
+        <el-tab-pane label="监控源" name="monitors">
+          <section class="af-panel">
+            <div class="af-panel-head">
+              <div class="af-panel-title">
+                监控源
+                <span class="af-panel-sub">HTTP / TCP / K8s 资源的观测配置</span>
+              </div>
+              <div class="af-panel-actions">
+                <el-button size="small" type="primary" @click="openCreateTarget">
+                  <el-icon><Plus /></el-icon>
+                  <span>新增监控源</span>
+                </el-button>
+              </div>
+            </div>
+            <el-table :data="service.targets" row-key="target_id" style="width: 100%">
+              <el-table-column label="名称" min-width="200">
+                <template #default="{ row }">
+                  <div class="service-cell">
+                    <span class="service-name">{{ row.target_name }}</span>
+                    <div class="service-key mono">{{ row.target_key }}</div>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="类型" width="110">
+                <template #default="{ row }">
+                  <span>{{ targetTypeLabel(row.target_type) }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="140">
+                <template #default="{ row }">
+                  <StatusTag v-if="row.enabled" :status="row.status" />
+                  <StatusTag v-else status="DISABLED" />
+                </template>
+              </el-table-column>
+              <el-table-column label="最近观测" min-width="180">
+                <template #default="{ row }">
+                  <span
+                    class="text-secondary num"
+                    :title="tooltipDateTime(row.last_check_at)"
+                  >{{ formatLastObservation(row.last_check_at) }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="210" fixed="right">
+                <template #default="{ row }">
+                  <div class="row-actions">
+                    <span class="table-link" @click="openEditTarget(row)">编辑</span>
+                    <el-switch
+                      :model-value="row.enabled"
+                      size="small"
+                      :loading="false"
+                      @change="(value: string | number | boolean) => toggleTarget(row, Boolean(value))"
+                    />
+                    <span
+                      class="table-link is-danger"
+                      :class="{ 'is-loading': deletingTargetId === row.target_id }"
+                      @click="removeTarget(row)"
+                    >删除</span>
+                  </div>
+                </template>
+              </el-table-column>
+              <template #empty>
+                <StateBlock mode="empty" message="还没有监控源，先新增一个 HTTP、TCP 或 K8s 监控源">
+                  <el-button size="small" type="primary" @click="openCreateTarget">新增监控源</el-button>
+                </StateBlock>
+              </template>
+            </el-table>
+          </section>
+        </el-tab-pane>
+
+        <el-tab-pane label="事件记录" name="events">
+          <section class="af-panel">
+            <div class="af-panel-head">
+              <div class="af-panel-title">
+                监控观测
+                <span class="af-panel-sub">服务下所有监控源最近的采样结果</span>
+              </div>
+            </div>
+            <StateBlock v-if="timelineLoading" mode="loading" compact />
+            <StateBlock v-else-if="timelineError" mode="error" :message="timelineError" compact @retry="loadTimeline" />
+            <StateBlock v-else-if="timeline.length === 0" mode="empty" message="还没有监控采样记录" compact />
+            <div v-else class="event-list">
+              <div v-for="record in timeline" :key="record.record_id" class="event-item">
+                <div class="event-time" :title="tooltipDateTime(record.event_time)">
+                  {{ formatDateTime(record.event_time) }}
+                </div>
+                <div class="event-body">
+                  <div class="event-head">
+                    <span class="event-source">监控采样</span>
+                    <StatusTag
+                      :status="record.content?.check_status === 'SUCCESS' ? 'NORMAL' : 'ABNORMAL'"
+                      :label="checkStatusLabel(record.content?.check_status)"
+                      size="small"
+                    />
+                    <span class="event-detail">
+                      {{ evidenceSummary(record.content?.diagnostic_fields?.status_class, record.content?.diagnostic_fields?.error_class) }}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="af-panel">
+            <div class="af-panel-head">
+              <div class="af-panel-title">
+                故障记录
+                <span class="af-panel-sub">该服务的历史 Episode</span>
+              </div>
+              <router-link :to="`/episodes?service_id=${service.service_id}`" class="text-small">查看全部</router-link>
+            </div>
+            <StateBlock v-if="episodes.length === 0" mode="empty" message="该服务还没有故障记录" compact />
+            <el-table v-else :data="episodes" row-key="episode_id" style="width: 100%">
+              <el-table-column label="状态" width="110">
+                <template #default="{ row }"><StatusTag :status="row.status" size="small" /></template>
+              </el-table-column>
+              <el-table-column label="开始时间" min-width="180">
+                <template #default="{ row }">
+                  <span class="num" :title="tooltipDateTime(row.started_at)">{{ formatDateTime(row.started_at) }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="持续 / 恢复" min-width="200">
+                <template #default="{ row }">
+                  <span class="num">{{ episodeDuration(row) }}</span>
+                  <div v-if="row.resolved_at" class="text-muted text-small num">
+                    恢复于 {{ formatDateTime(row.resolved_at) }}
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="诊断状态" width="150">
+                <template #default="{ row }">
+                  <StatusTag
+                    :label="diagnosisState(row.active_task_status, row.active_task_type).label"
+                    :tone="diagnosisState(row.active_task_status, row.active_task_type).tone"
+                    size="small"
+                  />
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="90" fixed="right">
+                <template #default="{ row }">
+                  <router-link :to="`/episodes/${row.episode_id}`" class="table-link">查看</router-link>
+                </template>
+              </el-table-column>
+            </el-table>
+          </section>
+        </el-tab-pane>
+      </el-tabs>
+    </template>
+
+    <TargetFormDrawer
+      v-model="targetDrawerVisible"
       :service-id="serviceId"
-      :service-name="service?.name"
       :target="editingTarget"
-      @saved="onTargetSaved"
+      @saved="load"
     />
+    <ServiceFormDialog v-model="serviceDialogVisible" :service="service" @saved="load" />
   </div>
 </template>
-
-<style scoped>
-.header-tags {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.clickable-tag {
-  cursor: pointer;
-}
-
-.desc-inline {
-  margin-left: 8px;
-}
-
-:deep(.clickable-row) {
-  cursor: pointer;
-}
-
-:deep(.clickable-row:hover td) {
-  background: #f5f7fa;
-}
-</style>

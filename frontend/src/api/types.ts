@@ -1,10 +1,12 @@
-// 与 /tmp/alertflow-delivery/contracts.md 及 backend/internal/system 模型对齐的 API 类型定义。
+// 与 backend/internal/system 模型对齐的 API 类型定义。
 // 字段名一律按后端 JSON（snake_case），前端不做二次命名转换。
 
 export type MonitorStatus = 'NORMAL' | 'ABNORMAL' | 'UNKNOWN'
 export type EpisodeStatus = 'ACTIVE' | 'RESOLVED' | 'ARCHIVED'
 export type TargetType = 'HTTP' | 'TCP' | 'KUBERNETES'
 export type ResourceKind = 'Deployment' | 'StatefulSet'
+export type TaskStatus = 'PENDING' | 'DISPATCHED' | 'RUNNING' | 'RETRY_WAIT' | 'SUCCEEDED' | 'FAILED'
+export type TaskType = 'DIAGNOSIS' | 'ARCHIVE'
 
 export interface ApiErrorBody {
   error_code?: string
@@ -134,6 +136,29 @@ export interface ServicePatchPayload {
   enabled?: boolean
 }
 
+/** 服务级时间轴记录（GET /services/:id/timeline 的 records 元素）。 */
+export interface ServiceTimelineRecord {
+  record_type: string
+  record_id: string
+  event_time: string
+  received_at: string
+  source: string
+  content: {
+    check_status?: string
+    diagnostic_fields?: {
+      status_class?: string
+      error_class?: string
+      state_fingerprint?: string
+      [key: string]: unknown
+    } | null
+    [key: string]: unknown
+  } | null
+}
+
+export interface ServiceTimeline {
+  records: ServiceTimelineRecord[]
+}
+
 export interface EpisodeSummary {
   episode_id: string
   service_id: string
@@ -147,6 +172,8 @@ export interface EpisodeSummary {
   input_version: number
   processed_input_version: number
   active_task_status: string
+  active_task_type?: string
+  has_diagnosis_report?: boolean
   updated_at: string
 }
 
@@ -186,6 +213,18 @@ export interface MonitorField {
   state_fingerprint?: string
 }
 
+/** Episode 时间轴中的一条监控采样点（GET /episodes/:id/timeline 的 monitor_points）。 */
+export interface MonitorPoint {
+  point_seq: number
+  target_id: string
+  target_key: string
+  target_type: TargetType
+  observed_at: string
+  check_status: string
+  status_class: string
+  error_class: string
+}
+
 /** 时间轴区域二：应用事件 */
 export interface AppEvent {
   event_record_id: string
@@ -211,6 +250,7 @@ export interface EpisodeTimeline {
   episode: EpisodeView
   region1_projection: MonitorField[] | null
   monitor_start_point_seq: number
+  monitor_points: MonitorPoint[] | null
   region2_events: AppEvent[] | null
   region3_refs: ArtifactRef[] | null
 }

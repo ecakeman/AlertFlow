@@ -2,6 +2,7 @@ import { http } from './client'
 import type {
   ServiceCreatePayload,
   ServicePatchPayload,
+  ServiceTimeline,
   ServiceView,
   ServicesPage,
   Target,
@@ -12,6 +13,8 @@ export interface ServiceListParams {
   limit?: number
   offset?: number
   status?: 'NORMAL' | 'ABNORMAL' | 'UNKNOWN' | ''
+  /** 服务端模糊搜索：匹配服务名称与 service_key（不区分大小写）。 */
+  q?: string
 }
 
 export async function fetchServices(params: ServiceListParams = {}): Promise<ServicesPage> {
@@ -20,6 +23,8 @@ export async function fetchServices(params: ServiceListParams = {}): Promise<Ser
     offset: params.offset ?? 0
   }
   if (params.status) query.status = params.status
+  const keyword = params.q?.trim()
+  if (keyword) query.q = keyword
   const { data } = await http.get<ServicesPage>('/services', { params: query })
   return data
 }
@@ -48,6 +53,14 @@ export async function fetchServiceTargets(serviceId: string): Promise<Target[]> 
     `/services/${encodeURIComponent(serviceId)}/targets`
   )
   return data.targets ?? []
+}
+
+/** 服务级监控观测记录，最多 200 条（后端默认 50，倒序返回）。 */
+export async function fetchServiceTimeline(serviceId: string, limit = 100): Promise<ServiceTimeline> {
+  const { data } = await http.get<ServiceTimeline>(`/services/${encodeURIComponent(serviceId)}/timeline`, {
+    params: { limit }
+  })
+  return { records: data.records ?? [] }
 }
 
 export async function createTarget(serviceId: string, payload: TargetInput): Promise<Target> {

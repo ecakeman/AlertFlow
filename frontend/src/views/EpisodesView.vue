@@ -1,65 +1,47 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { fetchEpisodes } from '../api/episodes'
 import { fetchServices } from '../api/services'
 import { errorMessage } from '../api/client'
 import type { EpisodeStatus, EpisodeSummary, ServiceSummary } from '../api/types'
-import ErrorRetry from '../components/ErrorRetry.vue'
+import PageHeader from '../components/PageHeader.vue'
+import StateBlock from '../components/StateBlock.vue'
 import StatusTag from '../components/StatusTag.vue'
-import { formatDateTime, localTimeZoneLabel, toRfc3339 } from '../utils/time'
+import { diagnosisState, episodeStatusOptions } from '../utils/status'
+import { formatDateTime, formatDuration, toRfc3339, tooltipDateTime } from '../utils/time'
 
 const route = useRoute()
 const router = useRouter()
-
-const timezone = localTimeZoneLabel()
 
 const episodes = ref<EpisodeSummary[]>([])
 const total = ref(0)
 const loading = ref(false)
 const error = ref('')
-const statusFilter = ref<'' | EpisodeStatus>('')
-const serviceFilter = ref('')
-const dateRange = ref<[Date, Date] | null>(null)
-const limit = ref(20)
-const offset = ref(0)
-const serviceOptions = ref<ServiceSummary[]>([])
 
-const page = computed(() => Math.floor(offset.value / limit.value) + 1)
+const services = ref<ServiceSummary[]>([])
+const status = ref<EpisodeStatus | ''>('')
+const serviceId = ref('')
+const range = ref<[Date, Date] | null>(null)
+const page = ref(1)
+const pageSize = ref(20)
 
-const statusTabs: Array<{ label: string; value: '' | EpisodeStatus }> = [
-  { label: '全部', value: '' },
-  { label: '活动 ACTIVE', value: 'ACTIVE' },
-  { label: '已恢复 RESOLVED', value: 'RESOLVED' },
-  { label: '已归档 ARCHIVED', value: 'ARCHIVED' }
-]
+const offset = computed(() => (page.value - 1) * pageSize.value)
 
-async function loadServices(): Promise<void> {
-  try {
-    const data = await fetchServices({ limit: 200, offset: 0 })
-    serviceOptions.value = data.services ?? []
-  } catch {
-    // 服务筛选器加载失败不阻塞 Episode 列表主流程
-    serviceOptions.value = []
-  }
-}
-
-async function load(): Promise<void> {
+async function loadEpisodes() {
   loading.value = true
   error.value = ''
   try {
-    const from = dateRange.value ? toRfc3339(dateRange.value[0]) : undefined
-    const to = dateRange.value ? toRfc3339(new Date(dateRange.value[1].getTime() + 999)) : undefined
     const data = await fetchEpisodes({
-      status: statusFilter.value,
-      service_id: serviceFilter.value || undefined,
-      from,
-      to,
-      limit: limit.value,
+      status: status.value,
+      service_id: serviceId.value || undefined,
+      from: range.value ? toRfc3339(range.value[0]) : undefined,
+      to: range.value ? toRfc3339(range.value[1]) : undefined,
+      limit: pageSize.value,
       offset: offset.value
     })
-    episodes.value = data.episodes ?? []
-    total.value = data.total ?? 0
+    episodes.value = data.episodes
+    total.value = data.total
   } catch (err) {
     error.value = errorMessage(err)
   } finally {
@@ -67,201 +49,180 @@ async function load(): Promise<void> {
   }
 }
 
-function reloadFirstPage(): void {
-  offset.value = 0
-  load()
-}
-
-function onPageChange(value: number): void {
-  offset.value = (value - 1) * limit.value
-  load()
-}
-
-function onSizeChange(value: number): void {
-  limit.value = value
-  offset.value = 0
-  load()
-}
-
-function resetFilters(): void {
-  statusFilter.value = ''
-  serviceFilter.value = ''
-  dateRange.value = null
-  reloadFirstPage()
-}
-
-function openEpisode(row: EpisodeSummary): void {
-  router.push({ name: 'episode-detail', params: { episodeId: row.episode_id } })
-}
-
-function openService(row: EpisodeSummary): void {
-  router.push({ name: 'service-detail', params: { serviceId: row.service_id } })
-}
-
-onMounted(async () => {
-  await loadServices()
-  const queryService = String(route.query.service_id ?? '')
-  if (queryService) serviceFilter.value = queryService
-  await load()
-})
-
-watch(
-  () => route.query.service_id,
-  (value) => {
-    const next = String(value ?? '')
-    if (next && next !== serviceFilter.value) {
-      serviceFilter.value = next
-      reloadFirstPage()
-    }
+async function loadServices() {
+  try {
+    const data = await fetchServices({ limit: 200 })
+    services.value = data.services
+  } catch {
+    // 服务筛选只是辅助，加载失败不阻塞故障列表
+    services.value = []
   }
-)
+}
+
+function syncQuery() {
+  const query: Record<string, string> = {}
+  if (status.value) query.status = status.value
+  if (serviceId.value) query.service_id = serviceId.value
+  router.replace({ query }).catch(() => undefined)
+}
+
+function applyFilters() {
+  page.value = 1
+  syncQuery()
+  loadEpisodes()
+}
+
+function resetFilters() {
+  status.value = ''
+  serviceId.value = ''
+  range.value = null
+  applyFilters()
+}
+
+function changePage(next: number) {
+  page.value = next
+  loadEpisodes()
+}
+
+function changePageSize(size: number) {
+  pageSize.value = size
+  page.value = 1
+  loadEpisodes()
+}
+
+function openEpisode(episode: EpisodeSummary) {
+  router.push(`/episodes/${episode.episode_id}`)
+}
+
+function durationText(episode: EpisodeSummary): string {
+  if (episode.resolved_at) return `持续 ${formatDuration(episode.started_at, episode.resolved_at)}`
+  return `进行中 · ${formatDuration(episode.started_at)}`
+}
+
+onMounted(() => {
+  const queryStatus = String(route.query.status ?? '')
+  if (queryStatus === 'ACTIVE' || queryStatus === 'RESOLVED' || queryStatus === 'ARCHIVED') {
+    status.value = queryStatus
+  }
+  serviceId.value = String(route.query.service_id ?? '')
+  loadServices()
+  loadEpisodes()
+})
 </script>
 
 <template>
   <div>
-    <div class="page-toolbar">
-      <el-radio-group v-model="statusFilter" @change="reloadFirstPage">
-        <el-radio-button v-for="tab in statusTabs" :key="tab.value || 'ALL'" :value="tab.value">
-          {{ tab.label }}
-        </el-radio-button>
-      </el-radio-group>
+    <PageHeader title="故障记录" subtitle="服务故障的时间线、状态与诊断进度">
+      <template #actions>
+        <el-button :loading="loading" @click="loadEpisodes">
+          <el-icon><Refresh /></el-icon>
+          <span>刷新</span>
+        </el-button>
+      </template>
+    </PageHeader>
 
-      <el-select
-        v-model="serviceFilter"
-        filterable
-        clearable
-        placeholder="全部服务"
-        style="width: 220px"
-        @change="reloadFirstPage"
-      >
-        <el-option
-          v-for="item in serviceOptions"
-          :key="item.service_id"
-          :label="`${item.name}（${item.service_key}）`"
-          :value="item.service_id"
+    <div class="toolbar">
+      <div class="filter-bar">
+        <el-select v-model="status" style="width: 130px" @change="applyFilters">
+          <el-option label="全部状态" value="" />
+          <el-option
+            v-for="option in episodeStatusOptions()"
+            :key="option.value"
+            :label="option.label"
+            :value="option.value"
+          />
+        </el-select>
+        <el-select
+          v-model="serviceId"
+          style="width: 220px"
+          filterable
+          clearable
+          placeholder="全部服务"
+          @change="applyFilters"
+        >
+          <el-option v-for="service in services" :key="service.service_id" :label="service.name" :value="service.service_id" />
+        </el-select>
+        <el-date-picker
+          v-model="range"
+          type="datetimerange"
+          range-separator="至"
+          start-placeholder="开始时间"
+          end-placeholder="结束时间"
+          :clearable="true"
+          @change="applyFilters"
         />
-      </el-select>
-
-      <el-date-picker
-        v-model="dateRange"
-        type="datetimerange"
-        range-separator="至"
-        start-placeholder="开始时间（含）"
-        end-placeholder="结束时间（含）"
-        :clearable="true"
-        style="width: 360px"
-        @change="reloadFirstPage"
-      />
-
-      <el-button :loading="loading" @click="load">刷新</el-button>
-      <el-button @click="resetFilters">重置筛选</el-button>
+        <el-button v-if="status || serviceId || range" text @click="resetFilters">清空筛选</el-button>
+      </div>
+      <div class="text-small text-secondary">共 {{ total }} 条，按开始时间倒序</div>
     </div>
 
-    <ErrorRetry v-if="error" :message="error" :loading="loading" class="section-gap" @retry="load" />
-
-    <el-card shadow="never">
-      <template #header>
-        <div class="card-header">
-          <span class="card-header-title">
-            故障 Episode
-            <span class="card-header-sub">按开始时间倒序，起止时间按 {{ timezone }} 本地时间筛选</span>
-          </span>
-          <span class="card-header-sub">共 {{ total }} 条</span>
-        </div>
-      </template>
-
+    <div class="af-panel">
+      <StateBlock v-if="loading && episodes.length === 0" mode="loading" />
+      <StateBlock v-else-if="error && episodes.length === 0" mode="error" :message="error" @retry="loadEpisodes" />
       <el-table
+        v-else
         v-loading="loading"
         :data="episodes"
-        size="small"
         row-key="episode_id"
-        row-class-name="clickable-row"
+        style="width: 100%"
         @row-click="openEpisode"
       >
-        <el-table-column label="Episode" width="140">
+        <el-table-column label="服务" min-width="200">
           <template #default="{ row }">
-            <span class="mono">{{ row.episode_id.slice(0, 8) }}</span>
+            <router-link :to="`/episodes/${row.episode_id}`" class="service-name" @click.stop>
+              {{ row.service_name }}
+            </router-link>
           </template>
         </el-table-column>
-        <el-table-column label="服务" min-width="170" show-overflow-tooltip>
+        <el-table-column label="Episode 状态" min-width="150">
           <template #default="{ row }">
-            <span class="clickable" @click.stop="openService(row)">{{ row.service_name || row.service_id }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" width="150">
-          <template #default="{ row }">
-            <div class="status-cell">
+            <div class="episode-status-cell">
               <StatusTag :status="row.status" />
-              <el-tag v-if="row.resolution_pending" size="small" type="warning" effect="plain">恢复待处理</el-tag>
+              <span v-if="row.resolution_pending" class="text-muted text-small">待归档</span>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="开始时间" width="170">
-          <template #default="{ row }">{{ formatDateTime(row.started_at) }}</template>
-        </el-table-column>
-        <el-table-column label="恢复时间" width="170">
-          <template #default="{ row }">{{ formatDateTime(row.resolved_at) }}</template>
-        </el-table-column>
-        <el-table-column label="输入版本" width="150">
+        <el-table-column label="开始时间" min-width="180">
           <template #default="{ row }">
-            <span class="mono">{{ row.input_version }} / {{ row.processed_input_version }}</span>
+            <span class="num" :title="tooltipDateTime(row.started_at)">{{ formatDateTime(row.started_at) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="任务状态" width="110">
+        <el-table-column label="持续 / 恢复" min-width="210">
           <template #default="{ row }">
-            <StatusTag v-if="row.active_task_status" :status="row.active_task_status" />
-            <span v-else class="text-muted">—</span>
+            <span class="num">{{ durationText(row) }}</span>
+            <div v-if="row.resolved_at" class="text-muted text-small num">
+              恢复于 {{ formatDateTime(row.resolved_at) }}
+            </div>
           </template>
         </el-table-column>
-        <el-table-column prop="started_by" label="触发者" width="110" show-overflow-tooltip />
-        <el-table-column label="更新时间" width="170">
-          <template #default="{ row }">{{ formatDateTime(row.updated_at) }}</template>
-        </el-table-column>
-        <el-table-column label="操作" width="80" fixed="right">
+        <el-table-column label="诊断状态" min-width="170">
           <template #default="{ row }">
-            <el-button link type="primary" size="small" @click.stop="openEpisode(row)">详情</el-button>
+            <StatusTag
+              :label="diagnosisState(row.active_task_status, row.active_task_type, row.has_diagnosis_report).label"
+              :tone="diagnosisState(row.active_task_status, row.active_task_type, row.has_diagnosis_report).tone"
+            />
           </template>
         </el-table-column>
         <template #empty>
-          <el-empty description="没有符合条件的 Episode" :image-size="72" class="empty-compact" />
+          <StateBlock
+            mode="empty"
+            :message="status || serviceId || range ? '没有匹配的故障记录，试试调整筛选条件' : '还没有故障记录'"
+          />
         </template>
       </el-table>
 
-      <div class="pagination-bar">
+      <div v-if="total > 0" class="pagination-bar">
         <el-pagination
           :current-page="page"
-          :page-size="limit"
+          :page-size="pageSize"
+          :page-sizes="[20, 50, 100]"
           :total="total"
-          :page-sizes="[10, 20, 50, 100]"
-          layout="total, sizes, prev, pager, next, jumper"
+          layout="total, sizes, prev, pager, next"
           background
-          @current-change="onPageChange"
-          @size-change="onSizeChange"
+          @current-change="changePage"
+          @size-change="changePageSize"
         />
       </div>
-    </el-card>
+    </div>
   </div>
 </template>
-
-<style scoped>
-.status-cell {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-
-.pagination-bar {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 12px;
-}
-
-:deep(.clickable-row) {
-  cursor: pointer;
-}
-
-:deep(.clickable-row:hover td) {
-  background: #f5f7fa;
-}
-</style>

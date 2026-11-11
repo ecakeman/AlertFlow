@@ -2,281 +2,274 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import * as echarts from 'echarts'
-import type { ECharts, EChartsOption } from 'echarts'
 import { fetchDashboardSummary } from '../api/dashboard'
+import { fetchServices } from '../api/services'
 import { errorMessage } from '../api/client'
-import type { DashboardSummary, EpisodeSummary } from '../api/types'
-import ErrorRetry from '../components/ErrorRetry.vue'
+import type { DashboardSummary, ServiceSummary } from '../api/types'
+import PageHeader from '../components/PageHeader.vue'
+import StateBlock from '../components/StateBlock.vue'
 import StatusTag from '../components/StatusTag.vue'
-import { formatClock, formatDateTime, localTimeZoneLabel } from '../utils/time'
+import DualStatus from '../components/DualStatus.vue'
+import { diagnosisState, statusLabel } from '../utils/status'
+import {
+  formatClock,
+  formatDateTime,
+  formatDuration,
+  formatLastObservation,
+  tooltipDateTime
+} from '../utils/time'
 
 const router = useRouter()
 
 const summary = ref<DashboardSummary | null>(null)
+const attentionServices = ref<ServiceSummary[]>([])
 const loading = ref(false)
 const error = ref('')
-const chartEl = ref<HTMLDivElement>()
-let chart: ECharts | null = null
 
-const timezone = localTimeZoneLabel()
+const chartEl = ref<HTMLDivElement | null>(null)
+let chart: echarts.ECharts | null = null
 
-const trend = computed(() => summary.value?.monitor_trend ?? [])
-const hasTrend = computed(() => trend.value.length > 0)
-const recentEpisodes = computed<EpisodeSummary[]>(() => summary.value?.recent_episodes ?? [])
+const trendPoints = computed(() => summary.value?.monitor_trend ?? [])
+const hasTrend = computed(() =>
+  trendPoints.value.some((point) => point.success + point.failure > 0)
+)
+const updatedLabel = computed(() =>
+  summary.value ? `数据更新于 ${formatDateTime(summary.value.generated_at)}` : ''
+)
 
-async function load(): Promise<void> {
+async function load() {
   loading.value = true
   error.value = ''
   try {
-    summary.value = await fetchDashboardSummary()
-    await nextTick()
-    renderChart()
+    const [dashboard, abnormal] = await Promise.all([
+      fetchDashboardSummary(),
+      fetchServices({ status: 'ABNORMAL', limit: 20 })
+    ])
+    summary.value = dashboard
+    attentionServices.value = abnormal.services
   } catch (err) {
     error.value = errorMessage(err)
   } finally {
     loading.value = false
   }
+  await nextTick()
+  renderChart()
 }
 
-function renderChart(): void {
-  if (!hasTrend.value) {
+function renderChart() {
+  if (!chartEl.value || !hasTrend.value) {
     chart?.dispose()
     chart = null
     return
   }
-  if (!chartEl.value) return
   if (!chart) chart = echarts.init(chartEl.value)
-  const option: EChartsOption = {
-    grid: { left: 44, right: 16, top: 34, bottom: 30 },
-    tooltip: { trigger: 'axis' },
-    legend: { data: ['成功', '失败'], right: 0, top: 0, itemWidth: 12, itemHeight: 12 },
-    xAxis: {
-      type: 'category',
-      boundaryGap: true,
-      data: trend.value.map((point) => formatClock(point.bucket_start)),
-      axisLabel: { color: '#909399' },
-      axisLine: { lineStyle: { color: '#dcdfe6' } }
-    },
-    yAxis: {
-      type: 'value',
-      minInterval: 1,
-      splitLine: { lineStyle: { color: '#f0f2f5' } },
-      axisLabel: { color: '#909399' }
-    },
-    series: [
-      {
-        name: '成功',
-        type: 'bar',
-        stack: 'total',
-        barMaxWidth: 28,
-        data: trend.value.map((point) => point.success),
-        itemStyle: { color: '#67c23a' }
+  const points = trendPoints.value
+  chart.setOption(
+    {
+      grid: { left: 4, right: 8, top: 26, bottom: 2, containLabel: true },
+      legend: {
+        right: 0,
+        top: 0,
+        itemWidth: 8,
+        itemHeight: 8,
+        textStyle: { color: '#65727d', fontSize: 11 }
       },
-      {
-        name: '失败',
-        type: 'bar',
-        stack: 'total',
-        barMaxWidth: 28,
-        data: trend.value.map((point) => point.failure),
-        itemStyle: { color: '#f56c6c' }
-      }
-    ]
-  }
-  chart.setOption(option, true)
-  chart.resize()
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'shadow' },
+        textStyle: { fontSize: 12 }
+      },
+      xAxis: {
+        type: 'category',
+        data: points.map((point) => formatClock(point.bucket_start)),
+        axisLine: { lineStyle: { color: '#dde3e7' } },
+        axisTick: { show: false },
+        axisLabel: { color: '#8b959e', fontSize: 11 }
+      },
+      yAxis: {
+        type: 'value',
+        minInterval: 1,
+        splitLine: { lineStyle: { color: '#eef1f3' } },
+        axisLabel: { color: '#8b959e', fontSize: 11 }
+      },
+      series: [
+        {
+          name: '成功',
+          type: 'bar',
+          stack: 'samples',
+          barMaxWidth: 14,
+          itemStyle: { color: '#2e755c' },
+          data: points.map((point) => point.success)
+        },
+        {
+          name: '失败',
+          type: 'bar',
+          stack: 'samples',
+          barMaxWidth: 14,
+          itemStyle: { color: '#b83e3a' },
+          data: points.map((point) => point.failure)
+        }
+      ]
+    },
+    true
+  )
 }
 
-function resizeChart(): void {
+function handleResize() {
   chart?.resize()
+}
+
+function openEpisode(episodeId: string) {
+  router.push(`/episodes/${episodeId}`)
+}
+
+function recentDuration(startedAt: string, resolvedAt: string | null): string {
+  if (resolvedAt) return `持续 ${formatDuration(startedAt, resolvedAt)}`
+  return `进行中 · ${formatDuration(startedAt)}`
 }
 
 onMounted(() => {
   load()
-  window.addEventListener('resize', resizeChart)
+  window.addEventListener('resize', handleResize)
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('resize', resizeChart)
+  window.removeEventListener('resize', handleResize)
   chart?.dispose()
   chart = null
 })
-
-function openEpisode(row: EpisodeSummary): void {
-  router.push({ name: 'episode-detail', params: { episodeId: row.episode_id } })
-}
 </script>
 
 <template>
   <div>
-    <div class="page-toolbar">
-      <div class="text-muted">
-        数据生成时间：{{ formatDateTime(summary?.generated_at) }}
-        <span class="tz-inline">（{{ timezone }}）</span>
+    <PageHeader title="运行总览" subtitle="服务健康与近期故障">
+      <template #actions>
+        <span v-if="updatedLabel" class="text-small text-secondary">{{ updatedLabel }}</span>
+        <el-button :loading="loading" @click="load">
+          <el-icon><Refresh /></el-icon>
+          <span>刷新</span>
+        </el-button>
+      </template>
+    </PageHeader>
+
+    <StateBlock v-if="loading && !summary" mode="loading" />
+    <StateBlock v-else-if="error && !summary" mode="error" :message="error" @retry="load" />
+
+    <template v-else-if="summary">
+      <div class="summary-strip">
+        <router-link to="/episodes?status=ACTIVE" class="summary-item">
+          <span class="summary-value" :class="{ 'is-danger': summary.episodes.active > 0 }">
+            {{ summary.episodes.active }}
+          </span>
+          <span class="summary-label">活动故障</span>
+        </router-link>
+        <router-link to="/services?status=ABNORMAL" class="summary-item">
+          <span class="summary-value" :class="{ 'is-danger': summary.services.abnormal > 0 }">
+            {{ summary.services.abnormal }}
+          </span>
+          <span class="summary-label">异常服务</span>
+        </router-link>
+        <router-link to="/services" class="summary-item">
+          <span class="summary-value">{{ summary.targets.total }}</span>
+          <span class="summary-label">监控目标</span>
+          <span class="summary-hint">正常 {{ summary.targets.normal }}</span>
+        </router-link>
       </div>
-      <div class="toolbar-right">
-        <el-tag v-if="summary" size="small" type="info" effect="plain">
-          最近 30 分钟采样趋势（5 分钟分桶）
-        </el-tag>
-        <el-button :loading="loading" @click="load">刷新</el-button>
-      </div>
-    </div>
 
-    <ErrorRetry v-if="error" :message="error" :loading="loading" class="section-gap" @retry="load" />
-
-    <div v-loading="loading">
-      <template v-if="summary">
-        <div class="stat-grid">
-          <div class="stat-card">
-            <span class="stat-label">服务总数</span>
-            <span class="stat-value">{{ summary.services.total }}</span>
-            <span class="stat-foot">
-              正常 {{ summary.services.normal }} · 异常 {{ summary.services.abnormal }} ·
-              未知 {{ summary.services.unknown }} · 禁用 {{ summary.services.disabled }}
-            </span>
+      <div class="overview-grid">
+        <section class="af-panel">
+          <div class="af-panel-head">
+            <div class="af-panel-title">
+              需要关注
+              <span class="af-panel-sub">监控或应用状态异常的服务</span>
+            </div>
+            <router-link to="/services?status=ABNORMAL" class="text-small">查看全部</router-link>
           </div>
-          <div class="stat-card">
-            <span class="stat-label">服务正常</span>
-            <span class="stat-value is-success">{{ summary.services.normal }}</span>
-            <span class="stat-foot">监控聚合状态 NORMAL</span>
-          </div>
-          <div class="stat-card">
-            <span class="stat-label">服务异常</span>
-            <span class="stat-value is-danger">{{ summary.services.abnormal }}</span>
-            <span class="stat-foot">监控聚合状态 ABNORMAL</span>
-          </div>
-          <div class="stat-card">
-            <span class="stat-label">活动 Episode</span>
-            <span class="stat-value is-primary">{{ summary.episodes.active }}</span>
-            <span class="stat-foot">
-              已恢复 {{ summary.episodes.resolved }} · 已归档 {{ summary.episodes.archived }}
-            </span>
-          </div>
-        </div>
-
-        <el-row :gutter="12" class="section-gap">
-          <el-col :span="24">
-            <el-card shadow="never">
-              <template #header>
-                <div class="card-header">
-                  <span class="card-header-title">健康概览</span>
-                  <span class="card-header-sub">实时快照，不含软删除对象</span>
+          <StateBlock
+            v-if="attentionServices.length === 0"
+            mode="empty"
+            message="当前没有异常服务，监控与应用状态均正常"
+          />
+          <div v-else class="attention-list">
+            <div v-for="service in attentionServices" :key="service.service_id" class="attention-row">
+              <div class="attention-main">
+                <div class="attention-name">
+                  <router-link :to="`/services/${service.service_id}`">{{ service.name }}</router-link>
+                  <span class="attention-key">{{ service.service_key }}</span>
                 </div>
-              </template>
-              <div class="health-grid">
-                <div>
-                  <div class="health-block-title">服务（按聚合监控状态）</div>
-                  <div class="health-row"><span>总数</span><span class="value">{{ summary.services.total }}</span></div>
-                  <div class="health-row"><span>正常</span><span class="value">{{ summary.services.normal }}</span></div>
-                  <div class="health-row"><span>异常</span><span class="value">{{ summary.services.abnormal }}</span></div>
-                  <div class="health-row"><span>未知</span><span class="value">{{ summary.services.unknown }}</span></div>
-                  <div class="health-row"><span>已禁用</span><span class="value">{{ summary.services.disabled }}</span></div>
-                </div>
-                <div>
-                  <div class="health-block-title">监控目标</div>
-                  <div class="health-row"><span>总数</span><span class="value">{{ summary.targets.total }}</span></div>
-                  <div class="health-row"><span>正常</span><span class="value">{{ summary.targets.normal }}</span></div>
-                  <div class="health-row"><span>异常</span><span class="value">{{ summary.targets.abnormal }}</span></div>
-                  <div class="health-row"><span>未知</span><span class="value">{{ summary.targets.unknown }}</span></div>
-                </div>
-                <div>
-                  <div class="health-block-title">故障 Episode</div>
-                  <div class="health-row"><span>活动</span><span class="value">{{ summary.episodes.active }}</span></div>
-                  <div class="health-row"><span>已恢复</span><span class="value">{{ summary.episodes.resolved }}</span></div>
-                  <div class="health-row"><span>已归档</span><span class="value">{{ summary.episodes.archived }}</span></div>
+                <div class="attention-meta">
+                  <DualStatus :monitor-status="service.monitor_status" :app-status="service.app_status" inline />
+                  <span :title="tooltipDateTime(service.last_check_at)">
+                    最近观测 {{ formatLastObservation(service.last_check_at) }}
+                  </span>
                 </div>
               </div>
-            </el-card>
-          </el-col>
-        </el-row>
-
-        <el-row :gutter="12" class="section-gap">
-          <el-col :span="24">
-            <el-card shadow="never">
-              <template #header>
-                <div class="card-header">
-                  <span class="card-header-title">
-                    监控采样趋势
-                    <span class="card-header-sub">GET /dashboard/summary · monitor_trend</span>
-                  </span>
-                  <span class="card-header-sub">时间轴标签为{{ timezone }}本地时间</span>
-                </div>
-              </template>
-              <div v-if="hasTrend" ref="chartEl" class="chart-box" />
-              <el-empty
-                v-else
-                description="最近 30 分钟窗口内暂无监控采样数据"
-                :image-size="72"
-                class="empty-compact"
-              />
-            </el-card>
-          </el-col>
-        </el-row>
-
-        <el-card shadow="never">
-          <template #header>
-            <div class="card-header">
-              <span class="card-header-title">最近故障</span>
-              <span class="card-header-sub">按开始时间倒序，最多 10 条</span>
+              <div class="attention-action">
+                <router-link
+                  v-if="service.active_episode_id"
+                  :to="`/episodes/${service.active_episode_id}`"
+                  class="active-mark"
+                >
+                  <span class="status-dot" />
+                  进行中的故障
+                </router-link>
+                <StatusTag v-else status="UNKNOWN" label="暂无进行中故障" tone="neutral" size="small" />
+              </div>
             </div>
-          </template>
-          <el-table
-            v-if="recentEpisodes.length > 0"
-            :data="recentEpisodes"
-            size="small"
-            row-class-name="clickable-row"
-            @row-click="openEpisode"
-          >
-            <el-table-column label="Episode" width="120">
-              <template #default="{ row }">
-                <span class="mono">{{ row.episode_id.slice(0, 8) }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column prop="service_name" label="服务" min-width="150" show-overflow-tooltip>
-              <template #default="{ row }">
-                <span>{{ row.service_name || row.service_id }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="状态" width="96">
-              <template #default="{ row }">
-                <StatusTag :status="row.status" />
-              </template>
-            </el-table-column>
-            <el-table-column label="开始时间" width="170">
-              <template #default="{ row }">{{ formatDateTime(row.started_at) }}</template>
-            </el-table-column>
-            <el-table-column label="恢复时间" width="170">
-              <template #default="{ row }">{{ formatDateTime(row.resolved_at) }}</template>
-            </el-table-column>
-            <el-table-column label="输入版本" width="150">
-              <template #default="{ row }">
-                <span class="mono">{{ row.input_version }} / {{ row.processed_input_version }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="更新时间" width="170">
-              <template #default="{ row }">{{ formatDateTime(row.updated_at) }}</template>
-            </el-table-column>
-          </el-table>
-          <el-empty v-else description="暂无故障记录" :image-size="72" class="empty-compact" />
-        </el-card>
-      </template>
-    </div>
+          </div>
+        </section>
 
-    <span v-if="!summary && !loading && !error" class="text-muted">
-      正在加载总览数据…
-    </span>
+        <section class="af-panel">
+          <div class="af-panel-head">
+            <div class="af-panel-title">
+              最近故障
+              <span class="af-panel-sub">按开始时间倒序</span>
+            </div>
+            <router-link to="/episodes" class="text-small">全部记录</router-link>
+          </div>
+          <StateBlock
+            v-if="summary.recent_episodes.length === 0"
+            mode="empty"
+            message="最近还没有故障记录"
+          />
+          <div v-else class="recent-list">
+            <div
+              v-for="episode in summary.recent_episodes.slice(0, 8)"
+              :key="episode.episode_id"
+              class="recent-row"
+              @click="openEpisode(episode.episode_id)"
+            >
+              <div class="recent-main">
+                <div class="recent-name">
+                  <span>{{ episode.service_name }}</span>
+                  <StatusTag :status="episode.status" size="small" />
+                </div>
+                <div class="recent-meta">
+                  <span :title="tooltipDateTime(episode.started_at)">
+                    {{ formatDateTime(episode.started_at) }}
+                  </span>
+                  <span>{{ diagnosisState(episode.active_task_status, episode.active_task_type).label }}</span>
+                </div>
+              </div>
+              <div class="recent-side">
+                <div class="duration">{{ recentDuration(episode.started_at, episode.resolved_at) }}</div>
+                <div>{{ statusLabel(episode.status) }}</div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <section class="af-panel">
+        <div class="af-panel-head">
+          <div class="af-panel-title">
+            观测趋势
+            <span class="af-panel-sub">监控采样结果随时间的变化</span>
+          </div>
+        </div>
+        <div v-if="!hasTrend" class="chart-empty">窗口内没有采样</div>
+        <div v-else ref="chartEl" class="chart-box" />
+      </section>
+    </template>
   </div>
 </template>
-
-<style scoped>
-.tz-inline {
-  color: var(--af-text-muted);
-}
-
-:deep(.clickable-row) {
-  cursor: pointer;
-}
-
-:deep(.clickable-row:hover td) {
-  background: #f5f7fa;
-}
-</style>

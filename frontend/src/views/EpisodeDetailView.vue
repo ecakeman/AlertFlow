@@ -1,551 +1,575 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { useRoute } from 'vue-router'
 import { fetchEpisode, fetchEpisodeArtifact, fetchEpisodeTimeline } from '../api/episodes'
 import { errorMessage, isArtifactMissing } from '../api/client'
 import type {
-  ArtifactRef,
   ArtifactType,
   DiagnosisReport,
   EpisodeArtifact,
   EpisodeTimeline,
   EpisodeView
 } from '../api/types'
-import ErrorRetry from '../components/ErrorRetry.vue'
-import MarkdownViewer from '../components/MarkdownViewer.vue'
+import PageHeader from '../components/PageHeader.vue'
+import StateBlock from '../components/StateBlock.vue'
 import StatusTag from '../components/StatusTag.vue'
-import { formatDateTime, formatDuration, localTimeZoneLabel } from '../utils/time'
-import { statusLabel, targetTypeLabel, targetTypeTagType } from '../utils/status'
+import DualStatus from '../components/DualStatus.vue'
+import MarkdownViewer from '../components/MarkdownViewer.vue'
+import {
+  checkStatusLabel,
+  evidenceSummary,
+  isTaskInProgress,
+  statusLabel,
+  targetTypeLabel,
+  taskStatusLabel
+} from '../utils/status'
+import type { StatusTone } from '../utils/status'
+import {
+  formatClock,
+  formatDateTime,
+  formatDuration,
+  tooltipDateTime
+} from '../utils/time'
 
 const route = useRoute()
-const router = useRouter()
-
-const timezone = localTimeZoneLabel()
 const episodeId = computed(() => String(route.params.episodeId ?? ''))
 
 const episode = ref<EpisodeView | null>(null)
 const timeline = ref<EpisodeTimeline | null>(null)
 const loading = ref(false)
 const error = ref('')
+const activeTab = ref<'events' | 'investigation'>('events')
 
-const timelineTab = ref<'monitor' | 'events' | 'artifacts'>('monitor')
-const artifactTab = ref<ArtifactType>('INVESTIGATION')
+type ArtifactLoadState = 'idle' | 'loading' | 'ready' | 'missing' | 'error'
 
 interface ArtifactState {
-  loading: boolean
-  error: string
+  state: ArtifactLoadState
   data: EpisodeArtifact | null
-  missing: boolean
+  error: string
 }
 
 const artifactStates = reactive<Record<ArtifactType, ArtifactState>>({
-  INVESTIGATION: { loading: false, error: '', data: null, missing: false },
-  DIAGNOSIS_REPORT: { loading: false, error: '', data: null, missing: false }
+  INVESTIGATION: { state: 'idle', data: null, error: '' },
+  DIAGNOSIS_REPORT: { state: 'idle', data: null, error: '' }
 })
 
-const currentArtifact = computed(() => artifactStates[artifactTab.value])
+const ARTIFACT_LABEL: Record<ArtifactType, string> = {
+  INVESTIGATION: '调查记录',
+  DIAGNOSIS_REPORT: '诊断报告'
+}
+
+const report = computed<DiagnosisReport | null>(() => {
+  const json = artifactStates.DIAGNOSIS_REPORT.data?.content_json
+  return (json as DiagnosisReport | null | undefined) ?? null
+})
+
+const reportSummary = computed(() => (report.value?.summary ?? '').trim())
+const reportSections = computed(() => {
+  const data = report.value
+  if (!data) return []
+  const sections: Array<{ title: string; items: string[] }> = []
+  if (data.observations?.length) sections.push({ title: '关键观察', items: data.observations })
+  if (data.hypotheses?.length) sections.push({ title: '可能原因', items: data.hypotheses })
+  if (data.unknowns?.length) sections.push({ title: '待确认信息', items: data.unknowns })
+  if (data.next_steps?.length) sections.push({ title: '后续动作', items: data.next_steps })
+  return sections
+})
+
+const investigationInProgress = computed(
+  () => episode.value?.status === 'ACTIVE' && isTaskInProgress(episode.value.active_task_status)
+)
 
 const projection = computed(() => timeline.value?.region1_projection ?? [])
-const events = computed(() => timeline.value?.region2_events ?? [])
-const artifactRefs = computed<ArtifactRef[]>(() => timeline.value?.region3_refs ?? [])
+const appEvents = computed(() => timeline.value?.region2_events ?? [])
+const artifactRefs = computed(() => timeline.value?.region3_refs ?? [])
+const monitorPoints = computed(() => timeline.value?.monitor_points ?? [])
 
-const refByType = computed<Record<string, ArtifactRef>>(() => {
-  const map: Record<string, ArtifactRef> = {}
-  for (const item of artifactRefs.value) map[item.artifact_type] = item
-  return map
-})
+const recentAppEvents = computed(() =>
+  [...appEvents.value].sort((a, b) => new Date(b.event_time).getTime() - new Date(a.event_time).getTime()).slice(0, 3)
+)
 
-const currentRef = computed<ArtifactRef | null>(() => refByType.value[artifactTab.value] ?? null)
+interface TimelineEntry {
+  id: string
+  time: string
+  receivedAt?: string
+  source: string
+  title: string
+  detail?: string
+  tone: StatusTone
+  statusText?: string
+}
 
-const projectionStats = computed(() => {
-  const stats = { total: projection.value.length, normal: 0, abnormal: 0, unknown: 0 }
-  for (const item of projection.value) {
-    if (item.status === 'NORMAL') stats.normal += 1
-    else if (item.status === 'ABNORMAL') stats.abnormal += 1
-    else stats.unknown += 1
+const timelineEntries = computed<TimelineEntry[]>(() => {
+  const data = timeline.value
+  const current = episode.value
+  if (!data || !current) return []
+
+  const entries: TimelineEntry[] = []
+
+  entries.push({
+    id: 'episode-start',
+    time: current.started_at,
+    source: '故障开始',
+    title: `进入 Episode，监控状态 ${statusLabel(current.monitor_status)}`,
+    detail: `应用状态 ${statusLabel(current.app_status)}`,
+    tone: 'accent'
+  })
+
+  for (const point of monitorPoints.value) {
+    entries.push({
+      id: `monitor-${point.point_seq}`,
+      time: point.observed_at,
+      source: `监控 · ${point.target_key || targetTypeLabel(point.target_type)}`,
+      title: checkStatusLabel(point.check_status),
+      detail: evidenceSummary(point.status_class, point.error_class),
+      tone: point.check_status === 'SUCCESS' ? 'ok' : 'danger',
+      statusText: point.check_status === 'SUCCESS' ? '成功' : '失败'
+    })
   }
-  return stats
-})
 
-const diagnosisReport = computed<DiagnosisReport | null>(() => {
-  const json = artifactStates.DIAGNOSIS_REPORT.data?.content_json
-  if (!json || typeof json !== 'object') return null
-  return json as DiagnosisReport
-})
-
-const diagnosisSections = computed(() => {
-  const report = diagnosisReport.value
-  if (!report) return []
-  return [
-    { key: 'summary', title: '摘要', text: typeof report.summary === 'string' ? report.summary : '' },
-    { key: 'observations', title: '观察', items: report.observations ?? [] },
-    { key: 'hypotheses', title: '假设', items: report.hypotheses ?? [] },
-    { key: 'unknowns', title: '未知项', items: report.unknowns ?? [] },
-    { key: 'next_steps', title: '下一步', items: report.next_steps ?? [] }
-  ].filter((section) => (section.text ? true : Boolean(section.items?.length)))
-})
-
-async function loadArtifact(type: ArtifactType): Promise<void> {
-  const state = artifactStates[type]
-  const refExists = Boolean(refByType.value[type])
-  if (!refExists) {
-    state.missing = true
-    state.error = ''
-    return
+  for (const event of appEvents.value) {
+    entries.push({
+      id: `app-${event.event_record_id}`,
+      time: event.event_time,
+      receivedAt: event.received_at,
+      source: `应用 · ${event.event_kind || '事件上报'}`,
+      title: event.health_status ? `应用状态 ${statusLabel(event.health_status)}` : '应用事件上报',
+      detail: describePayload(event.payload),
+      tone: event.health_status === 'UNHEALTHY' ? 'danger' : 'neutral'
+    })
   }
-  if (state.loading) return
-  state.loading = true
-  state.error = ''
-  state.missing = false
-  try {
-    state.data = await fetchEpisodeArtifact(episodeId.value, type)
-  } catch (err) {
-    if (isArtifactMissing(err)) {
-      state.missing = true
-    } else {
-      state.error = errorMessage(err)
+
+  if (current.resolved_at) {
+    entries.push({
+      id: 'episode-resolved',
+      time: current.resolved_at,
+      source: '故障恢复',
+      title: `Episode 已恢复，持续 ${formatDuration(current.started_at, current.resolved_at)}`,
+      tone: 'ok'
+    })
+  }
+  if (current.archived_at) {
+    entries.push({
+      id: 'episode-archived',
+      time: current.archived_at,
+      source: '归档',
+      title: '诊断产物已归档',
+      tone: 'neutral'
+    })
+  }
+
+  return entries.sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime())
+})
+
+const technicalJson = computed(() => {
+  if (!episode.value || !timeline.value) return ''
+  return JSON.stringify(
+    {
+      episode: episode.value,
+      monitor_start_point_seq: timeline.value.monitor_start_point_seq,
+      monitor_points: timeline.value.monitor_points,
+      region1_projection: timeline.value.region1_projection,
+      region2_events: timeline.value.region2_events,
+      region3_refs: timeline.value.region3_refs
+    },
+    null,
+    2
+  )
+})
+
+function describePayload(payload: unknown): string {
+  if (payload === null || payload === undefined) return ''
+  if (typeof payload === 'string') return payload
+  if (typeof payload === 'object') {
+    const record = payload as Record<string, unknown>
+    for (const key of ['message', 'reason', 'detail', 'summary']) {
+      const value = record[key]
+      if (typeof value === 'string' && value.trim()) return value
     }
-  } finally {
-    state.loading = false
+    const text = JSON.stringify(record)
+    return text.length > 180 ? `${text.slice(0, 180)}…` : text
   }
+  return String(payload)
 }
 
-function resetArtifacts(): void {
-  for (const type of ['INVESTIGATION', 'DIAGNOSIS_REPORT'] as ArtifactType[]) {
-    const state = artifactStates[type]
-    state.loading = false
-    state.error = ''
-    state.data = null
-    state.missing = !refByType.value[type]
-  }
+function receivedLater(entry: TimelineEntry): string {
+  if (!entry.receivedAt) return ''
+  const eventTime = new Date(entry.time).getTime()
+  const receivedTime = new Date(entry.receivedAt).getTime()
+  if (Number.isNaN(eventTime) || Number.isNaN(receivedTime)) return ''
+  if (Math.abs(receivedTime - eventTime) < 1000) return ''
+  return `接收于 ${formatClock(entry.receivedAt)}`
 }
 
-function onArtifactTabChange(name: string | number): void {
-  const type = name as ArtifactType
-  artifactTab.value = type
-  const state = artifactStates[type]
-  if (!state.data && !state.missing && !state.loading) {
-    void loadArtifact(type)
-  }
-}
-
-async function load(): Promise<void> {
-  if (!episodeId.value) return
+async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [view, timelineData] = await Promise.all([
+    const [view, time] = await Promise.all([
       fetchEpisode(episodeId.value),
       fetchEpisodeTimeline(episodeId.value)
     ])
     episode.value = view
-    timeline.value = timelineData
-    resetArtifacts()
-    void loadArtifact(artifactTab.value)
+    timeline.value = time
   } catch (err) {
     error.value = errorMessage(err)
   } finally {
     loading.value = false
   }
-}
-
-function openService(): void {
-  if (!episode.value) return
-  router.push({ name: 'service-detail', params: { serviceId: episode.value.service_id } })
-}
-
-function pretty(value: unknown): string {
-  if (value === undefined) return 'undefined'
-  try {
-    return JSON.stringify(value, null, 2) ?? 'null'
-  } catch {
-    return String(value)
+  if (!error.value) {
+    await loadArtifact('DIAGNOSIS_REPORT')
   }
 }
 
-function shortHash(hash?: string | null): string {
-  if (!hash) return '—'
-  return hash.length > 16 ? `${hash.slice(0, 16)}…` : hash
+function artifactRef(type: ArtifactType) {
+  return artifactRefs.value.find((ref) => ref.artifact_type === type)
 }
 
-function artifactLabel(type: ArtifactType): string {
-  return type === 'INVESTIGATION' ? 'investigation.md（调查记录）' : 'diagnosis_report（诊断报告）'
-}
-
-function downloadArtifact(): void {
-  const data = currentArtifact.value.data
-  const type = artifactTab.value
-  if (!data) return
-  let content: string
-  let extension: string
-  let mime: string
-  if (data.content_text) {
-    content = data.content_text
-    mime = data.content_type || (type === 'INVESTIGATION' ? 'text/markdown' : 'application/json')
-    extension = mime.includes('json') ? 'json' : 'md'
-  } else {
-    content = JSON.stringify(data.content_json ?? {}, null, 2)
-    mime = 'application/json'
-    extension = 'json'
+async function loadArtifact(type: ArtifactType): Promise<EpisodeArtifact | null> {
+  const current = artifactStates[type]
+  if (current.state === 'ready' && current.data) return current.data
+  if (!artifactRef(type)) {
+    current.state = 'missing'
+    current.data = null
+    return null
   }
+  current.state = 'loading'
+  current.error = ''
   try {
-    const blob = new Blob([content], { type: `${mime};charset=utf-8` })
-    const url = URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    anchor.href = url
-    anchor.download = `episode-${episodeId.value}-${type.toLowerCase()}-v${data.version}.${extension}`
-    document.body.appendChild(anchor)
-    anchor.click()
-    anchor.remove()
-    URL.revokeObjectURL(url)
-    ElMessage.success('已生成原文下载')
+    const data = await fetchEpisodeArtifact(episodeId.value, type)
+    current.data = data
+    current.state = 'ready'
+    return data
   } catch (err) {
-    ElMessage.error(`下载失败：${errorMessage(err)}`)
+    if (isArtifactMissing(err)) {
+      current.state = 'missing'
+      current.data = null
+      return null
+    }
+    current.state = 'error'
+    current.error = errorMessage(err)
+    return null
   }
 }
+
+async function retryArtifact(type: ArtifactType) {
+  artifactStates[type].state = 'idle'
+  await loadArtifact(type)
+}
+
+function downloadArtifact(type: ArtifactType) {
+  const artifact = artifactStates[type].data
+  if (!artifact) return
+  const text =
+    artifact.content_text?.trim() ||
+    JSON.stringify(artifact.content_json ?? {}, null, 2)
+  const extension = (artifact.content_type || '').includes('json') ? 'json' : 'md'
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = `episode-${episodeId.value.slice(0, 8)}-${type.toLowerCase()}-v${artifact.version}.${extension}`
+  document.body.appendChild(anchor)
+  anchor.click()
+  document.body.removeChild(anchor)
+  URL.revokeObjectURL(url)
+}
+
+async function downloadFromRef(type: ArtifactType) {
+  await loadArtifact(type)
+  if (artifactStates[type].state === 'ready') downloadArtifact(type)
+}
+
+watch(activeTab, (tab) => {
+  if (tab === 'investigation' && artifactStates.INVESTIGATION.state === 'idle') {
+    loadArtifact('INVESTIGATION')
+  }
+})
 
 onMounted(load)
-watch(episodeId, load)
+
+function rawTime(value: string): string {
+  return tooltipDateTime(value)
+}
+
+function episodeDurationText(): string {
+  if (!episode.value) return ''
+  if (episode.value.resolved_at) {
+    return `持续 ${formatDuration(episode.value.started_at, episode.value.resolved_at)}`
+  }
+  return `进行中 · ${formatDuration(episode.value.started_at)}`
+}
 </script>
 
 <template>
   <div>
-    <div class="page-toolbar">
-      <el-button link type="primary" @click="router.push({ name: 'episodes' })">← 返回 Episode 列表</el-button>
-      <div class="toolbar-right">
-        <el-button :loading="loading" @click="load">刷新</el-button>
-      </div>
-    </div>
+    <PageHeader
+      :title="episode?.service_name ?? '故障详情'"
+      :subtitle="episode ? `故障开始于 ${formatDateTime(episode.started_at)}` : undefined"
+      back-to="/episodes"
+      back-text="返回故障记录"
+    >
+      <template #title-extra>
+        <StatusTag v-if="episode" :status="episode.status" />
+      </template>
+      <template #meta>
+        <div v-if="episode" class="page-meta">
+          <span class="num">{{ episodeDurationText() }}</span>
+          <DualStatus :monitor-status="episode.monitor_status" :app-status="episode.app_status" inline />
+          <span v-if="episode.resolved_at" :title="rawTime(episode.resolved_at)" class="num">
+            恢复于 {{ formatDateTime(episode.resolved_at) }}
+          </span>
+        </div>
+      </template>
+      <template #actions>
+        <el-button :loading="loading" @click="load">
+          <el-icon><Refresh /></el-icon>
+          <span>刷新</span>
+        </el-button>
+      </template>
+    </PageHeader>
 
-    <ErrorRetry v-if="error" :message="error" :loading="loading" class="section-gap" @retry="load" />
+    <StateBlock v-if="loading && !episode" mode="loading" />
+    <StateBlock v-else-if="error && !episode" mode="error" :message="error" @retry="load" />
 
-    <div v-loading="loading">
-      <template v-if="episode">
-        <el-card shadow="never" class="section-gap">
-          <template #header>
-            <div class="card-header">
-              <span class="card-header-title">
-                Episode <span class="mono">{{ episode.episode_id }}</span>
+    <div v-else-if="episode" class="detail-layout">
+      <div class="detail-main">
+        <section class="af-panel">
+          <div class="af-panel-head">
+            <div class="af-panel-title">诊断结论</div>
+            <div class="af-panel-actions">
+              <span v-if="artifactRef('DIAGNOSIS_REPORT')" class="text-small text-secondary">
+                报告 v{{ artifactRef('DIAGNOSIS_REPORT')?.artifact_version }}
               </span>
-              <div class="header-tags">
-                <StatusTag :status="episode.status" />
-                <el-tag v-if="episode.resolution_pending" size="small" type="warning" effect="plain">
-                  恢复待处理
-                </el-tag>
+            </div>
+          </div>
+
+          <StateBlock
+            v-if="artifactStates.DIAGNOSIS_REPORT.state === 'loading'"
+            mode="loading"
+            compact
+          />
+          <StateBlock
+            v-else-if="artifactStates.DIAGNOSIS_REPORT.state === 'error'"
+            mode="error"
+            :message="artifactStates.DIAGNOSIS_REPORT.error"
+            compact
+            @retry="retryArtifact('DIAGNOSIS_REPORT')"
+          />
+          <template v-else-if="reportSummary">
+            <div class="af-panel-body">
+              <p class="conclusion-text">{{ reportSummary }}</p>
+              <div v-if="reportSections.length" class="conclusion-sections">
+                <div v-for="section in reportSections" :key="section.title" class="conclusion-section">
+                  <div class="conclusion-section-title">{{ section.title }}</div>
+                  <ul>
+                    <li v-for="(item, index) in section.items" :key="index">{{ item }}</li>
+                  </ul>
+                </div>
               </div>
             </div>
           </template>
-
-          <el-descriptions :column="3" border size="small">
-            <el-descriptions-item label="服务">
-              <span class="clickable" @click="openService">{{ episode.service_name || episode.service_id }}</span>
-            </el-descriptions-item>
-            <el-descriptions-item label="状态">{{ statusLabel(episode.status) }}</el-descriptions-item>
-            <el-descriptions-item label="触发者">{{ episode.started_by || '—' }}</el-descriptions-item>
-            <el-descriptions-item label="开始时间">{{ formatDateTime(episode.started_at) }}</el-descriptions-item>
-            <el-descriptions-item label="恢复时间">{{ formatDateTime(episode.resolved_at) }}</el-descriptions-item>
-            <el-descriptions-item label="归档时间">{{ formatDateTime(episode.archived_at) }}</el-descriptions-item>
-            <el-descriptions-item label="持续时间">
-              {{ formatDuration(episode.started_at, episode.resolved_at) }}
-            </el-descriptions-item>
-            <el-descriptions-item label="输入版本">
-              <span class="mono">
-                当前 {{ episode.input_version }} / 已处理 {{ episode.processed_input_version }} / 最终
-                {{ episode.final_input_version }}
-              </span>
-            </el-descriptions-item>
-            <el-descriptions-item label="更新时间">{{ formatDateTime(episode.updated_at) }}</el-descriptions-item>
-            <el-descriptions-item label="监控状态"><StatusTag :status="episode.monitor_status" /></el-descriptions-item>
-            <el-descriptions-item label="应用状态"><StatusTag :status="episode.app_status" /></el-descriptions-item>
-            <el-descriptions-item label="活动任务">
-              <template v-if="episode.active_task_id">
-                <span class="mono">{{ episode.active_task_id.slice(0, 8) }}</span>
-                <StatusTag :status="episode.active_task_status" class="task-tag" />
-                <span class="text-muted">{{ episode.active_task_type }}</span>
-              </template>
-              <span v-else class="text-muted">无</span>
-            </el-descriptions-item>
-            <el-descriptions-item label="输入哈希" :span="3">
-              <span class="mono">{{ episode.input_hash || '—' }}</span>
-            </el-descriptions-item>
-            <el-descriptions-item label="时间显示" :span="3">
-              <span class="text-muted">所有时间均由 RFC3339 转换为浏览器本地时区：{{ timezone }}</span>
-            </el-descriptions-item>
-          </el-descriptions>
-        </el-card>
-
-        <el-card shadow="never" class="section-gap">
-          <template #header>
-            <div class="card-header">
-              <span class="card-header-title">
-                诊断输入 / 证据
-                <span class="card-header-sub">来自 GET /episodes/:id/timeline 的监控投影</span>
-              </span>
-              <span class="card-header-sub">
-                监控目标 {{ projectionStats.total }} · 正常 {{ projectionStats.normal }} · 异常
-                {{ projectionStats.abnormal }} · 未知 {{ projectionStats.unknown }}
-              </span>
+          <template v-else-if="investigationInProgress">
+            <div class="af-panel-body">
+              <div class="investigating">
+                <el-icon class="is-loading"><Loading /></el-icon>
+                <div>
+                  <div class="investigating-title">调查进行中</div>
+                  <div class="text-secondary text-small">
+                    当前诊断任务：{{ taskStatusLabel(episode.active_task_status, episode.active_task_type) }}。Agent 尚未给出最终结论，完成后会在此展示诊断报告。
+                  </div>
+                </div>
+              </div>
             </div>
           </template>
+          <StateBlock
+            v-else
+            mode="empty"
+            :message="
+              artifactStates.DIAGNOSIS_REPORT.state === 'missing'
+                ? '这次故障没有生成诊断报告'
+                : '暂无诊断结论'
+            "
+            compact
+          />
+        </section>
 
-          <el-descriptions :column="3" border size="small">
-            <el-descriptions-item label="输入版本（当前/已处理/最终）">
-              <span class="mono">
-                {{ episode.input_version }} / {{ episode.processed_input_version }} / {{ episode.final_input_version }}
-              </span>
-            </el-descriptions-item>
-            <el-descriptions-item label="监控投影起点序号">
-              <span class="mono">{{ timeline?.monitor_start_point_seq ?? '—' }}</span>
-            </el-descriptions-item>
-            <el-descriptions-item label="监控/应用状态">
-              <StatusTag :status="episode.monitor_status" />
-              <StatusTag :status="episode.app_status" class="task-tag" />
-            </el-descriptions-item>
-          </el-descriptions>
+        <section class="af-panel">
+          <div class="af-panel-body" style="padding-bottom: 0">
+            <el-tabs v-model="activeTab">
+              <el-tab-pane label="事件过程" name="events">
+                <div class="event-list">
+                  <StateBlock v-if="timelineEntries.length === 0" mode="empty" message="该故障没有可展示的监控或应用事件" />
+                  <div v-for="entry in timelineEntries" :key="entry.id" class="event-item">
+                    <div class="event-time" :title="rawTime(entry.time)">
+                      {{ formatDateTime(entry.time) }}
+                    </div>
+                    <div class="event-body">
+                      <div class="event-head">
+                        <span class="event-source"><strong>{{ entry.source }}</strong></span>
+                        <StatusTag
+                          v-if="entry.statusText"
+                          :label="entry.statusText"
+                          :tone="entry.tone"
+                          size="small"
+                        />
+                      </div>
+                      <div class="event-content">{{ entry.title }}</div>
+                      <div v-if="entry.detail" class="event-detail">{{ entry.detail }}</div>
+                      <div v-if="receivedLater(entry)" class="event-received">{{ receivedLater(entry) }}</div>
+                    </div>
+                  </div>
+                </div>
+              </el-tab-pane>
 
-          <el-collapse class="evidence-raw">
-            <el-collapse-item title="原始时间轴 JSON（调试用）" name="raw">
-              <pre class="json-pre">{{ pretty(timeline) }}</pre>
+              <el-tab-pane label="调查记录" name="investigation">
+                <StateBlock
+                  v-if="artifactStates.INVESTIGATION.state === 'loading'"
+                  mode="loading"
+                  compact
+                />
+                <StateBlock
+                  v-else-if="artifactStates.INVESTIGATION.state === 'error'"
+                  mode="error"
+                  :message="artifactStates.INVESTIGATION.error"
+                  compact
+                  @retry="retryArtifact('INVESTIGATION')"
+                />
+                <StateBlock
+                  v-else-if="artifactStates.INVESTIGATION.state === 'missing'"
+                  mode="empty"
+                  message="该故障没有调查记录产物"
+                  compact
+                />
+                <div v-else class="af-panel-body">
+                  <MarkdownViewer
+                    v-if="artifactStates.INVESTIGATION.data?.content_text"
+                    :content="artifactStates.INVESTIGATION.data.content_text"
+                  />
+                  <span v-else class="text-muted">调查记录内容为空。</span>
+                </div>
+              </el-tab-pane>
+            </el-tabs>
+          </div>
+        </section>
+
+        <section class="af-panel">
+          <el-collapse>
+            <el-collapse-item name="technical">
+              <template #title>
+                <span class="af-panel-title">技术详情</span>
+                <span class="af-panel-sub" style="margin-left: 8px">输入版本、任务与原始数据</span>
+              </template>
+              <div class="kv-list">
+                <div class="kv-row">
+                  <div class="kv-key">输入版本</div>
+                  <div class="kv-value num">
+                    {{ episode.input_version }}（已处理 {{ episode.processed_input_version }}，最终
+                    {{ episode.final_input_version ?? '—' }}）
+                  </div>
+                </div>
+                <div class="kv-row">
+                  <div class="kv-key">输入哈希</div>
+                  <div class="kv-value mono">{{ episode.input_hash || '—' }}</div>
+                </div>
+                <div class="kv-row">
+                  <div class="kv-key">诊断任务</div>
+                  <div class="kv-value">
+                    <span class="mono">{{ episode.active_task_id || '—' }}</span>
+                    <span v-if="episode.active_task_type" class="text-secondary"> · {{ episode.active_task_type }}</span>
+                    <span v-if="episode.active_task_status" class="text-secondary"> · {{ taskStatusLabel(episode.active_task_status, episode.active_task_type) }}</span>
+                  </div>
+                </div>
+                <div class="kv-row">
+                  <div class="kv-key">监控起点</div>
+                  <div class="kv-value num">point_seq {{ timeline?.monitor_start_point_seq ?? '—' }}</div>
+                </div>
+                <div class="kv-row">
+                  <div class="kv-key">Episode ID</div>
+                  <div class="kv-value mono">{{ episode.episode_id }}</div>
+                </div>
+              </div>
+              <div class="af-panel-body">
+                <div class="text-small text-secondary" style="margin-bottom: 8px">原始时间线 JSON</div>
+                <pre class="json-pre">{{ technicalJson }}</pre>
+              </div>
             </el-collapse-item>
           </el-collapse>
-        </el-card>
+        </section>
+      </div>
 
-        <el-card shadow="never" class="section-gap">
-          <template #header>
-            <div class="card-header">
-              <span class="card-header-title">时间轴（三区域）</span>
-              <span class="card-header-sub">
-                监控投影 {{ projection.length }} 项 · 应用事件 {{ events.length }} 条 · 产物引用
-                {{ artifactRefs.length }} 条
-              </span>
-            </div>
-          </template>
-
-          <el-tabs v-model="timelineTab">
-            <el-tab-pane label="监控投影" name="monitor">
-              <div class="tab-hint text-muted">
-                区域一：本次 Episode 输入版本下的目标状态快照（start_point_seq =
-                {{ timeline?.monitor_start_point_seq ?? '—' }}）。
+      <aside class="detail-side">
+        <section class="af-panel">
+          <div class="af-panel-head">
+            <div class="af-panel-title">监控证据</div>
+          </div>
+          <StateBlock
+            v-if="projection.length === 0"
+            mode="empty"
+            message="尚无监控投影快照"
+            compact
+          />
+          <div v-else class="evidence-list">
+            <div v-for="field in projection" :key="`${field.target_key}-${field.target_type}`" class="evidence-row">
+              <div class="evidence-main">
+                <div class="evidence-name">
+                  {{ field.target_key || '未命名监控源' }}
+                  <span class="text-muted text-small">{{ targetTypeLabel(field.target_type) }}</span>
+                </div>
+                <div class="evidence-detail">{{ evidenceSummary(field.status_class, field.error_class) }}</div>
               </div>
-              <el-table :data="projection" size="small" max-height="420">
-                <el-table-column label="目标标识" min-width="140">
-                  <template #default="{ row }"><span class="mono">{{ row.target_key }}</span></template>
-                </el-table-column>
-                <el-table-column label="类型" width="110">
-                  <template #default="{ row }">
-                    <el-tag size="small" :type="targetTypeTagType(row.target_type)" effect="plain">
-                      {{ targetTypeLabel(row.target_type) }}
-                    </el-tag>
-                  </template>
-                </el-table-column>
-                <el-table-column label="状态" width="90">
-                  <template #default="{ row }"><StatusTag :status="row.status" /></template>
-                </el-table-column>
-                <el-table-column prop="status_class" label="状态分类" min-width="140" />
-                <el-table-column prop="error_class" label="错误分类" min-width="140" />
-                <el-table-column label="状态指纹" min-width="180">
-                  <template #default="{ row }"><span class="mono">{{ shortHash(row.state_fingerprint) }}</span></template>
-                </el-table-column>
-                <template #empty>
-                  <el-empty description="暂无监控投影数据" :image-size="64" class="empty-compact" />
-                </template>
-              </el-table>
-            </el-tab-pane>
-
-            <el-tab-pane label="应用事件" name="events">
-              <div class="tab-hint text-muted">区域二：服务上报的应用事件（received_at 为后端接收时间）。</div>
-              <el-table :data="events" size="small" max-height="420">
-                <el-table-column type="expand">
-                  <template #default="{ row }">
-                    <pre class="json-pre">{{ pretty(row.payload) }}</pre>
-                  </template>
-                </el-table-column>
-                <el-table-column label="事件 ID" width="130">
-                  <template #default="{ row }"><span class="mono">{{ row.event_id.slice(0, 8) }}</span></template>
-                </el-table-column>
-                <el-table-column prop="event_kind" label="事件类型" width="140" />
-                <el-table-column label="健康状态" width="100">
-                  <template #default="{ row }"><StatusTag :status="row.health_status" /></template>
-                </el-table-column>
-                <el-table-column label="事件时间" width="170">
-                  <template #default="{ row }">{{ formatDateTime(row.event_time) }}</template>
-                </el-table-column>
-                <el-table-column label="接收时间" width="170">
-                  <template #default="{ row }">{{ formatDateTime(row.received_at) }}</template>
-                </el-table-column>
-                <el-table-column label="记录 ID" min-width="140">
-                  <template #default="{ row }"><span class="mono">{{ row.event_record_id.slice(0, 8) }}</span></template>
-                </el-table-column>
-                <template #empty>
-                  <el-empty description="暂无应用事件" :image-size="64" class="empty-compact" />
-                </template>
-              </el-table>
-            </el-tab-pane>
-
-            <el-tab-pane label="产物引用" name="artifacts">
-              <div class="tab-hint text-muted">区域三：磁盘上的诊断产物引用（不内联内容，点击下方产物 Tab 读取原文）。</div>
-              <el-table :data="artifactRefs" size="small" max-height="420">
-                <el-table-column label="产物类型" width="180">
-                  <template #default="{ row }"><span class="mono">{{ row.artifact_type }}</span></template>
-                </el-table-column>
-                <el-table-column prop="artifact_version" label="版本" width="80" align="right" />
-                <el-table-column prop="content_type" label="内容类型" width="150" />
-                <el-table-column label="存储键" min-width="220" show-overflow-tooltip>
-                  <template #default="{ row }"><span class="mono">{{ row.storage_key }}</span></template>
-                </el-table-column>
-                <el-table-column label="内容哈希" width="190">
-                  <template #default="{ row }"><span class="mono">{{ shortHash(row.content_hash) }}</span></template>
-                </el-table-column>
-                <el-table-column label="更新时间" width="170">
-                  <template #default="{ row }">{{ formatDateTime(row.updated_at) }}</template>
-                </el-table-column>
-                <template #empty>
-                  <el-empty description="尚未生成任何产物" :image-size="64" class="empty-compact" />
-                </template>
-              </el-table>
-            </el-tab-pane>
-          </el-tabs>
-        </el-card>
-
-        <el-card shadow="never">
-          <template #header>
-            <div class="card-header">
-              <span class="card-header-title">诊断产物</span>
-              <span class="card-header-sub">
-                内容来自 GET /api/v1/episodes/:id/artifacts?type=…，Markdown 经 marked + DOMPurify 安全渲染
-              </span>
+              <div class="evidence-side"><StatusTag :status="field.status" size="small" /></div>
             </div>
-          </template>
+          </div>
+        </section>
 
-          <el-tabs v-model="artifactTab" @tab-change="onArtifactTabChange">
-            <el-tab-pane label="investigation.md" name="INVESTIGATION">
-              <template v-if="!refByType.INVESTIGATION && !artifactStates.INVESTIGATION.data">
-                <el-empty description="尚未生成" :image-size="64" class="empty-compact">
-                  <template #description>
-                    <div>尚未生成调查记录（investigation.md）</div>
-                    <div class="text-muted empty-sub">该 Episode 当前版本还没有 INVESTIGATION 产物。</div>
-                  </template>
-                </el-empty>
-              </template>
-            </el-tab-pane>
-            <el-tab-pane label="diagnosis_report" name="DIAGNOSIS_REPORT">
-              <template v-if="!refByType.DIAGNOSIS_REPORT && !artifactStates.DIAGNOSIS_REPORT.data">
-                <el-empty description="尚未生成" :image-size="64" class="empty-compact">
-                  <template #description>
-                    <div>尚未生成诊断报告（diagnosis_report）</div>
-                    <div class="text-muted empty-sub">该 Episode 当前版本还没有 DIAGNOSIS_REPORT 产物。</div>
-                  </template>
-                </el-empty>
-              </template>
-            </el-tab-pane>
-          </el-tabs>
-
-          <!-- 当前产物内容（两个 Tab 共用渲染区，数据按 artifactTab 取） -->
-          <template v-if="currentArtifact.data || currentArtifact.loading || currentArtifact.error">
-            <el-divider />
-            <div class="artifact-toolbar">
-              <span class="mono">{{ artifactLabel(artifactTab) }}</span>
-              <el-tag v-if="currentArtifact.data" size="small" type="info" effect="plain">
-                版本 {{ currentArtifact.data.version }}
-              </el-tag>
-              <el-tag v-if="currentArtifact.data" size="small" type="info" effect="plain">
-                {{ currentArtifact.data.content_type || '未知内容类型' }}
-              </el-tag>
-              <span v-if="currentArtifact.data" class="text-muted mono">
-                哈希 {{ shortHash(currentArtifact.data.content_hash) }}
-              </span>
-              <span v-if="currentRef" class="text-muted">
-                产物更新时间 {{ formatDateTime(currentRef.updated_at) }}
-              </span>
-              <div class="toolbar-right">
-                <el-button size="small" :loading="currentArtifact.loading" @click="loadArtifact(artifactTab)">
-                  重新获取
-                </el-button>
-                <el-button size="small" type="primary" plain :disabled="!currentArtifact.data" @click="downloadArtifact">
-                  下载原文
-                </el-button>
+        <section class="af-panel">
+          <div class="af-panel-head">
+            <div class="af-panel-title">应用状态与关键事件</div>
+          </div>
+          <div class="kv-list">
+            <div class="kv-row">
+              <div class="kv-key">应用状态</div>
+              <div class="kv-value"><StatusTag :status="episode.app_status" /></div>
+            </div>
+          </div>
+          <StateBlock v-if="recentAppEvents.length === 0" mode="empty" message="故障期间没有应用事件上报" compact />
+          <div v-else class="evidence-list">
+            <div v-for="event in recentAppEvents" :key="event.event_record_id" class="evidence-row">
+              <div class="evidence-main">
+                <div class="evidence-name">{{ event.event_kind || '应用事件' }}</div>
+                <div class="evidence-detail" :title="rawTime(event.event_time)">
+                  {{ formatDateTime(event.event_time) }}
+                  <span v-if="event.health_status"> · {{ statusLabel(event.health_status) }}</span>
+                </div>
               </div>
             </div>
+          </div>
+        </section>
 
-            <div v-if="currentArtifact.loading" class="artifact-loading">
-              <el-skeleton :rows="6" animated />
+        <section class="af-panel">
+          <div class="af-panel-head">
+            <div class="af-panel-title">诊断产物</div>
+          </div>
+          <StateBlock v-if="artifactRefs.length === 0" mode="empty" message="暂无诊断产物" compact />
+          <div v-else class="artifact-list">
+            <div v-for="ref in artifactRefs" :key="ref.artifact_type" class="artifact-row">
+              <div class="artifact-main">
+                <div class="artifact-name">
+                  {{ ARTIFACT_LABEL[ref.artifact_type as ArtifactType] ?? ref.artifact_type }}
+                </div>
+                <div class="artifact-meta">
+                  v{{ ref.artifact_version }} · {{ formatDateTime(ref.updated_at) }}
+                </div>
+              </div>
+              <span
+                class="table-link"
+                @click="downloadFromRef(ref.artifact_type as ArtifactType)"
+              >下载</span>
             </div>
-
-            <ErrorRetry
-              v-else-if="currentArtifact.error"
-              :message="currentArtifact.error"
-              :loading="currentArtifact.loading"
-              @retry="loadArtifact(artifactTab)"
-            />
-
-            <template v-else-if="currentArtifact.data">
-              <template v-if="artifactTab === 'INVESTIGATION'">
-                <MarkdownViewer v-if="currentArtifact.data.content_text" :content="currentArtifact.data.content_text" />
-                <el-empty v-else description="产物内容为空" :image-size="64" class="empty-compact" />
-              </template>
-
-              <template v-else>
-                <MarkdownViewer v-if="currentArtifact.data.content_text" :content="currentArtifact.data.content_text" />
-                <template v-else-if="diagnosisSections.length > 0">
-                  <div v-for="section in diagnosisSections" :key="section.key" class="report-section">
-                    <div class="report-section-title">{{ section.title }}</div>
-                    <div v-if="section.text" class="report-text">{{ section.text }}</div>
-                    <ul v-else class="report-list">
-                      <li v-for="(item, index) in section.items" :key="index">{{ item }}</li>
-                    </ul>
-                  </div>
-                  <el-collapse class="evidence-raw">
-                    <el-collapse-item title="原始 JSON" name="json">
-                      <pre class="json-pre">{{ pretty(currentArtifact.data.content_json) }}</pre>
-                    </el-collapse-item>
-                  </el-collapse>
-                </template>
-                <template v-else>
-                  <el-empty description="诊断报告暂无结构化内容" :image-size="64" class="empty-compact">
-                    <el-button size="small" @click="downloadArtifact">下载原始 JSON</el-button>
-                  </el-empty>
-                </template>
-              </template>
-            </template>
-          </template>
-        </el-card>
-      </template>
+          </div>
+        </section>
+      </aside>
     </div>
   </div>
 </template>
-
-<style scoped>
-.header-tags {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.task-tag {
-  margin-left: 6px;
-}
-
-.tab-hint {
-  font-size: 12px;
-  margin-bottom: 8px;
-}
-
-.evidence-raw {
-  margin-top: 10px;
-}
-
-.empty-sub {
-  font-size: 12px;
-  margin-top: 4px;
-}
-
-.artifact-loading {
-  padding: 8px 0;
-}
-
-.report-text {
-  line-height: 1.7;
-  white-space: pre-wrap;
-}
-</style>
