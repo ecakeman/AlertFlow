@@ -33,6 +33,23 @@ services:
       KAFKA_HEAP_OPTS: "-Xms256m -Xmx512m"
     mem_limit: 768m
 
+  # 预建任务 topic：消费者组在 topic 不存在时启动会拿不到分区分配，导致首次任务滞留。
+  kafka-init:
+    image: apache/kafka:3.9.1
+    entrypoint:
+      - /bin/bash
+      - -c
+      - >-
+        until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092
+        --create --if-not-exists --topic alertflow.agent-task-ready.v1
+        --partitions 1 --replication-factor 1; do echo "waiting for kafka"; sleep 2; done;
+        echo "topic alertflow.agent-task-ready.v1 ready"
+    restart: "no"
+    mem_limit: 256m
+    depends_on:
+      kafka:
+        condition: service_started
+
   redis:
     image: redis:7.4.2
 
@@ -62,6 +79,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
 
   frontend:
     build:

@@ -32,7 +32,7 @@ ConfigMap 的键名就是环境变量名；Deployment 通过 `envFrom` 注入 Co
    - Go 启动时用 goose 自动迁移，会执行 `CREATE EXTENSION vector / pgcrypto` 并创建 `system`、`cognitive` schema，因此连接账号需要有建扩展/建 schema 的权限（或用 DBA 预先安装扩展并授予权限）；
    - Java Flyway 在首次启动时创建 `gateway` schema（`create-schemas: true`），`gateway_app` 账号需要对库有 CREATE 权限，可参考 `deploy/postgres/init-roles.sh`；
    - Knowledge 库（`knowledge`）仅在使用 Knowledge Agent 时需要，本期可选。
-3. **外部 Kafka**：broker 地址可达；topic `alertflow.agent-task-ready.v1` 允许自动创建或提前创建。
+3. **外部 Kafka**：broker 地址可达；topic `alertflow.agent-task-ready.v1` 必须在 Go 启动前已存在（消费者组在 topic 不存在时加入会拿不到分区分配，首次任务会滞留；Compose 用 `kafka-init` 预建，K8s 环境请提前创建 topic，或首次任务后重启 Go Pod）。
 4. **外部 Redis**：地址可达（Go 用作旁路缓存，未配置时功能降级）。
 5. **外部 Nacos**：地址可达；JIT 注册中心用于 Knowledge Agent 发现，未启用时可忽略连接错误。
 6. **四个镜像已构建并推送到集群可拉取的仓库**（见下一节）。集群节点能够访问该 registry。
