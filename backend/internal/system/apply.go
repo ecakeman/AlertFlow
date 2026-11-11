@@ -11,13 +11,14 @@ import (
 
 // MonitorSample 是一次已经完成的探测。调度器与测试都走这条事务。
 type MonitorSample struct {
-	ServiceID   uuid.UUID
-	TargetID    uuid.UUID
-	ObservedAt  time.Time
-	Success     bool
-	StatusClass string
-	ErrorClass  string
-	Raw         json.RawMessage
+	ServiceID        uuid.UUID
+	TargetID         uuid.UUID
+	ObservedAt       time.Time
+	Success          bool
+	StatusClass      string
+	ErrorClass       string
+	StateFingerprint string
+	Raw              json.RawMessage
 }
 
 // ApplyResult 是一次监控或应用输入后的 Episode 结果。
@@ -60,7 +61,7 @@ func (s *Store) ApplyMonitorSample(ctx context.Context, sample MonitorSample) (A
 		err := tx.QueryRowContext(ctx, `
 			SELECT target_type, target_key, failure_threshold, recovery_threshold, is_required, enabled
 			FROM system.service_monitor_targets
-			WHERE target_id=$1 AND service_id=$2`, sample.TargetID, sample.ServiceID).
+			WHERE target_id=$1 AND service_id=$2 AND deleted_at IS NULL`, sample.TargetID, sample.ServiceID).
 			Scan(&targetType, &targetKey, &failTh, &recTh, &required, &enabled)
 		if err == sql.ErrNoRows {
 			return errCode("TARGET_NOT_FOUND", "monitor target not found", 404)
@@ -102,6 +103,10 @@ func (s *Store) ApplyMonitorSample(ctx context.Context, sample MonitorSample) (A
 			}
 		}
 		fields := map[string]string{"status_class": sample.StatusClass, "error_class": sample.ErrorClass}
+		// 仅 K8s 采样会带稳定指纹，HTTP/TCP 的 diagnostic_fields 保持原样。
+		if sample.StateFingerprint != "" {
+			fields["state_fingerprint"] = sample.StateFingerprint
+		}
 		rawFields, _ := json.Marshal(fields)
 		raw := sample.Raw
 		if len(raw) == 0 {
@@ -519,7 +524,7 @@ func loadProjection(ctx context.Context, tx *sql.Tx, serviceID uuid.UUID) ([]Mon
 		), '{}'::jsonb)
 		FROM system.service_monitor_targets t
 		JOIN system.service_monitor_target_states st ON st.target_id=t.target_id
-		WHERE t.service_id=$1 AND t.enabled AND t.is_required
+		WHERE t.service_id=$1 AND t.enabled AND t.is_required AND t.deleted_at IS NULL
 		ORDER BY t.target_key`, serviceID)
 	if err != nil {
 		return nil, err
@@ -533,8 +538,9 @@ func loadProjection(ctx context.Context, tx *sql.Tx, serviceID uuid.UUID) ([]Mon
 			return nil, err
 		}
 		var diag struct {
-			StatusClass string `json:"status_class"`
-			ErrorClass  string `json:"error_class"`
+			StatusClass      string `json:"status_class"`
+			ErrorClass       string `json:"error_class"`
+			StateFingerprint string `json:"state_fingerprint"`
 		}
 		_ = json.Unmarshal(raw, &diag)
 		if f.TargetType == "HTTP" {
@@ -542,6 +548,7 @@ func loadProjection(ctx context.Context, tx *sql.Tx, serviceID uuid.UUID) ([]Mon
 		} else {
 			f.ErrorClass = diag.ErrorClass
 		}
+		f.StateFingerprint = diag.StateFingerprint
 		out = append(out, f)
 	}
 	return out, rows.Err()

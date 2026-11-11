@@ -13,6 +13,7 @@ import (
 type EpisodeView struct {
 	EpisodeID             uuid.UUID  `json:"episode_id"`
 	ServiceID             uuid.UUID  `json:"service_id"`
+	ServiceName           string     `json:"service_name"`
 	Status                string     `json:"status"`
 	ResolutionPending     bool       `json:"resolution_pending"`
 	StartedBy             string     `json:"started_by"`
@@ -28,6 +29,7 @@ type EpisodeView struct {
 	ActiveTaskID          *uuid.UUID `json:"active_task_id,omitempty"`
 	ActiveTaskStatus      string     `json:"active_task_status,omitempty"`
 	ActiveTaskType        string     `json:"active_task_type,omitempty"`
+	UpdatedAt             time.Time  `json:"updated_at"`
 }
 
 func (s *Store) GetEpisode(ctx context.Context, id uuid.UUID) (EpisodeView, error) {
@@ -37,18 +39,19 @@ func (s *Store) GetEpisode(ctx context.Context, id uuid.UUID) (EpisodeView, erro
 	var taskID uuid.NullUUID
 	var taskStatus, taskType sql.NullString
 	err := s.DB.QueryRowContext(ctx, `
-		SELECT e.episode_id, e.service_id, e.status, e.resolution_pending, e.started_by, e.started_at,
+		SELECT e.episode_id, e.service_id, sv.name, e.status, e.resolution_pending, e.started_by, e.started_at,
 		       e.resolved_at, e.archived_at, e.input_hash, e.input_version, e.processed_input_version,
-		       e.final_input_version, m.status, a.status, t.task_id, t.status, t.task_type
+		       e.final_input_version, m.status, a.status, t.task_id, t.status, t.task_type, e.updated_at
 		FROM system.episodes e
+		JOIN system.services sv ON sv.service_id=e.service_id
 		JOIN system.service_source_states m ON m.service_id=e.service_id AND m.source='MONITOR'
 		JOIN system.service_source_states a ON a.service_id=e.service_id AND a.source='APP'
 		LEFT JOIN system.agent_tasks t ON t.episode_id=e.episode_id
 		  AND t.status IN ('PENDING','DISPATCHED','RUNNING','RETRY_WAIT')
 		WHERE e.episode_id=$1`, id).Scan(
-		&v.EpisodeID, &v.ServiceID, &v.Status, &v.ResolutionPending, &v.StartedBy, &v.StartedAt,
+		&v.EpisodeID, &v.ServiceID, &v.ServiceName, &v.Status, &v.ResolutionPending, &v.StartedBy, &v.StartedAt,
 		&resolved, &archived, &v.InputHash, &v.InputVersion, &v.ProcessedInputVersion, &final,
-		&v.MonitorStatus, &v.AppStatus, &taskID, &taskStatus, &taskType)
+		&v.MonitorStatus, &v.AppStatus, &taskID, &taskStatus, &taskType, &v.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return EpisodeView{}, errCode("EPISODE_NOT_FOUND", "episode not found", 404)
 	}
@@ -298,16 +301,17 @@ type DueTarget struct {
 	TargetID   uuid.UUID
 	TargetType string
 	Address    string
+	Config     json.RawMessage
 	Interval   time.Duration
 	Timeout    time.Duration
 }
 
 func (s *Store) ListDueTargets(ctx context.Context) ([]DueTarget, error) {
 	rows, err := s.DB.QueryContext(ctx, `
-		SELECT t.service_id, t.target_id, t.target_type, t.address, t.interval_ms, t.timeout_ms
+		SELECT t.service_id, t.target_id, t.target_type, t.address, t.config, t.interval_ms, t.timeout_ms
 		FROM system.service_monitor_targets t
 		JOIN system.services s ON s.service_id=t.service_id
-		WHERE t.enabled AND s.enabled`)
+		WHERE t.enabled AND s.enabled AND t.deleted_at IS NULL AND s.deleted_at IS NULL`)
 	if err != nil {
 		return nil, err
 	}
@@ -316,7 +320,7 @@ func (s *Store) ListDueTargets(ctx context.Context) ([]DueTarget, error) {
 	for rows.Next() {
 		var d DueTarget
 		var interval, timeout int
-		if err := rows.Scan(&d.ServiceID, &d.TargetID, &d.TargetType, &d.Address, &interval, &timeout); err != nil {
+		if err := rows.Scan(&d.ServiceID, &d.TargetID, &d.TargetType, &d.Address, &d.Config, &interval, &timeout); err != nil {
 			return nil, err
 		}
 		d.Interval = time.Duration(interval) * time.Millisecond

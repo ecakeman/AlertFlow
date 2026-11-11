@@ -38,9 +38,18 @@ func (s *Server) Handler() http.Handler {
 	engine.GET("/healthz", func(c *gin.Context) {
 		writeJSON(c.Writer, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	engine.GET("/readyz", s.readyz)
+	engine.GET("/api/v1/dashboard/summary", s.dashboard)
+	engine.GET("/api/v1/services", s.listServices)
 	engine.POST("/api/v1/services", s.createService)
 	engine.GET("/api/v1/services/:service_id", s.getService)
 	engine.PATCH("/api/v1/services/:service_id", s.patchService)
+	engine.DELETE("/api/v1/services/:service_id", s.deleteService)
+	engine.GET("/api/v1/services/:service_id/targets", s.listTargets)
+	engine.POST("/api/v1/services/:service_id/targets", s.createTarget)
+	engine.PATCH("/api/v1/targets/:target_id", s.patchTarget)
+	engine.DELETE("/api/v1/targets/:target_id", s.deleteTarget)
+	engine.GET("/api/v1/episodes", s.listEpisodes)
 	engine.GET("/api/v1/services/:service_id/timeline", s.serviceTimeline)
 	engine.POST("/api/v1/services/:service_id/events", s.postEvent)
 	engine.GET("/api/v1/episodes/:episode_id", s.getEpisode)
@@ -148,6 +157,7 @@ func (s *Server) patchService(c *gin.Context) {
 		writeErr(c.Writer, err)
 		return
 	}
+	s.Cache.Delete(c.Request.Context(), "service:"+id.String())
 	writeJSON(c.Writer, http.StatusOK, view)
 }
 

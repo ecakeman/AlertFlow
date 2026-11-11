@@ -10,11 +10,12 @@ import (
 
 // MonitorField 是区域一参与哈希的白名单字段。
 type MonitorField struct {
-	TargetKey   string `json:"target_key"`
-	TargetType  string `json:"target_type"`
-	Status      string `json:"status"`
-	StatusClass string `json:"status_class"`
-	ErrorClass  string `json:"error_class"`
+	TargetKey        string `json:"target_key"`
+	TargetType       string `json:"target_type"`
+	Status           string `json:"status"`
+	StatusClass      string `json:"status_class"`
+	ErrorClass       string `json:"error_class"`
+	StateFingerprint string `json:"state_fingerprint,omitempty"`
 }
 
 // AppCanon 是区域二参与哈希的字段。event_id 与时间不在其中。

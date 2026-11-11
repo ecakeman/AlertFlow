@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -44,7 +46,14 @@ func main() {
 	}
 	root, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	go monitor.Run(root, store, 4)
+	// Kubernetes 观察器默认关闭；启用但集群不可用时只记录错误，采样返回观察器错误。
+	k8sEnabled, parseErr := strconv.ParseBool(env("ALERTFLOW_K8S_ENABLED", "false"))
+	if parseErr != nil {
+		log.Warn("invalid ALERTFLOW_K8S_ENABLED, kubernetes monitoring disabled", "value", os.Getenv("ALERTFLOW_K8S_ENABLED"))
+		k8sEnabled = false
+	}
+	k8sObserver := monitor.NewK8sObserver(k8sEnabled, env("ALERTFLOW_K8S_NAMESPACE", "default"), log)
+	go monitor.Run(root, store, 4, k8sObserver, log)
 	go gateway.RunRecovery(root, store, 2*time.Second)
 	if brokers := split(os.Getenv("ALERTFLOW_KAFKA_BROKERS")); len(brokers) > 0 && brokers[0] != "" {
 		topic := env("ALERTFLOW_KAFKA_TOPIC", "alertflow.agent-task-ready.v1")
@@ -65,23 +74,41 @@ func main() {
 			log.Error("grpc", "err", err)
 		}
 	}()
+	// 有界关闭：HTTP 与 gRPC 各自最多等待 shutdownTimeout，整体小于 45s terminationGracePeriod。
+	const shutdownTimeout = 10 * time.Second
+	var shutdownWG sync.WaitGroup
+	shutdownWG.Add(2)
 	go func() {
+		defer shutdownWG.Done()
 		<-root.Done()
-		grpcServer.GracefulStop()
+		done := make(chan struct{})
+		go func() {
+			grpcServer.GracefulStop()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(shutdownTimeout):
+			grpcServer.Stop()
+		}
 	}()
 	httpServer := &http.Server{
 		Addr:    env("ALERTFLOW_HTTP_ADDR", ":8080"),
 		Handler: (&api.Server{Store: store, Cache: aside, Log: log, Artifacts: agentArtifacts(os.Getenv("ALERTFLOW_AGENT_GRPC_TARGET"))}).Handler(),
 	}
 	go func() {
+		defer shutdownWG.Done()
 		<-root.Done()
-		_ = httpServer.Shutdown(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		_ = httpServer.Shutdown(ctx)
 	}()
 	log.Info("alertflow listening", "http", httpServer.Addr, "grpc", lis.Addr().String())
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Error("http", "err", err)
 		os.Exit(1)
 	}
+	shutdownWG.Wait()
 }
 
 func env(key, fallback string) string {

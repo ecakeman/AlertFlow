@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"time"
@@ -13,52 +15,70 @@ import (
 	"github.com/google/uuid"
 )
 
-// Probe 执行一次 HTTP 或 TCP 探测，不写数据库。
-func Probe(ctx context.Context, target system.DueTarget) system.MonitorSample {
-	sample := system.MonitorSample{ServiceID: target.ServiceID, TargetID: target.TargetID, ObservedAt: time.Now().UTC()}
+// Probe 按目标类型显式分发。HTTP/TCP 的失败属于业务采样；
+// KUBERNETES 的观察器自身异常返回 error，由 Run 跳过写库。
+func Probe(ctx context.Context, target system.DueTarget, k8s *K8sObserver) (system.MonitorSample, error) {
+	sample := system.MonitorSample{
+		ServiceID: target.ServiceID, TargetID: target.TargetID, ObservedAt: time.Now().UTC(),
+	}
 	switch target.TargetType {
+	case "HTTP":
+		return probeHTTP(ctx, target, sample), nil
 	case "TCP":
-		dialer := net.Dialer{Timeout: target.Timeout}
-		conn, err := dialer.DialContext(ctx, "tcp", target.Address)
-		if err != nil {
-			sample.ErrorClass = "connect"
-			sample.Raw = rawErr(err)
-			return sample
+		return probeTCP(ctx, target, sample), nil
+	case "KUBERNETES":
+		if k8s == nil {
+			return sample, fmt.Errorf("kubernetes target %s configured but ALERTFLOW_K8S_ENABLED is false", target.TargetID)
 		}
-		_ = conn.Close()
-		sample.Success = true
-		sample.ErrorClass = ""
-		sample.Raw = []byte(`{"connected":true}`)
-		return sample
+		return k8s.Probe(ctx, target)
 	default:
-		reqCtx, cancel := context.WithTimeout(ctx, target.Timeout)
-		defer cancel()
-		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, target.Address, nil)
-		if err != nil {
-			sample.StatusClass = "error"
-			sample.Raw = rawErr(err)
-			return sample
-		}
-		client := &http.Client{Timeout: target.Timeout, Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}}
-		resp, err := client.Do(req)
-		if err != nil {
-			sample.StatusClass = "timeout"
-			if reqCtx.Err() == nil {
-				sample.StatusClass = "error"
-			}
-			sample.Raw = rawErr(err)
-			return sample
-		}
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		sample.StatusClass = statusClass(resp.StatusCode)
-		sample.Success = resp.StatusCode >= 200 && resp.StatusCode < 400
-		raw, _ := json.Marshal(map[string]any{"status_code": resp.StatusCode, "body": string(body)})
-		sample.Raw = raw
+		return sample, fmt.Errorf("unsupported target_type %q", target.TargetType)
+	}
+}
+
+func probeTCP(ctx context.Context, target system.DueTarget, sample system.MonitorSample) system.MonitorSample {
+	dialer := net.Dialer{Timeout: target.Timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", target.Address)
+	if err != nil {
+		sample.ErrorClass = "connect"
+		sample.Raw = rawErr(err)
 		return sample
 	}
+	_ = conn.Close()
+	sample.Success = true
+	sample.ErrorClass = ""
+	sample.Raw = []byte(`{"connected":true}`)
+	return sample
+}
+
+func probeHTTP(ctx context.Context, target system.DueTarget, sample system.MonitorSample) system.MonitorSample {
+	reqCtx, cancel := context.WithTimeout(ctx, target.Timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, target.Address, nil)
+	if err != nil {
+		sample.StatusClass = "error"
+		sample.Raw = rawErr(err)
+		return sample
+	}
+	client := &http.Client{Timeout: target.Timeout, Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}}
+	resp, err := client.Do(req)
+	if err != nil {
+		sample.StatusClass = "timeout"
+		if reqCtx.Err() == nil {
+			sample.StatusClass = "error"
+		}
+		sample.Raw = rawErr(err)
+		return sample
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	sample.StatusClass = statusClass(resp.StatusCode)
+	sample.Success = resp.StatusCode >= 200 && resp.StatusCode < 400
+	raw, _ := json.Marshal(map[string]any{"status_code": resp.StatusCode, "body": string(body)})
+	sample.Raw = raw
+	return sample
 }
 
 func statusClass(code int) string {
@@ -80,7 +100,7 @@ func rawErr(err error) []byte {
 }
 
 // Run 用固定大小的 worker 池按间隔探测。取消 ctx 后退出。
-func Run(ctx context.Context, store *system.Store, workers int) {
+func Run(ctx context.Context, store *system.Store, workers int, k8s *K8sObserver, log *slog.Logger) {
 	if workers <= 0 {
 		workers = 4
 	}
@@ -95,7 +115,15 @@ func Run(ctx context.Context, store *system.Store, workers int) {
 					if !ok {
 						return
 					}
-					sample := Probe(ctx, target)
+					sample, err := Probe(ctx, target, k8s)
+					if err != nil {
+						if log != nil {
+							log.Error("monitor probe failed",
+								"service_id", target.ServiceID, "target_id", target.TargetID,
+								"target_type", target.TargetType, "err", err)
+						}
+						continue
+					}
 					_, _ = store.ApplyMonitorSample(ctx, sample)
 				}
 			}
