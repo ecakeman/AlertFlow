@@ -117,6 +117,18 @@ func (s *Store) ServiceTimeline(ctx context.Context, serviceID uuid.UUID, limit 
 	return out, rows.Err()
 }
 
+// EpisodeMonitorPoint 是 Episode 时间轴里的一条监控采样点。
+type EpisodeMonitorPoint struct {
+	PointSeq    int64     `json:"point_seq"`
+	TargetID    uuid.UUID `json:"target_id"`
+	TargetKey   string    `json:"target_key"`
+	TargetType  string    `json:"target_type"`
+	ObservedAt  time.Time `json:"observed_at"`
+	CheckStatus string    `json:"check_status"`
+	StatusClass string    `json:"status_class"`
+	ErrorClass  string    `json:"error_class"`
+}
+
 // EpisodeTimeline 返回三块逻辑时间轴：监控投影、应用事件、产物引用。
 func (s *Store) EpisodeTimeline(ctx context.Context, episodeID uuid.UUID) (map[string]any, error) {
 	ep, err := s.GetEpisode(ctx, episodeID)
@@ -128,6 +140,10 @@ func (s *Store) EpisodeTimeline(ctx context.Context, episodeID uuid.UUID) (map[s
 	if err := s.DB.QueryRowContext(ctx, `
 		SELECT current_monitor_projection, monitor_start_point_seq FROM system.episodes WHERE episode_id=$1`,
 		episodeID).Scan(&proj, &start); err != nil {
+		return nil, err
+	}
+	points, err := s.episodeMonitorPoints(ctx, ep.ServiceID, start.Int64)
+	if err != nil {
 		return nil, err
 	}
 	rows, err := s.DB.QueryContext(ctx, `
@@ -179,9 +195,47 @@ func (s *Store) EpisodeTimeline(ctx context.Context, episodeID uuid.UUID) (map[s
 		"episode":                 ep,
 		"region1_projection":      json.RawMessage(proj),
 		"monitor_start_point_seq": start.Int64,
+		"monitor_points":          points,
 		"region2_events":          events,
 		"region3_refs":            refs,
 	}, refRows.Err()
+}
+
+// episodeMonitorPoints 返回 Episode 起点之后最近 200 条监控采样点，按 point_seq 升序。
+// 目标即使已软删除也保留采样点（LEFT JOIN 不过滤 deleted_at）。
+func (s *Store) episodeMonitorPoints(ctx context.Context, serviceID uuid.UUID, startSeq int64) ([]EpisodeMonitorPoint, error) {
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT p.point_seq, p.target_id, COALESCE(t.target_key,''), COALESCE(t.target_type,''),
+		       p.observed_at, p.check_status,
+		       COALESCE(p.diagnostic_fields->>'status_class',''),
+		       COALESCE(p.diagnostic_fields->>'error_class','')
+		FROM system.service_monitor_points p
+		LEFT JOIN system.service_monitor_targets t ON t.target_id=p.target_id
+		WHERE p.service_id=$1 AND p.point_seq > $2
+		ORDER BY p.point_seq DESC
+		LIMIT 200`, serviceID, startSeq)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var desc []EpisodeMonitorPoint
+	for rows.Next() {
+		var p EpisodeMonitorPoint
+		if err := rows.Scan(&p.PointSeq, &p.TargetID, &p.TargetKey, &p.TargetType,
+			&p.ObservedAt, &p.CheckStatus, &p.StatusClass, &p.ErrorClass); err != nil {
+			return nil, err
+		}
+		desc = append(desc, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// 取的是最近 200 条（倒序），返回前翻转为升序。
+	out := make([]EpisodeMonitorPoint, 0, len(desc))
+	for i := len(desc) - 1; i >= 0; i-- {
+		out = append(out, desc[i])
+	}
+	return out, nil
 }
 
 // InputSnapshot 是固定输入版本的快照。

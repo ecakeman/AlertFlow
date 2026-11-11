@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,8 +28,16 @@ type ServiceSummary struct {
 // ServiceFilter 是服务列表的过滤条件。
 type ServiceFilter struct {
 	Status string
+	Q      string
 	Limit  int
 	Offset int
+}
+
+// likeFuzzy 把关键字转成 ILIKE 模式串，转义 LIKE 元字符 % 和 _；
+// 反斜杠一并转义（PostgreSQL 的 LIKE 默认转义符即反斜杠）。
+func likeFuzzy(q string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return "%" + r.Replace(q) + "%"
 }
 
 // ListServices 返回未软删除服务的摘要，status 按 MONITOR 聚合状态过滤。
@@ -51,6 +60,11 @@ func (s *Store) ListServices(ctx context.Context, f ServiceFilter) ([]ServiceSum
 	if f.Status != "" {
 		args = append(args, f.Status)
 		where += fmt.Sprintf(" AND m.status=$%d", len(args))
+	}
+	// q 对名称与 service_key 做不区分大小写的模糊匹配。
+	if q := strings.TrimSpace(f.Q); q != "" {
+		args = append(args, likeFuzzy(q))
+		where += fmt.Sprintf(" AND (s.name ILIKE $%d OR s.service_key ILIKE $%d)", len(args), len(args))
 	}
 	var total int
 	if err := s.DB.QueryRowContext(ctx, `
@@ -328,6 +342,8 @@ type EpisodeSummary struct {
 	InputVersion          int64      `json:"input_version"`
 	ProcessedInputVersion int64      `json:"processed_input_version"`
 	ActiveTaskStatus      string     `json:"active_task_status"`
+	ActiveTaskType        string     `json:"active_task_type"`
+	HasDiagnosisReport    bool       `json:"has_diagnosis_report"`
 	UpdatedAt             time.Time  `json:"updated_at"`
 }
 
@@ -383,7 +399,10 @@ func (s *Store) ListEpisodes(ctx context.Context, f EpisodeFilter) ([]EpisodeSum
 	rows, err := s.DB.QueryContext(ctx, `
 		SELECT e.episode_id, e.service_id, sv.name, e.status, e.resolution_pending, e.started_by,
 		       e.started_at, e.resolved_at, e.archived_at, e.input_version, e.processed_input_version,
-		       COALESCE(t.status,''), e.updated_at
+		       COALESCE(t.status,''), COALESCE(t.task_type,''),
+		       EXISTS (SELECT 1 FROM cognitive.episode_artifacts a
+		               WHERE a.episode_id=e.episode_id AND a.artifact_type='DIAGNOSIS_REPORT'),
+		       e.updated_at
 		FROM system.episodes e
 		JOIN system.services sv ON sv.service_id=e.service_id
 		LEFT JOIN system.agent_tasks t ON t.episode_id=e.episode_id
@@ -401,7 +420,7 @@ func (s *Store) ListEpisodes(ctx context.Context, f EpisodeFilter) ([]EpisodeSum
 		var resolved, archived sql.NullTime
 		if err := rows.Scan(&v.EpisodeID, &v.ServiceID, &v.ServiceName, &v.Status, &v.ResolutionPending,
 			&v.StartedBy, &v.StartedAt, &resolved, &archived, &v.InputVersion, &v.ProcessedInputVersion,
-			&v.ActiveTaskStatus, &v.UpdatedAt); err != nil {
+			&v.ActiveTaskStatus, &v.ActiveTaskType, &v.HasDiagnosisReport, &v.UpdatedAt); err != nil {
 			return nil, 0, err
 		}
 		if resolved.Valid {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 const (
@@ -131,21 +132,25 @@ func ParseKubernetesTargetConfig(raw json.RawMessage) (KubernetesTargetConfig, e
 	if cfg.ResourceName == "" {
 		return cfg, errCode("VALIDATION", "config.resource_name is required", 400)
 	}
+	if problems := validation.IsDNS1123Subdomain(cfg.ResourceName); len(problems) > 0 {
+		return cfg, errCode("VALIDATION", "config.resource_name is not a valid Kubernetes resource name", 400)
+	}
 	return cfg, nil
 }
 
 // ServiceView 是管理查询返回的服务与双来源状态。
 type ServiceView struct {
-	ServiceID           uuid.UUID `json:"service_id"`
-	ServiceKey          string    `json:"service_key"`
-	Name                string    `json:"name"`
-	Description         string    `json:"description"`
-	Enabled             bool      `json:"enabled"`
-	AggregationMode     string    `json:"monitor_aggregation_mode"`
-	AuthorityProducerID string    `json:"authority_producer_id"`
-	MonitorStatus       string    `json:"monitor_status"`
-	AppStatus           string    `json:"app_status"`
-	Targets             []Target  `json:"targets"`
+	ServiceID           uuid.UUID  `json:"service_id"`
+	ServiceKey          string     `json:"service_key"`
+	Name                string     `json:"name"`
+	Description         string     `json:"description"`
+	Enabled             bool       `json:"enabled"`
+	AggregationMode     string     `json:"monitor_aggregation_mode"`
+	AuthorityProducerID string     `json:"authority_producer_id"`
+	MonitorStatus       string     `json:"monitor_status"`
+	AppStatus           string     `json:"app_status"`
+	LastCheckAt         *time.Time `json:"last_check_at"`
+	Targets             []Target   `json:"targets"`
 }
 
 func (s *Store) CreateService(ctx context.Context, in CreateServiceInput) (ServiceView, error) {
@@ -214,6 +219,10 @@ func normalizeTarget(t TargetInput) (TargetInput, error) {
 		if t.TimeoutMS == 0 {
 			t.TimeoutMS = 3000
 		}
+		// 默认值补齐后仍须为正数（显式传入 0 走默认，负数视为非法）。
+		if t.IntervalMS <= 0 || t.TimeoutMS <= 0 {
+			return t, errCode("VALIDATION", "interval_ms and timeout_ms must be positive", 400)
+		}
 	default:
 		return t, errCode("VALIDATION", "target_type must be HTTP, TCP or KUBERNETES", 400)
 	}
@@ -280,6 +289,12 @@ func (s *Store) GetService(ctx context.Context, id uuid.UUID) (ServiceView, erro
 	v.Targets, err = s.listTargets(ctx, id)
 	if err != nil {
 		return ServiceView{}, err
+	}
+	// 服务“最近观测”取所有监控源 last_check_at 的最大值。
+	for i := range v.Targets {
+		if t := v.Targets[i].LastCheckAt; t != nil && (v.LastCheckAt == nil || t.After(*v.LastCheckAt)) {
+			v.LastCheckAt = t
+		}
 	}
 	return v, nil
 }

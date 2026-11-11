@@ -124,7 +124,12 @@ func Run(ctx context.Context, store *system.Store, workers int, k8s *K8sObserver
 						}
 						continue
 					}
-					_, _ = store.ApplyMonitorSample(ctx, sample)
+					if _, err := store.ApplyMonitorSample(ctx, sample); err != nil {
+						if log != nil {
+							log.Error("apply monitor sample failed",
+								"service_id", sample.ServiceID, "target_id", sample.TargetID, "err", err)
+						}
+					}
 				}
 			}
 		}()

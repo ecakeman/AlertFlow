@@ -324,17 +324,18 @@ func (s *Store) CompleteTask(ctx context.Context, in CompleteInput) (TaskAck, er
 				    finished_at=CASE WHEN $2::varchar='FAILED' THEN $7::timestamptz ELSE NULL::timestamptz END,
 				    updated_at=$7
 				WHERE task_id=$1`,
-				in.TaskID, status, task.AttemptCount, next, nullStr(in.ErrorCode), nullStr(in.ErrorMessage), now); err != nil {
+				in.TaskID, status, task.AttemptCount, next,
+				nullStr(truncateText(in.ErrorCode, 100)), nullStr(truncateText(in.ErrorMessage, 4000)), now); err != nil {
 				return err
 			}
-			if status == TaskRetryWait {
-				if _, err := tx.ExecContext(ctx, `
-					UPDATE system.episode_input_versions
-					SET queue_status='PENDING', assigned_task_id=NULL
-					WHERE episode_id=$1 AND assigned_task_id=$2 AND queue_status='ASSIGNED'`,
-					ep.ID, in.TaskID); err != nil {
-					return err
-				}
+			// 失败（含重试等待与永久失败）都要把该任务占用的输入版本退回 PENDING，
+			// 否则后续采样会一直命中 INPUT_GAP，监控数据永久停滞。
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE system.episode_input_versions
+				SET queue_status='PENDING', assigned_task_id=NULL
+				WHERE episode_id=$1 AND assigned_task_id=$2 AND queue_status='ASSIGNED'`,
+				ep.ID, in.TaskID); err != nil {
+				return err
 			}
 			ack.Accepted = true
 			ack.Message = status
@@ -704,6 +705,14 @@ func (s *Store) requeueTask(ctx context.Context, taskID, episodeID uuid.UUID) er
 }
 
 func (s *Store) backfillTasks(ctx context.Context, now time.Time) error {
+	// 启动自愈：永久失败任务占用的输入版本必须退回 PENDING，否则历史数据会让该 Episode 永远 INPUT_GAP。
+	if _, err := s.DB.ExecContext(ctx, `
+		UPDATE system.episode_input_versions v
+		SET queue_status='PENDING', assigned_task_id=NULL
+		FROM system.agent_tasks t
+		WHERE v.assigned_task_id=t.task_id AND v.queue_status='ASSIGNED' AND t.status='FAILED'`); err != nil {
+		return err
+	}
 	rows, err := s.DB.QueryContext(ctx, `
 		SELECT e.episode_id, e.service_id
 		FROM system.episodes e
@@ -932,4 +941,16 @@ func (s *Store) MarkPublishFailed(ctx context.Context, outboxID uuid.UUID) error
 		SET publish_attempts=publish_attempts+1, next_retry_at=$2
 		WHERE outbox_id=$1 AND published_at IS NULL`, outboxID, s.now().Add(s.RetryBase))
 	return err
+}
+
+// truncateText 按字符数截断，避免超过 varchar 长度或截断 UTF-8。
+func truncateText(s string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= limit {
+		return s
+	}
+	return string(runes[:limit])
 }

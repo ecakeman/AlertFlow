@@ -45,6 +45,7 @@ func (s *Server) listServices(c *gin.Context) {
 	}
 	services, total, err := s.Store.ListServices(c.Request.Context(), system.ServiceFilter{
 		Status: c.Query("status"),
+		Q:      c.Query("q"),
 		Limit:  limit,
 		Offset: offset,
 	})

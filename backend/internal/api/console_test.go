@@ -192,3 +192,91 @@ func TestEpisodesEndpoint(t *testing.T) {
 		t.Fatalf("filter by service %d", rec.Code)
 	}
 }
+
+// TestServiceListQuery 覆盖 GET /api/v1/services?q= 的透传与转义。
+func TestServiceListQuery(t *testing.T) {
+	server := testAPI(t)
+	h := server.Handler()
+	createServiceForAPI(t, h)
+	createServiceForAPI(t, h)
+	cases := []struct {
+		name    string
+		query   string
+		want    int
+		wantLen int
+	}{
+		{"case insensitive", "q=ORDERS", 2, 2},
+		{"no match", "q=no-such", 0, 0},
+		{"percent escaped", "q=%25", 0, 0},
+	}
+	for _, tc := range cases {
+		rec := do(t, h, http.MethodGet, "/api/v1/services?"+tc.query, "")
+		var body struct {
+			Services []system.ServiceSummary `json:"services"`
+			Total    int                     `json:"total"`
+		}
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &body) != nil {
+			t.Fatalf("%s: %d %s", tc.name, rec.Code, rec.Body.String())
+		}
+		if body.Total != tc.want || len(body.Services) != tc.wantLen {
+			t.Fatalf("%s: total=%d len=%d", tc.name, body.Total, len(body.Services))
+		}
+		if body.Services == nil {
+			t.Fatalf("%s: services is null", tc.name)
+		}
+	}
+}
+
+// TestEpisodeTimelineMonitorPointsEndpoint 覆盖时间轴响应中的 monitor_points 字段。
+func TestEpisodeTimelineMonitorPointsEndpoint(t *testing.T) {
+	server := testAPI(t)
+	h := server.Handler()
+	svc := createServiceForAPI(t, h)
+	ctx := context.Background()
+	base := time.Now().UTC()
+	var episodeID uuid.UUID
+	for i := 0; i < 2; i++ {
+		res, err := server.Store.ApplyMonitorSample(ctx, system.MonitorSample{
+			ServiceID: svc.ServiceID, TargetID: svc.Targets[0].TargetID,
+			ObservedAt: base.Add(time.Duration(i) * time.Second), Success: false,
+			StatusClass: "5xx", ErrorClass: "upstream",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		episodeID = res.EpisodeID
+	}
+	rec := do(t, h, http.MethodGet, "/api/v1/episodes/"+episodeID.String()+"/timeline", "")
+	var body map[string]json.RawMessage
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &body) != nil {
+		t.Fatalf("timeline %d %s", rec.Code, rec.Body.String())
+	}
+	// 起点之后暂无采样点时返回 [] 而不是 null。
+	if string(body["monitor_points"]) != "[]" {
+		t.Fatalf("empty monitor_points = %s", body["monitor_points"])
+	}
+	for _, key := range []string{"episode", "region1_projection", "monitor_start_point_seq", "region2_events", "region3_refs"} {
+		if _, ok := body[key]; !ok {
+			t.Fatalf("legacy field %q missing", key)
+		}
+	}
+
+	if _, err := server.Store.ApplyMonitorSample(ctx, system.MonitorSample{
+		ServiceID: svc.ServiceID, TargetID: svc.Targets[0].TargetID,
+		ObservedAt: base.Add(3 * time.Second), Success: false, StatusClass: "5xx",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec = do(t, h, http.MethodGet, "/api/v1/episodes/"+episodeID.String()+"/timeline", "")
+	var resp struct {
+		MonitorPoints []system.EpisodeMonitorPoint `json:"monitor_points"`
+	}
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &resp) != nil || len(resp.MonitorPoints) != 1 {
+		t.Fatalf("timeline with points %d %s", rec.Code, rec.Body.String())
+	}
+	p := resp.MonitorPoints[0]
+	if p.TargetKey != "api" || p.TargetType != "HTTP" || p.CheckStatus != "FAILURE" ||
+		p.StatusClass != "5xx" || p.ErrorClass != "" || p.ObservedAt.IsZero() {
+		t.Fatalf("point = %+v", p)
+	}
+}

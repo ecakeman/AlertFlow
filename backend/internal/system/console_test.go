@@ -322,3 +322,107 @@ func TestStateFingerprintDrivesInputVersion(t *testing.T) {
 		t.Fatalf("projection = %s", projection)
 	}
 }
+
+// TestKubernetesTargetValidationMessages 覆盖 K8s 目标非正 interval/timeout 与非法 DNS 名的报错契约。
+func TestKubernetesTargetValidationMessages(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	create := func(interval, timeout int, resourceName string) error {
+		_, err := s.CreateService(ctx, CreateServiceInput{
+			ServiceKey: "k8s-bad-" + uuid.NewString()[:8], Name: "k8s-bad", AuthorityProducerID: "ops",
+			Targets: []TargetInput{{
+				TargetKey: "web", TargetName: "web", TargetType: "KUBERNETES",
+				Config:     json.RawMessage(`{"resource_kind":"Deployment","resource_name":"` + resourceName + `"}`),
+				IntervalMS: interval, TimeoutMS: timeout,
+				FailureThreshold: 1, RecoveryThreshold: 1,
+			}},
+		})
+		return err
+	}
+	for _, tc := range []struct {
+		name              string
+		interval, timeout int
+	}{
+		{"negative interval", -1, 3000},
+		{"negative timeout", 10000, -1},
+		{"both negative", -10000, -3000},
+	} {
+		err := create(tc.interval, tc.timeout, "web")
+		e, ok := err.(*Error)
+		if !ok || e.Code != "VALIDATION" || e.Message != "interval_ms and timeout_ms must be positive" || e.HTTP != 400 {
+			t.Fatalf("%s: err = %+v", tc.name, err)
+		}
+	}
+	// 0 仍视为未设置并补默认值。
+	if err := create(0, 0, "web"); err != nil {
+		t.Fatalf("zero interval/timeout should default: %v", err)
+	}
+	for _, name := range []string{"Web_App", "web..app", "-web", "web app", "web/app"} {
+		err := create(10000, 3000, name)
+		e, ok := err.(*Error)
+		if !ok || e.Code != "VALIDATION" || e.Message != "config.resource_name is not a valid Kubernetes resource name" || e.HTTP != 400 {
+			t.Fatalf("resource_name %q: err = %+v", name, err)
+		}
+	}
+	if _, err := ParseKubernetesTargetConfig(json.RawMessage(`{"resource_kind":"Deployment","resource_name":"Web.App"}`)); err == nil {
+		t.Fatal("invalid resource_name accepted by parser")
+	}
+}
+
+// TestListServicesQueryFilter 覆盖服务列表 q 过滤：名称/服务键模糊匹配、大小写不敏感、% 与 _ 转义。
+func TestListServicesQueryFilter(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	suffix := uuid.NewString()[:8]
+	mk := func(key, name string) uuid.UUID {
+		t.Helper()
+		view, err := s.CreateService(ctx, CreateServiceInput{
+			ServiceKey: key, Name: name, AuthorityProducerID: "ops",
+			Targets: []TargetInput{{
+				TargetKey: "api", TargetName: "API", TargetType: "HTTP", Address: "http://x/health",
+				IntervalMS: 1000, TimeoutMS: 200, FailureThreshold: 1, RecoveryThreshold: 1,
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return view.ServiceID
+	}
+	ordersID := mk("orders-api-"+suffix, "Orders API")
+	mk("payments-api-"+suffix, "Payments")
+	mk("svc_under-"+suffix, "50%off")
+
+	for _, tc := range []struct {
+		name string
+		q    string
+		want int
+	}{
+		{"match by name", "orders", 1},
+		{"match by service_key", "payments-api", 1},
+		{"case insensitive", "ORDERS", 1},
+		{"trimmed", "  orders  ", 1},
+		{"percent is literal", "%", 1},
+		{"underscore is literal", "_", 1},
+		{"no match", "no-such-service", 0},
+	} {
+		list, total, err := s.ListServices(ctx, ServiceFilter{Q: tc.q})
+		if err != nil || total != tc.want || len(list) != tc.want {
+			t.Fatalf("%s: list=%d total=%d err=%v", tc.name, len(list), total, err)
+		}
+	}
+	// q 与 limit/status 组合时 total 仍为过滤后的总数。
+	list, total, err := s.ListServices(ctx, ServiceFilter{Q: "api", Limit: 1})
+	if err != nil || total != 2 || len(list) != 1 {
+		t.Fatalf("q+limit: list=%d total=%d err=%v", len(list), total, err)
+	}
+	if _, total, err := s.ListServices(ctx, ServiceFilter{Q: "orders", Status: StatusUnknown}); err != nil || total != 1 {
+		t.Fatalf("q+status total=%d err=%v", total, err)
+	}
+	// 软删除的服务不应出现在 q 结果中。
+	if err := s.SoftDeleteService(ctx, ordersID); err != nil {
+		t.Fatal(err)
+	}
+	if list, total, err := s.ListServices(ctx, ServiceFilter{Q: "orders"}); err != nil || total != 0 || len(list) != 0 {
+		t.Fatalf("q after delete: list=%d total=%d err=%v", len(list), total, err)
+	}
+}
