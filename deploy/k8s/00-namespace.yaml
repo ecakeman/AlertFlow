@@ -1,0 +1,22 @@
+# AlertFlow Kubernetes 应用清单 00：Namespace 与 ServiceAccount
+#
+# 只有 Go Backend 需要访问 Kubernetes API（单次 Get Deployment / StatefulSet），
+# 因此只有它使用专属 ServiceAccount alertflow-go。
+# Java Integration、Python Main Agent、Frontend 使用 namespace 默认 ServiceAccount，
+# 并在 Deployment 中关闭自动挂载 token，不授予任何 Kubernetes API 权限。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: alertflow
+  labels:
+    app.kubernetes.io/part-of: alertflow
+---
+# Go Backend 专用 ServiceAccount；具体权限见 10-rbac.yaml 中的 Role + RoleBinding。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alertflow-go
+  namespace: alertflow
+  labels:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/part-of: alertflow

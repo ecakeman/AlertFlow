@@ -1,0 +1,32 @@
+# AlertFlow Kubernetes 应用清单 10：最小 RBAC
+#
+# 仅授予 Go Backend 在 alertflow namespace 内 get Deployment / StatefulSet 的权限。
+# 观察器使用 client-go 单次 Get，不使用 Informer / Watch，
+# 因此不需要 list / watch，也不创建 ClusterRole / ClusterRoleBinding。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: alertflow-k8s-reader
+  namespace: alertflow
+  labels:
+    app.kubernetes.io/part-of: alertflow
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alertflow-go-k8s-reader
+  namespace: alertflow
+  labels:
+    app.kubernetes.io/part-of: alertflow
+subjects:
+  - kind: ServiceAccount
+    name: alertflow-go
+    namespace: alertflow
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: alertflow-k8s-reader

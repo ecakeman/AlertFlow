@@ -1,0 +1,365 @@
+# AlertFlow Kubernetes 应用清单 40：应用 Deployment
+#
+# 全部单副本 + strategy: Recreate（本期不做多副本 / HPA / 灰度）。
+# 敏感环境变量从 Secret alertflow-secrets 引用（字段示例见 secret.example.yaml）。
+# 镜像使用明确 tag，不依赖 latest；替换仓库地址时改 image 即可。
+# 非 root 镜像要求：Go / Java / Python 镜像的 Dockerfile 必须以数字 UID 设置 USER
+# （如 USER 10001），否则 runAsNonRoot 校验会让 Pod 启动失败。
+# Frontend 使用标准 Nginx（root master 绑定 80），不设置 runAsNonRoot。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertflow
+  namespace: alertflow
+  labels:
+    app.kubernetes.io/name: alertflow
+    app.kubernetes.io/part-of: alertflow
+    app.kubernetes.io/component: backend
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alertflow
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alertflow
+        app.kubernetes.io/part-of: alertflow
+        app.kubernetes.io/component: backend
+    spec:
+      serviceAccountName: alertflow-go
+      # Go 需要 ServiceAccount token 才能调用 Kubernetes API。
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: alertflow
+          image: ghcr.io/ecakeman/alertflow-backend:v0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: grpc
+              containerPort: 9090
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: alertflow-go-config
+          env:
+            - name: ALERTFLOW_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: alertflow-secrets
+                  key: ALERTFLOW_DATABASE_URL
+            - name: ALERTFLOW_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: alertflow-secrets
+                  key: ALERTFLOW_REDIS_URL
+            - name: ALERTFLOW_KAFKA_BROKERS
+              valueFrom:
+                secretKeyRef:
+                  name: alertflow-secrets
+                  key: ALERTFLOW_KAFKA_BROKERS
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: integration
+  namespace: alertflow
+  labels:
+    app.kubernetes.io/name: alertflow-integration
+    app.kubernetes.io/part-of: alertflow
+    app.kubernetes.io/component: integration
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alertflow-integration
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alertflow-integration
+        app.kubernetes.io/part-of: alertflow
+        app.kubernetes.io/component: integration
+    spec:
+      # Java 不需要 Kubernetes API 权限，使用默认 SA 且不挂载 token。
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: integration
+          image: ghcr.io/ecakeman/alertflow-integration:v0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8081
+              protocol: TCP
+            - name: grpc
+              containerPort: 9091
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: alertflow-integration-config
+          env:
+            - name: INTEGRATION_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: alertflow-secrets
+                  key: INTEGRATION_DATABASE_PASSWORD
+            # 主 Agent 的 MCP token；未配置 MCP 时可省略（optional）。
+            - name: ALERTFLOW_MAIN_MCP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: alertflow-secrets
+                  key: ALERTFLOW_MAIN_MCP_TOKEN
+                  optional: true
+            # Knowledge Agent 不做本期部署；未启用时可省略这三个键（optional）。
+            - name: KNOWLEDGE_A2A_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: alertflow-secrets
+                  key: KNOWLEDGE_A2A_TOKEN
+                  optional: true
+            - name: KNOWLEDGE_AGENT_MCP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: alertflow-secrets
+                  key: KNOWLEDGE_AGENT_MCP_TOKEN
+                  optional: true
+            # Nacos 未启用鉴权时可省略（optional）。
+            - name: NACOS_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: alertflow-secrets
+                  key: NACOS_USERNAME
+                  optional: true
+            - name: NACOS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: alertflow-secrets
+                  key: NACOS_PASSWORD
+                  optional: true
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8081
+            initialDelaySeconds: 45
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8081
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent
+  namespace: alertflow
+  labels:
+    app.kubernetes.io/name: alertflow-agent
+    app.kubernetes.io/part-of: alertflow
+    app.kubernetes.io/component: agent
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alertflow-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alertflow-agent
+        app.kubernetes.io/part-of: alertflow
+        app.kubernetes.io/component: agent
+    spec:
+      # Python Agent 不需要 Kubernetes API 权限，使用默认 SA 且不挂载 token。
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent
+          image: ghcr.io/ecakeman/alertflow-agent:v0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+            - name: grpc
+              containerPort: 9000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: alertflow-agent-config
+          env:
+            - name: ALERTFLOW_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: alertflow-secrets
+                  key: ALERTFLOW_DATABASE_URL
+            # 未配置模型 Key 时走 ScriptedModel；该键可省略（optional）。
+            - name: ALERTFLOW_LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: alertflow-secrets
+                  key: ALERTFLOW_LLM_API_KEY
+                  optional: true
+            # 调用 Java MCP Gateway 的 token，必须与 Java 的 ALERTFLOW_MAIN_MCP_TOKEN 一致；
+            # 未配置 MCP 时可省略（optional）。
+            - name: ALERTFLOW_MCP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: alertflow-secrets
+                  key: ALERTFLOW_MCP_TOKEN
+                  optional: true
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: alertflow
+  labels:
+    app.kubernetes.io/name: alertflow-frontend
+    app.kubernetes.io/part-of: alertflow
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alertflow-frontend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alertflow-frontend
+        app.kubernetes.io/part-of: alertflow
+        app.kubernetes.io/component: frontend
+    spec:
+      # Frontend 不需要 Kubernetes API 权限，使用默认 SA 且不挂载 token。
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 15
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: frontend
+          image: ghcr.io/ecakeman/alertflow-frontend:v0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          # 标准 Nginx 镜像以 root master 启动并绑定 80，因此不设置 runAsNonRoot / runAsUser，
+          # 避免与镜像的 nginx 用户模型冲突。若改用非 root Nginx 镜像，可加上 runAsNonRoot。
+          securityContext:
+            allowPrivilegeEscalation: false
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
