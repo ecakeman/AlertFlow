@@ -1,0 +1,492 @@
+/* 全局样式：信息密度优先、紧凑但可读 */
+:root {
+  --af-bg: #f5f7fa;
+  --af-card-bg: #ffffff;
+  --af-border: #e4e7ed;
+  --af-text: #303133;
+  --af-text-secondary: #606266;
+  --af-text-muted: #909399;
+  --af-aside-bg: #263445;
+  --af-aside-active: #1f2d3d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--af-bg);
+  color: var(--af-text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app-shell {
+  height: 100%;
+}
+
+.app-aside {
+  background: var(--af-aside-bg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 16px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.brand-logo {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: #ffd04b;
+  color: #263445;
+  font-weight: 700;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.brand-name {
+  color: #ffffff;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.brand-sub {
+  color: #a3b1c2;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.app-menu {
+  border-right: none;
+  background: transparent;
+  flex: 1;
+  padding-top: 8px;
+  --el-menu-bg-color: transparent;
+  --el-menu-text-color: #c8d3e0;
+  --el-menu-hover-bg-color: var(--af-aside-active);
+  --el-menu-active-color: #ffd04b;
+}
+
+.app-menu .el-menu-item {
+  height: 44px;
+  line-height: 44px;
+}
+
+.app-menu .el-menu-item.is-active {
+  background: var(--af-aside-active);
+}
+
+.aside-foot {
+  padding: 12px 16px 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  color: #8395a8;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.aside-foot-label {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.aside-foot-value {
+  color: #b6c3d2;
+  word-break: break-all;
+}
+
+.app-body {
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-header {
+  background: var(--af-card-bg);
+  border-bottom: 1px solid var(--af-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  flex: none;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.page-title {
+  font-size: 16px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.header-hint {
+  color: var(--af-text-muted);
+  font-size: 12px;
+}
+
+.app-main {
+  padding: 16px 20px 32px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+/* 页面通用布局 */
+.page-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.page-toolbar .toolbar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.el-card {
+  border-radius: 6px;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.card-header-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.card-header-sub {
+  color: var(--af-text-muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.section-gap {
+  margin-bottom: 12px;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 12px;
+}
+
+.text-muted {
+  color: var(--af-text-muted);
+}
+
+.text-secondary {
+  color: var(--af-text-secondary);
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.clickable {
+  cursor: pointer;
+  color: var(--el-color-primary);
+}
+
+.clickable:hover {
+  text-decoration: underline;
+}
+
+/* 总览统计卡 */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.stat-card {
+  background: var(--af-card-bg);
+  border: 1px solid var(--af-border);
+  border-radius: 6px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stat-label {
+  color: var(--af-text-secondary);
+  font-size: 13px;
+}
+
+.stat-value {
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-value.is-danger {
+  color: var(--el-color-danger);
+}
+
+.stat-value.is-success {
+  color: var(--el-color-success);
+}
+
+.stat-value.is-primary {
+  color: var(--el-color-primary);
+}
+
+.stat-foot {
+  color: var(--af-text-muted);
+  font-size: 12px;
+}
+
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.health-block-title {
+  font-size: 13px;
+  color: var(--af-text-secondary);
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.health-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 3px 0;
+  font-size: 13px;
+}
+
+.health-row .value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-box {
+  width: 100%;
+  height: 260px;
+}
+
+.empty-compact {
+  padding: 12px 0;
+}
+
+/* Episode 详情三区域时间轴 */
+.timeline-panel {
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.json-pre {
+  margin: 0;
+  padding: 10px 12px;
+  background: #f6f8fa;
+  border: 1px solid var(--af-border);
+  border-radius: 4px;
+  max-height: 320px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.artifact-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+/* Markdown 渲染区 */
+.markdown-body {
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--af-text);
+  word-break: break-word;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  font-weight: 600;
+  margin: 16px 0 8px;
+  line-height: 1.4;
+}
+
+.markdown-body h1 {
+  font-size: 20px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--af-border);
+}
+
+.markdown-body h2 {
+  font-size: 17px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--af-border);
+}
+
+.markdown-body h3 {
+  font-size: 15px;
+}
+
+.markdown-body p {
+  margin: 8px 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 22px;
+  margin: 8px 0;
+}
+
+.markdown-body li {
+  margin: 2px 0;
+}
+
+.markdown-body code {
+  background: #f2f3f5;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.markdown-body pre {
+  background: #f6f8fa;
+  border: 1px solid var(--af-border);
+  border-radius: 4px;
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+
+.markdown-body pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.markdown-body blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--el-color-primary-light-5);
+  color: var(--af-text-secondary);
+  background: #f8f9fb;
+}
+
+.markdown-body table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--af-border);
+  padding: 6px 10px;
+  text-align: left;
+  font-size: 12.5px;
+}
+
+.markdown-body th {
+  background: #fafafa;
+}
+
+.markdown-body a {
+  color: var(--el-color-primary);
+}
+
+/* 报告结构化区块 */
+.report-section {
+  margin-bottom: 14px;
+}
+
+.report-section-title {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+
+.report-list {
+  margin: 0;
+  padding-left: 20px;
+  line-height: 1.7;
+}
+
+.report-list li {
+  margin: 2px 0;
+}
+
+/* 表单提示 */
+.form-hint {
+  color: var(--af-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin-top: 2px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 16px;
+}
+
+.dialog-error {
+  margin-bottom: 12px;
+}
+
+@media (max-width: 1200px) {
+  .stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .health-grid {
+    grid-template-columns: 1fr;
+  }
+}
