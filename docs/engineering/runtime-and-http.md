@@ -13,7 +13,7 @@ Go 对外 HTTP 在 `backend/internal/api/server.go`。`Handler()` 返回 `gin.Ne
 | GET | `/healthz` | 进程存活，返回 `{"status":"ok"}` |
 | GET | `/readyz` | 就绪检查。2 秒超时内对数据库执行 `SELECT 1`，通过返回 200 `{"status":"ok"}`；失败返回 503 `{"status":"unavailable","database":"down"}`。只检查数据库，不检查 Kafka 或模型 |
 | GET | `/api/v1/dashboard/summary` | 总览聚合：服务/目标/Episode 计数、最近 Episode、最近 30 分钟监控趋势（5 分钟分桶，最多 6 桶） |
-| GET | `/api/v1/services` | 服务列表，支持 `limit`（默认 50，最大 200）、`offset`、`status`（NORMAL、ABNORMAL、UNKNOWN） |
+| GET | `/api/v1/services` | 服务列表，支持 `limit`（默认 50，最大 200）、`offset`、`status`（NORMAL、ABNORMAL、UNKNOWN）和 `q`（对 name / service_key 做不区分大小写模糊匹配，输入中的 `%`、`_` 按字面处理） |
 | POST | `/api/v1/services` | 创建 Service 及其监控目标，返回 201 |
 | GET | `/api/v1/services/:service_id` | Service 详情，含 targets |
 | PATCH | `/api/v1/services/:service_id` | 修改服务元数据（name、description、enabled） |
@@ -24,7 +24,7 @@ Go 对外 HTTP 在 `backend/internal/api/server.go`。`Handler()` 返回 `gin.Ne
 | POST | `/api/v1/services/:service_id/events` | 应用侧事件上报 |
 | GET | `/api/v1/episodes` | Episode 列表，支持 `status`、`service_id`、`from`、`to`、`limit`（默认 20，最大 100）、`offset` |
 | GET | `/api/v1/episodes/:episode_id` | Episode 详情 |
-| GET | `/api/v1/episodes/:episode_id/timeline` | Episode 三区域时间轴 |
+| GET | `/api/v1/episodes/:episode_id/timeline` | Episode 三区域时间轴；额外返回逐采样点 `monitor_points` |
 | GET | `/api/v1/episodes/:episode_id/artifacts` | 产物全文，`type=INVESTIGATION` 或 `DIAGNOSIS_REPORT` |
 | POST | `/api/v1/episodes/:episode_id/retry-diagnosis` | 重试诊断 |
 | POST | `/api/v1/episodes/:episode_id/retry-archive` | 重试归档 |
@@ -33,7 +33,9 @@ Go 对外 HTTP 在 `backend/internal/api/server.go`。`Handler()` 返回 `gin.Ne
 
 JSON 对象仍用 `DisallowUnknownFields`。应用事件正文仍只读前 1MiB。方法不匹配返回 405。错误体仍是 `{"error_code","message"}`，删除类接口成功返回 204。
 
-Episode 视图在本次交付中补充了 `service_name` 与 `updated_at`（`active_task_status` 等原有字段继续保留）；服务列表返回聚合后的 `monitor_status`；监控目标补充 `last_check_at`。
+Episode 视图在本次交付中补充了 `service_name`、`updated_at`、`active_task_type` 与 `has_diagnosis_report`（`active_task_status` 等原有字段继续保留）；服务列表返回聚合后的 `monitor_status`，服务详情返回所有监控源中最新的 `last_check_at`；监控目标补充 `last_check_at`。
+
+`GET /api/v1/episodes/:episode_id/timeline` 的 `monitor_points` 取该 Episode 起点之后最近 200 条监控采样，按 `point_seq` 升序返回，字段为 `point_seq`、`target_id`、`target_key`、`target_type`、`observed_at`、`check_status`、`status_class`、`error_class`（后两者取自 `diagnostic_fields`，缺省为空字符串）。没有采样点时返回 `[]`，不是 `null`；原有时间轴字段不变。
 
 中间件：
 
@@ -43,6 +45,14 @@ Episode 视图在本次交付中补充了 `service_name` 与 `updated_at`（`act
 - `SetTrustedProxies` 使用空列表，不信任转发头。
 
 产物全文仍通过 `ArtifactSource.GetArtifact(*http.Request, ...)` 调 Python gRPC。未配置 agent 地址时返回 503 `AGENT_UNAVAILABLE`。
+
+## 任务失败与监控自愈
+
+Agent 的失败回调分两段：`error_code` 只放异常类型（服务端字段是 `varchar(100)`，超长会被截断），完整异常文本放 `error_message`（`text`）。Agent 日志会记录 traceback。
+
+诊断任务进入 `RETRY_WAIT` 或 `FAILED` 时，Go 会把该任务占用的 `episode_input_versions` 退回 `PENDING` 并清空 `assigned_task_id`。否则后续采样会在 `ensureDiagnosisTask` 遇到 `INPUT_GAP: unprocessed input versions are not contiguous`，导致该服务监控永久停滞。
+
+启动时 `backfillTasks` 还会自愈历史数据：把仍被 `FAILED` 任务占用（`ASSIGNED`）的输入版本退回 `PENDING`，使旧 Episode 能重新生成诊断任务。若 Agent 真实模型输出结构异常，任务会按重试策略重新排队，而不是让监控采样一直失败。
 
 ## Kubernetes 工作负载观察
 
@@ -141,6 +151,9 @@ Checkpoint 不是调查文档或 FD 的权威存储。
 | `AGENT_HTTP_ADDR` | `0.0.0.0:8000` | Python FastAPI，不映射到宿主机 |
 | `ALERTFLOW_GRPC_TARGET` | `127.0.0.1:9090` | Python 访问 Java gRPC。Java 再转发到 Go |
 | `ALERTFLOW_AGENT_GRPC_TARGET` | 空则产物接口 503 | Go 访问 Java gRPC，Java 再访问 Python |
+| `ALERTFLOW_LLM_API_KEY` | 空 | Python Agent 的模型 API Key。为空时使用 ScriptedModel，不调用真实模型 |
+| `ALERTFLOW_LLM_BASE_URL` | `https://api.openai.com/v1` | OpenAI 兼容模型接口地址 |
+| `ALERTFLOW_LLM_MODEL` | `gpt-4o-mini` | 模型名称 |
 | `INTEGRATION_GRPC_ADDR` | `:9091` | Java gRPC |
 | `INTEGRATION_HTTP_ADDR` | `:8081` | Java HTTP，不映射到宿主机 |
 | `ALERTFLOW_KNOWLEDGE_ENABLED` | `false` | 为 `true` 时诊断图调用 Knowledge Agent。Compose 里还要加 `--profile knowledge` |
@@ -149,11 +162,45 @@ Checkpoint 不是调查文档或 FD 的权威存储。
 | `KNOWLEDGE_UPLOAD_MAX_BYTES` | `33554432` | 传给 Knowledge Agent 的单文件上限 |
 | `KNOWLEDGE_INGEST_MAX_ATTEMPTS` | `5` | 传给 Knowledge Agent 的摄取尝试上限 |
 | `KNOWLEDGE_AGENT_MODE` | `false` | Knowledge Agent 容器内设为 `true`。Legacy RAG 不设置 |
+| `FAULT_PORT` | `18081` | Compose 中 fault 辅助服务发布到宿主机回环地址的端口，仅用于本地演练 |
 | `ALERTFLOW_MCP_ENDPOINT` | 空 | Java MCP Gateway |
 | `ALERTFLOW_DATABASE_URL` | 本地 5432 | 两侧共用一个实例、两个 schema |
 | `AGENT_SHUTDOWN_TIMEOUT` | `20` | 等待正在执行的任务的秒数 |
 
 镜像健康检查：Go 镜像访问容器内 `http://127.0.0.1:8080/healthz`，Python 镜像访问 `http://127.0.0.1:8000/health/live`（使用 Python 标准库，不另外安装 curl）；Java 镜像访问 `/actuator/health/liveness`。
+
+## HTTP 故障演练
+
+`deploy/fault.py` 是本地演练用的 HTTP 故障辅助服务。Compose 中服务名为 `fault`，容器内监听 `8081`，宿主机映射为 `127.0.0.1:${FAULT_PORT:-18081}:8081`，只绑定回环地址。
+
+| 请求 | 行为 |
+|---|---|
+| `GET /health` | 未恢复时返回 500（正文 `down`），恢复后返回 200（正文 `ok`） |
+| `POST /break` | 进入故障状态，幂等 |
+| `POST /recover` | 恢复正常，幂等 |
+| 其他 GET | 404 |
+| 未知 POST | 404 |
+
+手工演练（在宿主机执行）：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18081/health   # 故障时 500，恢复后 200
+curl -s -X POST http://127.0.0.1:18081/break
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18081/health   # 500
+curl -s -X POST http://127.0.0.1:18081/recover
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18081/health   # 200
+```
+
+监控目标地址必须使用 Compose 网络内的 `http://fault:8081/health`，不能写 `localhost` 或 `127.0.0.1`。
+
+`deploy/e2e.sh` 覆盖完整闭环：
+
+1. 启动 Compose；`COMPOSE_PROFILES` 含 `knowledge` 或 `ALERTFLOW_KNOWLEDGE_ENABLED=true` 时一并启动 Knowledge Agent。
+2. 以 `orders-api` 为前缀创建服务与 HTTP 目标 `http://fault:8081/health`（间隔 1000ms、超时 500ms、失败阈值 3、恢复阈值 2），`POST /break` 制造故障，等待真实采样确认服务 ABNORMAL 且恰好一个 ACTIVE Episode。
+3. 提交应用侧 `DIAGNOSTIC_INFO` 事件，等待 Agent 任务 SUCCEEDED，校验 `investigation.md` 与 `diagnosis_report` 可读。没有模型 Key 时使用 ScriptedModel，脚本只验证链路，不宣称真实诊断质量。
+4. `POST /recover` 并提交 `HEALTH_STATUS NORMAL` 事件，等待 Episode ARCHIVED。
+5. 校验演练前已启用的监控目标被恢复；脚本创建的测试数据可整体销毁。
+6. 仅当 `COMPOSE_PROFILES` 包含 `knowledge` 或 `ALERTFLOW_KNOWLEDGE_ENABLED=true` 时，才校验 FD 与 Knowledge 检索。
 
 ## 本地和 Compose
 
@@ -166,6 +213,6 @@ docker compose -f deploy/docker-compose.yml config
 deploy/e2e.sh
 ```
 
-`deploy/e2e.sh` 在闭环之外，会在 agent 容器内请求 `/health/live` 和 `/health/ready`，并确认 `search_faults` 能召回本次服务的 FD。脚本开始前先记录已经启用的 `service_monitor_targets.target_id`，只暂停这些行，退出时按这些 id 恢复。本次新建的目标不在这份名单里。SIGKILL 不会执行恢复。
+`deploy/e2e.sh` 覆盖从 fault 辅助服务真实采样到 Episode 归档的闭环，步骤见上文「HTTP 故障演练」。Knowledge Agent 与 FD 校验只在显式启用时执行。脚本开始前先记录已经启用的 `service_monitor_targets.target_id`，只暂停这些行，退出时按这些 id 恢复。本次新建的目标不在这份名单里。SIGKILL 不会执行恢复。
 
 Knowledge Agent 的上传上限和摄取尝试次数由 Compose 传入，默认 32MiB 和 5 次。`0` 或负数会在 Knowledge Agent 启动时被拒绝。索引刷新失败不会把已经 READY 的摄取任务改回 PENDING。这些命令是否在本次交付执行、真实结果如何，以交付报告为准；不要把未执行过的检查写成已经通过。Kubernetes 清单未在真实集群上运行验证。
