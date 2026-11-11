@@ -37,7 +37,7 @@ public class A2AKnowledgeClient implements KnowledgeClient {
         this(System.getenv("KNOWLEDGE_A2A_TOKEN"));
     }
 
-    A2AKnowledgeClient(String token) {
+    public A2AKnowledgeClient(String token) {
         this.token = token == null ? "" : token;
     }
 
