@@ -1,8 +1,5 @@
-.venv/bin
-.venv/include
-.venv/lib/python3.12/site-packages/**/__pycache__
+.venv
 tests
 **/__pycache__
 **/*.pyc
 **/.pytest_cache
-uv.lock

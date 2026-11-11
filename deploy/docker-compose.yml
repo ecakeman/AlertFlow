@@ -7,6 +7,8 @@ services:
       POSTGRES_USER: alertflow
       POSTGRES_PASSWORD: alertflow
       POSTGRES_DB: alertflow
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U alertflow"]
       interval: 2s
@@ -52,10 +54,23 @@ services:
       ALERTFLOW_KAFKA_TOPIC: alertflow.agent-task-ready.v1
       ALERTFLOW_AGENT_GRPC_TARGET: integration:9091
       ALERTFLOW_REDIS_URL: redis://redis:6379/0
+      # 本地 Compose 默认关闭 K8s 监控，开发者不需要集群或 kubeconfig。
+      ALERTFLOW_K8S_ENABLED: ${ALERTFLOW_K8S_ENABLED:-false}
+      ALERTFLOW_K8S_NAMESPACE: ${ALERTFLOW_K8S_NAMESPACE:-default}
     ports:
       - "18080:8080"
     depends_on:
       postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    ports:
+      - "${FRONTEND_PORT:-13000}:80"
+    depends_on:
+      alertflow:
         condition: service_healthy
 
   agent:
@@ -68,6 +83,10 @@ services:
       ALERTFLOW_KNOWLEDGE_ENABLED: ${ALERTFLOW_KNOWLEDGE_ENABLED:-false}
       ALERTFLOW_MCP_ENDPOINT: http://integration:8081/mcp
       ALERTFLOW_MCP_TOKEN: main-agent-token
+      # 模型密钥默认留空，此时 Agent 使用 ScriptedModel，不调用真实模型。
+      ALERTFLOW_LLM_API_KEY: ${ALERTFLOW_LLM_API_KEY:-}
+      ALERTFLOW_LLM_BASE_URL: ${ALERTFLOW_LLM_BASE_URL:-https://api.openai.com/v1}
+      ALERTFLOW_LLM_MODEL: ${ALERTFLOW_LLM_MODEL:-gpt-4o-mini}
       AGENT_GRPC_ADDR: 0.0.0.0:9000
       AGENT_HTTP_ADDR: 0.0.0.0:8000
       PYTHONPATH: /app/src
@@ -155,4 +174,5 @@ services:
         condition: service_completed_successfully
 
 volumes:
+  postgres-data:
   knowledge-data:

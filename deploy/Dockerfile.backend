@@ -1,14 +1,25 @@
+# Go Backend：构建阶段编译静态二进制，运行阶段仅保留二进制与健康检查工具。
 FROM golang:1.25.7-bookworm AS build
 WORKDIR /src
+# 国内网络默认走 goproxy.cn；如需官方源可通过 --build-arg GOPROXY=https://proxy.golang.org,direct 覆盖。
+ARG GOPROXY=https://goproxy.cn,direct
+ENV GOPROXY=${GOPROXY}
 COPY go.mod go.sum ./
-ENV GOPROXY=https://goproxy.cn,direct
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /out/alertflow ./backend/cmd/alertflow
+# CGO 关闭后产物为静态二进制，不依赖运行镜像的 libc。
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/alertflow ./backend/cmd/alertflow
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+# curl 供 HEALTHCHECK 使用；运行时使用非 root 用户（uid 10001）。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 alertflow \
+    && useradd --system --uid 10001 --gid alertflow --no-create-home --shell /usr/sbin/nologin alertflow
 COPY --from=build /out/alertflow /usr/local/bin/alertflow
+USER 10001:10001
 EXPOSE 8080 9090
-HEALTHCHECK --interval=2s --timeout=3s --retries=30 CMD curl -fsS http://127.0.0.1:8080/healthz
+HEALTHCHECK --interval=2s --timeout=3s --start-period=10s --retries=30 \
+    CMD curl -fsS http://127.0.0.1:8080/healthz || exit 1
 ENTRYPOINT ["alertflow"]

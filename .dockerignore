@@ -1,6 +1,14 @@
-agent/.venv
-agent/dist
+# 构建上下文排除项（Go Backend 与 Java Integration 使用仓库根目录作为 context）
+.git
+.venv
+**/.venv
+**/dist
+**/node_modules
+**/target
 **/.pytest_cache
 **/__pycache__
 **/*.pyc
-.git
+agent/dist
+frontend/dist
+deploy/k8s
+docs
