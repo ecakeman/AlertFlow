@@ -1,5 +1,6 @@
 import inspect
 import json
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -10,6 +11,8 @@ from alertflow_agent.artifacts import read_artifact, render_investigation, write
 from alertflow_agent.schemas import DiagnosisReport, FaultSearchIndex, QueryTimelineInput, SearchFaultsInput
 
 RPC_TIMEOUT = 60
+LOGGER = logging.getLogger(__name__)
+ACTION_TYPES = {"query_timeline", "search_faults", "invoke_knowledge_agent", "call_mcp_tool", "finish"}
 
 
 class ScriptedModel:
@@ -58,16 +61,30 @@ class OpenAICompatibleModel:
 
     async def next_action(self, state: dict) -> dict:
         prompt = {
-            "instruction": "只输出 JSON。action.type 取 query_timeline、search_faults、invoke_knowledge_agent、call_mcp_tool 或 finish。call_mcp_tool 必须带 name，且 name 来自 mcp_tools。不能填写 URL。finish 时 report 必须含 summary、observations、hypotheses、unknowns、next_steps。",
+            "instruction": "只输出 JSON 对象。action.type 取 query_timeline、search_faults、invoke_knowledge_agent、call_mcp_tool 或 finish。call_mcp_tool 必须带 name，且 name 来自 mcp_tools。不能填写 URL。finish 时 report 必须含 summary、observations、hypotheses、unknowns、next_steps。所有面向用户的文字必须使用简体中文。",
             "state": {k: state.get(k) for k in ("episode_id", "service_name", "input_version_from", "input_version_to", "timeline_called", "search_called", "knowledge_called", "mcp_called", "timeline_records", "search_hits", "knowledge_results", "mcp_tools", "mcp_results")},
         }
         body = {
             "model": self.model,
             "messages": [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False, default=str)}],
             "response_format": {"type": "json_object"},
+            "max_tokens": 8192,
         }
         payload = await _post_json(self.client, f"{self.base_url}/chat/completions", body, self.api_key)
-        action = json.loads(payload["choices"][0]["message"]["content"])
+        raw = payload["choices"][0]["message"]["content"]
+        action = json.loads(raw)
+        if not isinstance(action, dict):
+            raise ValueError("model response is not a JSON object")
+        # 兼容部分 OpenAI 兼容服务（如 deepseek-flash）把动作包在 {"action": {...}} 中的输出，
+        # 外层 type 可能是 "action" 之类的包装值，因此以内层合法的 action.type 为准。
+        if isinstance(action.get("action"), dict) and action["action"].get("type") in ACTION_TYPES:
+            merged = dict(action["action"])
+            if "report" in action and "report" not in merged:
+                merged["report"] = action["report"]
+            action = merged
+        if action.get("type") not in ACTION_TYPES:
+            LOGGER.warning("model returned unsupported action: %s", raw[:1000])
+            raise ValueError(f"unsupported action type: {action.get('type')!r}")
         if action.get("type") == "finish":
             DiagnosisReport.model_validate(action["report"])
         return action
@@ -266,11 +283,12 @@ class ArchiveModel:
         body = {
             "model": model.model,
             "messages": [{"role": "user", "content": json.dumps({
-                "instruction": "只根据材料提取 FaultSearchIndex，字段 summary,symptoms,observations,diagnosis。不要新增分类字段。",
+                "instruction": "只输出 JSON 对象。只根据材料提取 FaultSearchIndex，字段 summary,symptoms,observations,diagnosis。所有文字必须使用简体中文。不要新增分类字段。",
                 "investigation": investigation[:8000],
                 "diagnosis_report": report,
             }, ensure_ascii=False)}],
             "response_format": {"type": "json_object"},
+            "max_tokens": 8192,
         }
         payload = await _post_json(model.client, f"{model.base_url}/chat/completions", body, model.api_key)
         return FaultSearchIndex.model_validate(json.loads(payload["choices"][0]["message"]["content"]))

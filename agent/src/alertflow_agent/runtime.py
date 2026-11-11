@@ -1,4 +1,6 @@
 import asyncio
+import contextlib
+import logging
 import os
 import signal
 from datetime import datetime, timezone
@@ -25,6 +27,8 @@ except Exception:  # pragma: no cover
     AsyncPostgresSaver = None
 
 RPC_TIMEOUT = 30
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _int_env(name: str, default: int) -> int:
@@ -119,10 +123,12 @@ class SystemClient:
 
     async def complete(self, task, outcome: str, processed: int = 0, fd_id: str = "", error: str = ""):
         kind = agent_pb2.AGENT_TASK_TYPE_ARCHIVE if task["task_type"] == "ARCHIVE" else agent_pb2.AGENT_TASK_TYPE_DIAGNOSIS
+        # Go 侧 last_error_code 为 varchar(100)，这里拆分为短错误码与完整错误信息，避免回调被 SQL 拒绝。
+        error_code = (error.split(":", 1)[0].strip() or "AGENT_ERROR")[:100]
         ack = await self.stub.CompleteTask(agent_pb2.CompleteTaskRequest(
             task_id=task["task_id"], episode_id=task["episode_id"], task_type=kind,
             execution_generation=int(task["execution_generation"]), outcome=outcome,
-            processed_input_version=int(processed), fd_id=fd_id, error_code=error, error_message=error,
+            processed_input_version=int(processed), fd_id=fd_id, error_code=error_code, error_message=error[:400],
         ), timeout=RPC_TIMEOUT)
         if not ack.accepted:
             raise RuntimeError(ack.message or "complete rejected")
@@ -261,10 +267,22 @@ class AgentRuntime:
             finally:
                 self.queue.task_done()
 
+    async def _heartbeat_loop(self, client, task):
+        """真实模型推理可能持续数十秒，期间周期续租，避免执行租约过期。"""
+        while True:
+            await asyncio.sleep(10)
+            try:
+                await client.heartbeat(task)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
+
     async def execute(self, task: dict):
         conn = await connect(self.dsn)
         thread_id = task.get("thread_id") or f"diagnosis:{task['episode_id']}"
         key = None
+        heartbeat = None
         client = SystemClient(agent_pb2_grpc.SystemGatewayServiceStub(self.channel), conn)
         client.invocation = self.invocation_client
         client.mcp = self.mcp_client
@@ -273,6 +291,7 @@ class AgentRuntime:
             await mark_running(conn, task["task_id"])
             await client.started(task)
             await client.heartbeat(task)
+            heartbeat = asyncio.create_task(self._heartbeat_loop(client, task))
             if task["task_type"] == "ARCHIVE":
                 snap = await client.get_input(task)
                 task["service_id"] = snap.service_id
@@ -292,15 +311,20 @@ class AgentRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            LOGGER.exception("task %s failed", task.get("task_id"))
             try:
                 await client.complete(task, "RETRYABLE_FAILURE", error=type(exc).__name__ + ": " + str(exc)[:400])
-            except Exception:
-                pass
+            except Exception as complete_exc:
+                LOGGER.warning("complete task %s failed: %r", task.get("task_id"), complete_exc)
             try:
                 await mark_finished(conn, task["task_id"], "FAILED", {"error": str(exc)[:400]}, "SENT")
             except Exception:
                 await conn.rollback()
         finally:
+            if heartbeat is not None:
+                heartbeat.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await heartbeat
             if key is not None:
                 try:
                     await advisory_unlock(conn, key)

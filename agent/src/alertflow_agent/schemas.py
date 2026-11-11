@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class DiagnosisReport(BaseModel):
@@ -21,6 +21,15 @@ class FaultSearchIndex(BaseModel):
     symptoms: list[str] = Field(default_factory=list, description="服务实际出现的异常表现")
     observations: list[str] = Field(default_factory=list, description="调查中实际获取并确认的关键发现")
     diagnosis: list[str] = Field(default_factory=list, description="最终诊断及有依据的可能原因，保留确定程度")
+
+    @field_validator("symptoms", "observations", "diagnosis", mode="before")
+    @classmethod
+    def coerce_text_list(cls, value):
+        """模型偶尔把列表字段写成单个字符串，这里统一成列表，避免归档任务整单失败。"""
+        if isinstance(value, str):
+            text = value.strip()
+            return [text] if text else []
+        return value
 
 
 class QueryTimelineInput(BaseModel):
