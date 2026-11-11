@@ -58,6 +58,9 @@ services:
     command: ["python", "/fault.py"]
     volumes:
       - ./fault.py:/fault.py:ro
+    # 仅绑定宿主机回环地址，便于手工触发演练；不对局域网或公网开放。
+    ports:
+      - "127.0.0.1:${FAULT_PORT:-18081}:8081"
 
   alertflow:
     build:

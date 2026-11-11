@@ -73,7 +73,30 @@ public class GrpcBridge implements AutoCloseable {
         server.shutdown();
         python.shutdown();
         go.shutdown();
-        server.awaitTermination(5, TimeUnit.SECONDS);
+
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        try {
+            long remaining = Math.max(0, deadline - System.nanoTime());
+            if (!server.awaitTermination(remaining, TimeUnit.NANOSECONDS)) {
+                server.shutdownNow();
+            }
+
+            remaining = Math.max(0, deadline - System.nanoTime());
+            if (!python.awaitTermination(remaining, TimeUnit.NANOSECONDS)) {
+                python.shutdownNow();
+            }
+
+            remaining = Math.max(0, deadline - System.nanoTime());
+            if (!go.awaitTermination(remaining, TimeUnit.NANOSECONDS)) {
+                go.shutdownNow();
+            }
+        } catch (InterruptedException interrupted) {
+            server.shutdownNow();
+            python.shutdownNow();
+            go.shutdownNow();
+            Thread.currentThread().interrupt();
+            throw interrupted;
+        }
     }
 
     public int port() {
