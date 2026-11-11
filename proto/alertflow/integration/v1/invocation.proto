@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package alertflow.integration.v1;
+
+option go_package = "github.com/ecakeman/alertflow/gen/integration/v1;integrationv1";
+option java_multiple_files = true;
+option java_package = "com.alertflow.gen.integration.v1";
+option java_outer_classname = "InvocationProto";
+
+import "google/protobuf/struct.proto";
+
+// 一次知识检索调用。同一 invocation_id 重试必须幂等。
+service AgentInvocationService {
+  rpc InvokeAgent(InvokeAgentRequest) returns (InvokeAgentResponse);
+}
+
+message InvokeAgentRequest {
+  string invocation_id = 1;
+  string target_agent_id = 2;
+  string skill_id = 3;
+  google.protobuf.Struct input = 4;
+  int64 timeout_ms = 5;
+  string traceparent = 6;
+}
+
+message InvokeAgentResponse {
+  string invocation_id = 1;
+  string status = 2;
+  google.protobuf.Struct result = 3;
+  string error_code = 4;
+  string safe_message = 5;
+}

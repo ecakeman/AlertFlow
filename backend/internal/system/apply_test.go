@@ -294,21 +294,36 @@ func TestRegionHashAndResolution(t *testing.T) {
 	if err != nil || done.Status != EpisodeResolved || done.ActiveTaskType != TaskArchive {
 		t.Fatalf("resolved %+v %v", done, err)
 	}
-	var ready int
-	if _, err := s.DB.Exec(`INSERT INTO cognitive.fault_documents
-		(fd_id, episode_id, service_id, archived_at, investigation_content, diagnosis_report, search_index, search_text, embedding_model, index_status, created_at, updated_at)
-		VALUES ($1,$2,$3,now(),'doc','{}','{}','text','test','READY',now(),now())`,
-		uuid.New(), done.EpisodeID, svc); err != nil {
-		t.Fatal(err)
+	fd := uuid.New()
+	rejected, err := s.CompleteTask(ctx, CompleteInput{
+		TaskID: *done.ActiveTaskID, EpisodeID: done.EpisodeID, TaskType: TaskArchive,
+		Generation: 1, Outcome: "SUCCEEDED", FDID: fd.String(),
+	})
+	if err != nil || rejected.Accepted {
+		t.Fatalf("archive without receipt %+v %v", rejected, err)
 	}
-	_ = ready
-	var fd string
-	if err := s.DB.QueryRow(`SELECT fd_id FROM cognitive.fault_documents WHERE episode_id=$1`, done.EpisodeID).Scan(&fd); err != nil {
-		t.Fatal(err)
+	hash := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	ok, message, err := s.RegisterFaultDocument(ctx, RegisterFaultDocumentInput{
+		TaskID: *done.ActiveTaskID, EpisodeID: done.EpisodeID, Generation: 1, FDID: fd.String(), ContentHash: hash,
+	})
+	if err != nil || !ok || message != "registered" {
+		t.Fatalf("register %+v %s %v", ok, message, err)
+	}
+	again, message, err := s.RegisterFaultDocument(ctx, RegisterFaultDocumentInput{
+		TaskID: *done.ActiveTaskID, EpisodeID: done.EpisodeID, Generation: 1, FDID: fd.String(), ContentHash: hash,
+	})
+	if err != nil || !again || message != "duplicate" {
+		t.Fatalf("duplicate register %+v %s %v", again, message, err)
+	}
+	stale, message, err := s.RegisterFaultDocument(ctx, RegisterFaultDocumentInput{
+		TaskID: *done.ActiveTaskID, EpisodeID: done.EpisodeID, Generation: 0, FDID: fd.String(), ContentHash: hash,
+	})
+	if err != nil || stale || message != "stale execution generation" {
+		t.Fatalf("stale generation %+v %s %v", stale, message, err)
 	}
 	archived, err := s.CompleteTask(ctx, CompleteInput{
 		TaskID: *done.ActiveTaskID, EpisodeID: done.EpisodeID, TaskType: TaskArchive,
-		Generation: 1, Outcome: "SUCCEEDED", FDID: fd,
+		Generation: 1, Outcome: "SUCCEEDED", FDID: fd.String(),
 	})
 	if err != nil || !archived.Accepted {
 		t.Fatalf("archive %+v %v", archived, err)

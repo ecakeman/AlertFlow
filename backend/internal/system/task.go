@@ -265,7 +265,7 @@ func (s *Store) CompleteTask(ctx context.Context, in CompleteInput) (TaskAck, er
 					ack.Message = "archive success requires fd_id"
 					return nil
 				}
-				ready, err := archiveReady(ctx, tx, ep.ID, in.FDID)
+				ready, err := archiveReady(ctx, tx, ep.ID, in.TaskID, in.Generation, in.FDID)
 				if err != nil {
 					return err
 				}
@@ -346,22 +346,88 @@ func (s *Store) CompleteTask(ctx context.Context, in CompleteInput) (TaskAck, er
 	return ack, err
 }
 
-func archiveReady(ctx context.Context, tx *sql.Tx, episodeID uuid.UUID, fdID string) (bool, error) {
-	var status string
-	err := tx.QueryRowContext(ctx, `
-		SELECT index_status FROM cognitive.fault_documents WHERE episode_id=$1 AND fd_id=$2`, episodeID, fdID).Scan(&status)
+func archiveReady(ctx context.Context, tx *sql.Tx, episodeID, taskID uuid.UUID, generation int64, fdID string) (bool, error) {
+	parsed, err := uuid.Parse(fdID)
+	if err != nil {
+		return false, nil
+	}
+	var found string
+	err = tx.QueryRowContext(ctx, `
+		SELECT fd_id FROM system.episode_fault_document_refs
+		WHERE episode_id=$1 AND task_id=$2 AND execution_generation=$3 AND fd_id=$4`,
+		episodeID, taskID, generation, parsed).Scan(&found)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	return status == "READY", nil
+	return true, nil
 }
 
-// Go 读 cognitive.fault_documents 只用于归档成功确认。规格要求跨侧业务访问走 gRPC。
-// 这里是 Go 在接受 CompleteTask 前核对 Python 已声明的 fd_id 确实 READY，避免未持久化就 ARCHIVED。
-// 认知侧写入仍只由 Python 完成。
+// RegisterFaultDocumentInput 是 Python 在 FD 就绪后交给 Go 的回执。
+type RegisterFaultDocumentInput struct {
+	TaskID       uuid.UUID
+	EpisodeID    uuid.UUID
+	Generation   int64
+	FDID         string
+	ContentHash  string
+}
+
+// RegisterFaultDocument 把归档回执写入 system 表。相同内容重复登记是幂等的。
+func (s *Store) RegisterFaultDocument(ctx context.Context, in RegisterFaultDocumentInput) (bool, string, error) {
+	registered := false
+	message := ""
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		ep, task, err := s.lockTask(ctx, tx, in.TaskID, in.EpisodeID)
+		if err != nil {
+			return err
+		}
+		if ep == nil {
+			return nil
+		}
+		if task.Type != TaskArchive {
+			message = "not an archive task"
+			return nil
+		}
+		if task.Generation != in.Generation {
+			message = "stale execution generation"
+			return nil
+		}
+		fdID, err := uuid.Parse(in.FDID)
+		if err != nil || len(in.ContentHash) != 64 {
+			message = "fd_id and content_hash are required"
+			return nil
+		}
+		var existing string
+		err = tx.QueryRowContext(ctx, `
+			SELECT content_hash FROM system.episode_fault_document_refs
+			WHERE task_id=$1 AND execution_generation=$2`, in.TaskID, in.Generation).Scan(&existing)
+		if err == nil {
+			if existing != in.ContentHash {
+				message = "idempotency conflict"
+				return nil
+			}
+			registered = true
+			message = "duplicate"
+			return nil
+		}
+		if err != sql.ErrNoRows {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO system.episode_fault_document_refs
+			(episode_id, fd_id, task_id, execution_generation, content_hash, registered_at)
+			VALUES ($1,$2,$3,$4,$5,$6)`,
+			in.EpisodeID, fdID, in.TaskID, in.Generation, in.ContentHash, s.now()); err != nil {
+			return err
+		}
+		registered = true
+		message = "registered"
+		return nil
+	})
+	return registered, message, err
+}
 
 func (s *Store) lockTask(ctx context.Context, tx *sql.Tx, taskID, episodeID uuid.UUID) (*episodeRow, taskRow, error) {
 	var serviceID uuid.UUID

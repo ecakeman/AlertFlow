@@ -20,11 +20,23 @@ class ScriptedModel:
             return {"type": "query_timeline"}
         if not state.get("search_called"):
             return {"type": "search_faults", "query": state.get("service_name") or "abnormal"}
+        if state.get("knowledge_enabled") and not state.get("knowledge_called"):
+            return {"type": "invoke_knowledge_agent"}
+        tools = state.get("mcp_tools") or []
+        if tools and not state.get("mcp_called"):
+            tool = tools[0]
+            return {"type": "call_mcp_tool", "name": tool["name"]}
         records = state.get("timeline_records") or []
         observations = []
         for item in records[:8]:
             content = json.dumps(item.get("content") or {}, ensure_ascii=False, default=str)
             observations.append(f"{item.get('record_type')} {item.get('record_id')} {content}"[:500])
+        if state.get("knowledge_error"):
+            observations.append(f"知识检索失败: {state['knowledge_error']}"[:500])
+        for hit in (state.get("knowledge_results") or [])[:4]:
+            observations.append(str(hit.get("content") or "")[:500])
+        for item in (state.get("mcp_results") or [])[:2]:
+            observations.append(str(item)[:500])
         if not observations:
             observations = ["本批次时间轴没有返回记录"]
         report = DiagnosisReport(
@@ -46,8 +58,8 @@ class OpenAICompatibleModel:
 
     async def next_action(self, state: dict) -> dict:
         prompt = {
-            "instruction": "只输出 JSON。action 取 query_timeline、search_faults 或 finish。finish 时 report 必须含 summary、observations、hypotheses、unknowns、next_steps。",
-            "state": {k: state.get(k) for k in ("episode_id", "service_name", "input_version_from", "input_version_to", "timeline_called", "search_called", "timeline_records", "search_hits")},
+            "instruction": "只输出 JSON。action.type 取 query_timeline、search_faults、invoke_knowledge_agent、call_mcp_tool 或 finish。call_mcp_tool 必须带 name，且 name 来自 mcp_tools。不能填写 URL。finish 时 report 必须含 summary、observations、hypotheses、unknowns、next_steps。",
+            "state": {k: state.get(k) for k in ("episode_id", "service_name", "input_version_from", "input_version_to", "timeline_called", "search_called", "knowledge_called", "mcp_called", "timeline_records", "search_hits", "knowledge_results", "mcp_tools", "mcp_results")},
         }
         body = {
             "model": self.model,
@@ -90,7 +102,7 @@ def build_diagnosis_graph(model, gateway, checkpointer=None):
         return state
 
     async def decide(state: dict):
-        if state.get("tool_rounds", 0) >= 4:
+        if state.get("tool_rounds", 0) >= 6:
             action = ScriptedModel().next_action({**state, "timeline_called": True, "search_called": True})
         else:
             action = await _call_action(model, state)
@@ -162,9 +174,39 @@ def build_diagnosis_graph(model, gateway, checkpointer=None):
     graph.add_node("write", write_node)
     graph.set_entry_point("load")
     graph.add_edge("load", "decide")
-    graph.add_conditional_edges("decide", route, {"query_timeline": "query_timeline", "search_faults": "search_faults", "finish": "write"})
+    async def knowledge_node(state: dict):
+        try:
+            result = await gateway.invoke_knowledge(state)
+            state["knowledge_results"] = result.get("results") or []
+            state["knowledge_error"] = ""
+        except Exception as exc:
+            state["knowledge_error"] = str(exc)
+        state["knowledge_called"] = True
+        state["tool_rounds"] = state.get("tool_rounds", 0) + 1
+        state["current_stage"] = "decide"
+        return state
+
+    async def mcp_node(state: dict):
+        result = await gateway.call_mcp(state, state["action"])
+        state.setdefault("mcp_results", []).append(result)
+        state["mcp_called"] = True
+        state["tool_rounds"] = state.get("tool_rounds", 0) + 1
+        state["current_stage"] = "decide"
+        return state
+
+    graph.add_node("invoke_knowledge_agent", knowledge_node)
+    graph.add_node("call_mcp_tool", mcp_node)
+    graph.add_conditional_edges("decide", route, {
+        "query_timeline": "query_timeline",
+        "search_faults": "search_faults",
+        "invoke_knowledge_agent": "invoke_knowledge_agent",
+        "call_mcp_tool": "call_mcp_tool",
+        "finish": "write",
+    })
     graph.add_edge("query_timeline", "decide")
     graph.add_edge("search_faults", "decide")
+    graph.add_edge("invoke_knowledge_agent", "decide")
+    graph.add_edge("call_mcp_tool", "decide")
     graph.add_edge("write", END)
     return graph.compile(checkpointer=checkpointer)
 
@@ -184,6 +226,8 @@ async def run_diagnosis(model, gateway, task: dict, checkpointer=None) -> dict:
         "app_event_ids": task.get("app_event_ids") or [],
         "tool_rounds": 0,
         "current_stage": "load",
+        "knowledge_enabled": bool(task.get("knowledge_enabled")),
+        "mcp_tools": task.get("mcp_tools") or [],
     }
     return await app.ainvoke(state, config={"configurable": {"thread_id": task["thread_id"]}})
 

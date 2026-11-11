@@ -1,3 +1,5 @@
+import hashlib
+import json
 import os
 from datetime import datetime, timezone
 
@@ -12,6 +14,11 @@ def stable_fd_id(episode_id: str) -> str:
     import uuid
 
     return str(uuid.uuid5(uuid.UUID("6f0c1a4e-1b3a-4b8e-9c1a-0000000000fd"), episode_id))
+
+
+def fault_content_hash(investigation: str, report: dict) -> str:
+    payload = investigation + "\n" + json.dumps(report, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 async def connect(dsn: str | None = None):

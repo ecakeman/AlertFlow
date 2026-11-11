@@ -30,7 +30,9 @@ Python HTTP 只在 `agent/src/alertflow_agent/http_app.py`。
 
 ## gRPC 边界
 
-Go 调用 Python 的 `AgentExecutionService`（`SubmitTask`、`GetArtifact`）。Python 调用 Go 的 `SystemGatewayService`（输入、时间轴、产物登记、开始、心跳、完成）。字段和 proto 没有改。Python 侧 server 和 client 都是 `grpc.aio`，内部调用的 deadline 是 30 秒。模型 HTTP 使用 runtime 持有的 `httpx.AsyncClient`，超时 60 秒。
+Go 的 `SubmitTask` 和 `GetArtifact` 发到 Java `:9091`，再转到 Python。Python 的系统 RPC 发到同一个 Java 端口，再转到 Go `:9090`。字段没有改。Python 侧仍是 `grpc.aio`，内部 deadline 是 30 秒。模型 HTTP 使用 runtime 持有的 `httpx.AsyncClient`，超时 60 秒。这些 gRPC 通道没有 TLS，只作为本地开发配置。
+
+`InvokeAgent` 也在 Java `:9091`。Java 再用 A2A `message/send` 调用 Knowledge Agent。MCP 入口是 Java `http://integration:8081/mcp`。
 
 ## 启动和关闭
 
@@ -72,8 +74,17 @@ Checkpoint 不是调查文档或 FD 的权威存储。
 | `ALERTFLOW_GRPC_ADDR` | `:9090` | Go gRPC，仅 Compose 网络内 |
 | `AGENT_GRPC_ADDR` | `0.0.0.0:9000` | Python gRPC，不映射到宿主机 |
 | `AGENT_HTTP_ADDR` | `0.0.0.0:8000` | Python FastAPI，不映射到宿主机 |
-| `ALERTFLOW_GRPC_TARGET` | `127.0.0.1:9090` | Python 访问 Go gRPC |
-| `ALERTFLOW_AGENT_GRPC_TARGET` | 空则产物接口 503 | Go 访问 Python gRPC |
+| `ALERTFLOW_GRPC_TARGET` | `127.0.0.1:9090` | Python 访问 Java gRPC。Java 再转发到 Go |
+| `ALERTFLOW_AGENT_GRPC_TARGET` | 空则产物接口 503 | Go 访问 Java gRPC，Java 再访问 Python |
+| `INTEGRATION_GRPC_ADDR` | `:9091` | Java gRPC |
+| `INTEGRATION_HTTP_ADDR` | `:8081` | Java HTTP，不映射到宿主机 |
+| `ALERTFLOW_KNOWLEDGE_ENABLED` | `false` | 为 `true` 时诊断图调用 Knowledge Agent。Compose 里还要加 `--profile knowledge` |
+| `KNOWLEDGE_A2A_TOKEN` | 空 | Java 和 Knowledge Agent 的 Bearer token。空值会拒绝 A2A 调用 |
+| `JAVA_TOOL_OPTIONS` | `-Xms128m -Xmx512m` | Integration 的 JVM 参数。Kafka 堆是 512m，Nacos 堆是 512m，三者容器上限都是 768m。Knowledge Agent 也是 768m，镜像固定到 rag `a41981c6265018e5a203e9340b3800686a31a37b` |
+| `KNOWLEDGE_UPLOAD_MAX_BYTES` | `33554432` | 传给 Knowledge Agent 的单文件上限 |
+| `KNOWLEDGE_INGEST_MAX_ATTEMPTS` | `5` | 传给 Knowledge Agent 的摄取尝试上限 |
+| `KNOWLEDGE_AGENT_MODE` | `false` | Knowledge Agent 容器内设为 `true`。Legacy RAG 不设置 |
+| `ALERTFLOW_MCP_ENDPOINT` | 空 | Java MCP Gateway |
 | `ALERTFLOW_DATABASE_URL` | 本地 5432 | 两侧共用一个实例、两个 schema |
 | `AGENT_SHUTDOWN_TIMEOUT` | `20` | 等待正在执行的任务的秒数 |
 
@@ -90,4 +101,6 @@ docker compose -f deploy/docker-compose.yml config
 deploy/e2e.sh
 ```
 
-`deploy/e2e.sh` 在闭环之外，会在 agent 容器内请求 `/health/live` 和 `/health/ready`，并确认 `search_faults` 能召回本次服务的 FD。
+`deploy/e2e.sh` 在闭环之外，会在 agent 容器内请求 `/health/live` 和 `/health/ready`，并确认 `search_faults` 能召回本次服务的 FD。脚本开始前先记录已经启用的 `service_monitor_targets.target_id`，只暂停这些行，退出时按这些 id 恢复。本次新建的目标不在这份名单里。SIGKILL 不会执行恢复。
+
+Knowledge Agent 的上传上限和摄取尝试次数由 Compose 传入，默认 32MiB 和 5 次。`0` 或负数会在 Knowledge Agent 启动时被拒绝。索引刷新失败不会把已经 READY 的摄取任务改回 PENDING。本轮没有执行 `deploy/e2e.sh`，也没有运行测试、构建或 Compose。

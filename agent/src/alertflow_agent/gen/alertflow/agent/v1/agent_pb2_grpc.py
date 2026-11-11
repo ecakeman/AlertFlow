@@ -181,6 +181,11 @@ class SystemGatewayServiceStub:
                 request_serializer=alertflow_dot_agent_dot_v1_dot_agent__pb2.CompleteTaskRequest.SerializeToString,
                 response_deserializer=alertflow_dot_agent_dot_v1_dot_agent__pb2.TaskAck.FromString,
                 _registered_method=True)
+        self.RegisterFaultDocument = channel.unary_unary(
+                '/alertflow.agent.v1.SystemGatewayService/RegisterFaultDocument',
+                request_serializer=alertflow_dot_agent_dot_v1_dot_agent__pb2.RegisterFaultDocumentRequest.SerializeToString,
+                response_deserializer=alertflow_dot_agent_dot_v1_dot_agent__pb2.RegisterFaultDocumentResponse.FromString,
+                _registered_method=True)
 
 
 class SystemGatewayServiceServicer:
@@ -226,6 +231,13 @@ class SystemGatewayServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def RegisterFaultDocument(self, request, context):
+        """归档任务在 FD READY 后登记回执。Go 只写自己的表。
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_SystemGatewayServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -258,6 +270,11 @@ def add_SystemGatewayServiceServicer_to_server(servicer, server):
                     servicer.CompleteTask,
                     request_deserializer=alertflow_dot_agent_dot_v1_dot_agent__pb2.CompleteTaskRequest.FromString,
                     response_serializer=alertflow_dot_agent_dot_v1_dot_agent__pb2.TaskAck.SerializeToString,
+            ),
+            'RegisterFaultDocument': grpc.unary_unary_rpc_method_handler(
+                    servicer.RegisterFaultDocument,
+                    request_deserializer=alertflow_dot_agent_dot_v1_dot_agent__pb2.RegisterFaultDocumentRequest.FromString,
+                    response_serializer=alertflow_dot_agent_dot_v1_dot_agent__pb2.RegisterFaultDocumentResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -422,6 +439,33 @@ class SystemGatewayService:
             '/alertflow.agent.v1.SystemGatewayService/CompleteTask',
             alertflow_dot_agent_dot_v1_dot_agent__pb2.CompleteTaskRequest.SerializeToString,
             alertflow_dot_agent_dot_v1_dot_agent__pb2.TaskAck.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RegisterFaultDocument(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/alertflow.agent.v1.SystemGatewayService/RegisterFaultDocument',
+            alertflow_dot_agent_dot_v1_dot_agent__pb2.RegisterFaultDocumentRequest.SerializeToString,
+            alertflow_dot_agent_dot_v1_dot_agent__pb2.RegisterFaultDocumentResponse.FromString,
             options,
             channel_credentials,
             insecure,
